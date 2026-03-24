@@ -1,0 +1,24 @@
+diff --git a/src/graphics/TFTDisplay.cpp b/src/graphics/TFTDisplay.cpp
+index b662869dd..94e752b4b 100644
+--- a/src/graphics/TFTDisplay.cpp
++++ b/src/graphics/TFTDisplay.cpp
+@@ -111,6 +111,9 @@ class LGFX : public lgfx::LGFX_Device
+ 
+ static LGFX *tft = nullptr;
+ 
++// Expose LovyanGFX device for modules (e.g. MonsterMesh emulator)
++lgfx::LGFX_Device *getLovyanGfx() { return tft; }
++
+ #elif defined(RAK14014)
+ #include <RAK14014_FT6336U.h>
+ #include <TFT_eSPI.h>
+@@ -611,6 +614,9 @@ class LGFX : public lgfx::LGFX_Device
+ 
+ static LGFX *tft = nullptr;
+ 
++// Expose LovyanGFX device for modules (e.g. MonsterMesh emulator)
++lgfx::LGFX_Device *getLovyanGfx() { return tft; }
++
+ #elif defined(ST7796_CS)
+ #include <LovyanGFX.hpp> // Graphics and font library for ST7796 driver chip
+ 

@@ -150,7 +150,7 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
 
 int32_t MonsterMeshModule::runOnce()
 {
-    // Lazy init — wait for Meshtastic to fully boot (it inits SD in FSCommon)
+    // Lazy init — setup() is never called by Meshtastic, so we do it here
     if (!setupDone_) {
         if (millis() < 8000) {
             return 500;
@@ -207,11 +207,8 @@ int32_t MonsterMeshModule::runOnce()
             inputObserver_.observe(inputBroker);
         }
     }
-    if (emuInitialized_) {
-        pollKeyboard();
-    }
     drainTxQueue();
-    return 16;  // run every 16ms (~60fps keyboard polling)
+    return 50;
 }
 
 void MonsterMeshModule::drainTxQueue()
@@ -234,17 +231,27 @@ void MonsterMeshModule::drainTxQueue()
 }
 
 // ── Keyboard ─────────────────────────────────────────────────────────────────
-// installKeyboardHook() and pollKeyboard() are stubs. On non-TFT Meshtastic
-// builds (base T-Deck with OLED), keyboard input is delivered entirely through
-// InputBroker via handleInputEvent() — no direct polling needed.
-//
-// A TFT/LVGL build would need to intercept LVGL keyboard events here, but that
-// requires getLovyanGfx(), which Meshtastic upstream does not expose. Until
-// Meshtastic provides that hook point, the TFT input path remains unimplemented.
-// See audit_log_02.md Finding 3.
+// pollKeyboard() reads the T-Deck keyboard directly via I2C (address 0x55).
+// This bypasses InputBroker entirely, which avoids issues on TFT builds where
+// InputBroker may be disabled or routed through device-ui/LVGL.
+// Called every frame from emuTaskLoop() on Core 1.
 void MonsterMeshModule::installKeyboardHook() {}
 void MonsterMeshModule::handleKeyFromLVGL(uint8_t c) { handleKeyPress(c); lastKeyMs_ = millis(); }
-void MonsterMeshModule::pollKeyboard() {}
+void MonsterMeshModule::pollKeyboard() {
+    // Read T-Deck keyboard at I2C address 0x55
+    // Returns ASCII char on press, 0 on no key
+    static uint32_t dbgCount = 0;
+    Wire.requestFrom((uint8_t)0x55, (uint8_t)1);
+    if (!Wire.available()) {
+        if (++dbgCount % 3000 == 0) Serial.printf("[MM-KB] no Wire.available (poll #%u)\n", dbgCount);
+        return;
+    }
+    uint8_t c = Wire.read();
+    if (c == 0) return;
+    Serial.printf("[MM-KB] key=0x%02X '%c'\n", c, (c >= 0x20 && c < 0x7f) ? c : '?');
+    handleKeyPress(c);
+    lastKeyMs_ = millis();
+}
 
 // ── Emulator task (Core 1) ──────────────────────────────────────────────────
 
@@ -259,6 +266,9 @@ void MonsterMeshModule::emuTaskLoop()
     TickType_t lastWake = xTaskGetTickCount();
 
     while (true) {
+        // Poll T-Deck keyboard directly via I2C (works on both base and TFT builds)
+        pollKeyboard();
+
         // Run emulator frame (always, even when UI is showing Meshtastic screens)
         emu_.runFrame();
 
@@ -358,10 +368,7 @@ void MonsterMeshModule::scanlineCallback(uint8_t line, const uint16_t *pixels320
     if (!self->emulatorActive_) return;  // don't draw if Meshtastic UI is showing
 
     // Access TFT directly via LovyanGFX (available on T-Deck)
-    // getLovyanGfx() is declared here but is NOT currently exposed by Meshtastic
-    // upstream (verified against v2.7.15 and current master/develop). This code
-    // will link only if a future Meshtastic version provides that symbol.
-    // See audit_log_02.md Finding 3.
+    // getLovyanGfx() is provided by patches/TFTDisplay.patch applied to Meshtastic.
 #if HAS_TFT
     extern lgfx::LGFX_Device *getLovyanGfx();
     lgfx::LGFX_Device *gfx = getLovyanGfx();
