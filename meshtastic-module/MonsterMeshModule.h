@@ -68,8 +68,6 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
 
     bool emulatorActive_  = false;
     bool setupDone_       = false;
-    uint8_t setupRetries_ = 0;
-    static constexpr uint8_t MAX_SETUP_RETRIES = 3;
     const char *setupStatus_ = "waiting...";
     char setupStatusBuf_[64] = {};
     bool emuInitialized_  = false;
@@ -83,6 +81,7 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     void pollKeyboard();
     void installKeyboardHook();
 public:
+    bool kbSym_ = false;
     uint32_t lastKeyMs_ = 0;
     void handleKeyFromLVGL(uint8_t c);
     void handleKeyPress(uint8_t ascii);
