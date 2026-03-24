@@ -181,51 +181,63 @@ void MonsterMeshLobby::handleBeacon(const BattlePacket &pkt, uint8_t payloadLen)
 
 void MonsterMeshLobby::sendChallenge(uint32_t targetId) {
     uint32_t id = transport_.nodeId();
-    uint8_t pl[4] = {
+    uint8_t pl[8] = {
         (uint8_t)(id >> 24), (uint8_t)(id >> 16),
-        (uint8_t)(id >>  8), (uint8_t)(id)
+        (uint8_t)(id >>  8), (uint8_t)(id),
+        (uint8_t)(targetId >> 24), (uint8_t)(targetId >> 16),
+        (uint8_t)(targetId >>  8), (uint8_t)(targetId)
     };
     BattlePacket pkt;
     memset(&pkt, 0, sizeof(pkt));
     pkt.type = (uint8_t)PktType::LOBBY_CHALLENGE;
-    memcpy(pkt.payload, pl, 4);
-    transport_.send((uint8_t *)&pkt, BATTLELINK_HDR_SIZE + 4);
+    memcpy(pkt.payload, pl, 8);
+    transport_.send((uint8_t *)&pkt, BATTLELINK_HDR_SIZE + 8);
 }
 
 void MonsterMeshLobby::sendAccept(uint32_t targetId) {
     uint32_t id = transport_.nodeId();
-    uint8_t pl[4] = {
+    uint8_t pl[8] = {
         (uint8_t)(id >> 24), (uint8_t)(id >> 16),
-        (uint8_t)(id >>  8), (uint8_t)(id)
+        (uint8_t)(id >>  8), (uint8_t)(id),
+        (uint8_t)(targetId >> 24), (uint8_t)(targetId >> 16),
+        (uint8_t)(targetId >>  8), (uint8_t)(targetId)
     };
     BattlePacket pkt;
     memset(&pkt, 0, sizeof(pkt));
     pkt.type = (uint8_t)PktType::LOBBY_ACCEPT;
-    memcpy(pkt.payload, pl, 4);
-    transport_.send((uint8_t *)&pkt, BATTLELINK_HDR_SIZE + 4);
+    memcpy(pkt.payload, pl, 8);
+    transport_.send((uint8_t *)&pkt, BATTLELINK_HDR_SIZE + 8);
 }
 
 void MonsterMeshLobby::sendReject(uint32_t targetId) {
     uint32_t id = transport_.nodeId();
-    uint8_t pl[4] = {
+    uint8_t pl[8] = {
         (uint8_t)(id >> 24), (uint8_t)(id >> 16),
-        (uint8_t)(id >>  8), (uint8_t)(id)
+        (uint8_t)(id >>  8), (uint8_t)(id),
+        (uint8_t)(targetId >> 24), (uint8_t)(targetId >> 16),
+        (uint8_t)(targetId >>  8), (uint8_t)(targetId)
     };
     BattlePacket pkt;
     memset(&pkt, 0, sizeof(pkt));
     pkt.type = (uint8_t)PktType::LOBBY_REJECT;
-    memcpy(pkt.payload, pl, 4);
-    transport_.send((uint8_t *)&pkt, BATTLELINK_HDR_SIZE + 4);
+    memcpy(pkt.payload, pl, 8);
+    transport_.send((uint8_t *)&pkt, BATTLELINK_HDR_SIZE + 8);
 }
 
 void MonsterMeshLobby::handleChallenge(const BattlePacket &pkt, uint8_t payloadLen) {
-    if (payloadLen < 4) return;
+    if (payloadLen < 8) return;
 
     uint32_t fromId = ((uint32_t)pkt.payload[0] << 24) |
                       ((uint32_t)pkt.payload[1] << 16) |
                       ((uint32_t)pkt.payload[2] <<  8) |
                       pkt.payload[3];
 
+    uint32_t toId = ((uint32_t)pkt.payload[4] << 24) |
+                    ((uint32_t)pkt.payload[5] << 16) |
+                    ((uint32_t)pkt.payload[6] <<  8) |
+                    pkt.payload[7];
+
+    if (toId != transport_.nodeId()) return;  // not addressed to us
     if (fromId == transport_.nodeId()) return;
     if (state_ != State::BROWSING) {
         sendReject(fromId);
