@@ -91,12 +91,43 @@ esptool --chip esp32s3 --port /dev/cu.usbmodem2101 \
 ```
 Port may vary: check `ls /dev/cu.usb*`. If connection fails, power cycle T-Deck (hold trackball + replug for bootloader mode).
 
+## BOOT FREEZE on Base t-deck Build (2026-03-24 session 2)
+
+**The base `t-deck` build freezes at the Meshtastic boot logo when MonsterMesh module is enabled.** Disabling the module (`// monsterMeshModule = new MonsterMeshModule()` in Modules.cpp) allows normal boot.
+
+### What was tested:
+1. **Module disabled** -- boots fine, keyboard works in Meshtastic UI
+2. **Module enabled, `ensureMonsterMeshChannel()` disabled** -- still freezes
+3. **Module enabled, full code** -- freezes at boot logo
+
+### The freeze happens before runOnce() even fires (8-second delay guard)
+This means the crash is in:
+- The `new MonsterMeshModule()` constructor chain, OR
+- A static initializer pulled in by one of the MonsterMesh source files, OR
+- The `#include <SD.h>` or peanut_gb.h headers triggering problematic global constructors
+
+### Likely culprits (not yet tested individually):
+1. **`#include <SD.h>`** -- on ESP32-S3, the SD library may have global constructors that conflict with the SPI bus (already owned by LovyanGFX at boot time)
+2. **`peanut_gb.h`** (4000-line header-only Game Boy emulator) -- included in MonsterMeshEmulator.cpp, may have problematic static variables
+3. **OSThread constructor** -- `concurrency::OSThread("MonsterMesh")` registers the thread immediately; if the scheduler calls `runOnce()` before Meshtastic is ready, even the 8-second guard may not help if the thread registration itself conflicts
+4. **Member object construction** -- `shim_(transport_)` and `lobby_(transport_, emu_)` construct FreeRTOS queues and other objects that may conflict during early boot
+
+### Next debugging steps:
+1. Strip module to absolute minimum (just constructor + empty runOnce returning 1000) and see if it boots
+2. If it boots, add back components one by one: first includes, then member objects, then SD, then emulator
+3. If just the includes cause the freeze, the problem is in `<SD.h>` or `peanut_gb.h` global init
+4. Consider using `-D MESHTASTIC_EXCLUDE_MONSTERMESH` build flag to disable module without code changes
+
+### Memory/size is NOT the issue:
+- RAM: 42.0% (137KB of 320KB)
+- Flash: 32.8% (2.1MB of 6.5MB)
+
 ## Next Steps
 
-1. **Flash and test the base `t-deck` build** -- verify SD.begin() doesn't crash with the spiLock fix
-2. **Test keyboard** -- ALT+E should toggle emulator, WASD/KL should control game
-3. **If SD still crashes** -- try alternative: get SPI instance from LovyanGFX and pass to SD.begin(), or init SD before TFT in the boot sequence
-4. **Scanline rendering** -- the scanline callback uses `getLovyanGfx()` to blit to TFT. Verify it renders on the base build
+1. **Debug the boot freeze** -- binary search which component causes it
+2. **Test keyboard** -- once boots, ALT+E should toggle emulator via InputBroker
+3. **If SD.begin() still crashes after boot** -- try spiLock, or init SD before TFT
+4. **Scanline rendering** -- getLovyanGfx() accessor needed for base build too
 
 ## Files Modified in Meshtastic Firmware
 

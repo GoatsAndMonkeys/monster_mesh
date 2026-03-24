@@ -52,98 +52,12 @@ MonsterMeshModule::MonsterMeshModule()
 
 void MonsterMeshModule::setup()
 {
-    if (setupDone_) return;  // idempotent — prevent double-init
-    setupDone_ = true;
-
-    setupStatus_ = "setup started";
-    LOG_INFO("[MonsterMesh] module setup\n");
-
-    // Configure channel 1 as "MonsterMesh Center" if not already set
-    setupStatus_ = "configuring channel";
+    // Meshtastic does not reliably call setup() before runOnce() for all module
+    // types, and the SPI bus / SD card may not yet be ready at this point.
+    // All real initialization is deferred to the runOnce() lazy-init block below.
+    LOG_INFO("[MonsterMesh] module registered\n");
+    setupStatus_ = "waiting for boot...";
     ensureMonsterMeshChannel();
-
-    // Init transport
-    transport_.begin();
-    transport_.setNodeId(nodeDB->getNodeNum());
-
-    // Init shim + lobby
-    shim_.begin();
-    shim_.setLobby(&lobby_);
-    lobby_.setShim(&shim_);
-
-    // Load saved stats (LittleFS should already be mounted by Meshtastic)
-    lobby_.loadStats();
-
-    // Wire serial link
-    emu_.setSerialLink(&shim_);
-
-    // Set up scanline callback for rendering
-    emu_.setScanlineCallback(scanlineCallback, this);
-
-    // Try to start emulator — SD shares SPI bus with TFT and LoRa, must use spiLock
-    setupStatus_ = "SD init...";
-    bool sdOk = false;
-    {
-        concurrency::LockGuard g(spiLock);
-        sdOk = SD.begin(SPI_CS);
-        if (!sdOk) {
-            LOG_WARN("[MonsterMesh] SD.begin(CS=%d) failed, retrying with SPI bus...\n", SPI_CS);
-            sdOk = SD.begin(SPI_CS, SPI, 4000000);
-        }
-        if (!sdOk) {
-            LOG_WARN("[MonsterMesh] SD.begin() retry failed, trying without CS pin...\n");
-            sdOk = SD.begin();
-        }
-    }
-
-    if (sdOk) {
-        LOG_INFO("[MonsterMesh] SD card mounted OK\n");
-
-        // List root to help debug ROM path issues
-        File root = SD.open("/");
-        if (root) {
-            File f = root.openNextFile();
-            while (f) {
-                LOG_INFO("[MonsterMesh] SD: %s (%d bytes)\n", f.name(), f.size());
-                f = root.openNextFile();
-            }
-            root.close();
-        }
-
-        if (emu_.begin("/pokemon.gb")) {
-            emuInitialized_ = true;
-            LOG_INFO("[MonsterMesh] emulator initialized OK!\n");
-
-            // Launch emulator task on Core 1
-            xTaskCreatePinnedToCore(
-                emuTaskEntry, "monstermesh_emu",
-                16384,  // 16KB stack (peanut-gb + overlays)
-                this,
-                5,      // priority — high for smooth 60fps
-                &emuTaskHandle_,
-                1       // Core 1
-            );
-
-            // Auto-start emulator
-            emulatorActive_ = true;
-            setupStatus_ = "Running!";
-#if HAS_SCREEN
-            requestFocus();
-#endif
-        } else {
-            setupStatus_ = "ROM /pokemon.gb not found";
-            LOG_WARN("[MonsterMesh] emu_.begin('/pokemon.gb') failed — ROM not found?\n");
-        }
-    } else {
-        setupStatus_ = "SD card init failed";
-        LOG_WARN("[MonsterMesh] all SD init attempts failed — emulator disabled\n");
-    }
-
-    // Subscribe to InputBroker for keyboard events
-    if (inputBroker) {
-        inputObserver_.observe(inputBroker);
-    }
-
     monsterMeshModule = this;
 }
 
@@ -236,10 +150,81 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
 
 int32_t MonsterMeshModule::runOnce()
 {
-    // Lazy init — setup() is never called by Meshtastic, so we do it here
+    // Lazy init — setup() is never called by Meshtastic, so we do it here.
+    // setupDone_ is only set true after SD mounts successfully (or retries exhausted),
+    // so transient SD failures can be retried on subsequent runOnce() calls.
     if (!setupDone_) {
-        if (millis() < 8000) return 500;  // wait for Meshtastic to fully boot
-        setup();
+        if (millis() < 8000) {
+            return 500;
+        }
+
+        // ── One-time subsystem init (guarded so retries don't re-init) ────────
+        if (setupRetries_ == 0) {
+            // ── Transport ────────────────────────────────────────────────────
+            transport_.begin();
+            transport_.setNodeId(nodeDB->getNodeNum());
+
+            // ── Shim + Lobby ─────────────────────────────────────────────────
+            shim_.begin();
+            shim_.setLobby(&lobby_);
+            lobby_.setShim(&shim_);
+            lobby_.loadStats();
+
+            // ── Wire serial link ─────────────────────────────────────────────
+            emu_.setSerialLink(&shim_);
+        }
+
+        // ── Mount SD card with spiLock (Meshtastic's setupSDCard pattern) ────
+        {
+            extern concurrency::Lock *spiLock;
+            concurrency::LockGuard g(spiLock);
+            if (!SD.begin(SPI_CS, SPI)) {
+                setupRetries_++;
+                if (setupRetries_ >= MAX_SETUP_RETRIES) {
+                    // Retries exhausted — give up on SD, still register keyboard
+                    setupDone_ = true;
+                    setupStatus_ = "SD mount failed";
+                    LOG_WARN("[MonsterMesh] SD mount failed after %d attempts\n", (int)setupRetries_);
+                    installKeyboardHook();
+                    if (inputBroker) inputObserver_.observe(inputBroker);
+                    return 1000;
+                }
+                snprintf(setupStatusBuf_, sizeof(setupStatusBuf_),
+                         "SD retry %d/%d...", (int)setupRetries_, (int)MAX_SETUP_RETRIES);
+                setupStatus_ = setupStatusBuf_;
+                LOG_INFO("[MonsterMesh] SD mount failed, retry %d/%d in 2s\n",
+                         (int)setupRetries_, (int)MAX_SETUP_RETRIES);
+                return 2000;
+            }
+        }
+
+        LOG_INFO("[MonsterMesh] SD card mounted OK\n");
+
+        emu_.setScanlineCallback(scanlineCallback, this);
+        bool romOk = emu_.begin("/pokemon.gb");
+        if (romOk) {
+            emuInitialized_ = true;
+            setupStatus_ = "ALT+E to play!";
+            emulatorActive_ = false;  // boot into Meshtastic, ALT+E launches emulator
+
+            xTaskCreatePinnedToCore(
+                emuTaskEntry, "monstermesh_emu",
+                16384, this, 5, &emuTaskHandle_, 1
+            );
+            LOG_INFO("[MonsterMesh] emulator initialized OK!\n");
+        } else {
+            setupStatus_ = "ROM not found on SD";
+            LOG_WARN("[MonsterMesh] emu_.begin('/pokemon.gb') failed — ROM not found?\n");
+        }
+
+        // SD succeeded — init is complete regardless of ROM result
+        setupDone_ = true;
+
+        // Hook keyboard: LVGL intercept for TFT builds, InputBroker for non-TFT
+        installKeyboardHook();
+        if (inputBroker) {
+            inputObserver_.observe(inputBroker);
+        }
     }
     drainTxQueue();
     return 50;
@@ -264,17 +249,16 @@ void MonsterMeshModule::drainTxQueue()
     }
 }
 
-// ── Keyboard — on base t-deck, InputBroker handles everything ────────────────
-void MonsterMeshModule::installKeyboardHook() {}
+// ── Keyboard ─────────────────────────────────────────────────────────────────
+void MonsterMeshModule::installKeyboardHook() {
+    // No-op: keyboard input flows through InputBroker (handleInputEvent).
+    // For future LVGL/TFT integration, register handleKeyFromLVGL() here.
+}
 void MonsterMeshModule::handleKeyFromLVGL(uint8_t c) { handleKeyPress(c); lastKeyMs_ = millis(); }
 void MonsterMeshModule::pollKeyboard() {
-    // Fallback: also poll I2C directly in case device-ui callback doesn't fire
-    Wire.requestFrom((uint8_t)0x55, (uint8_t)1);
-    if (!Wire.available()) return;
-    uint8_t c = Wire.read();
-    if (c == 0) return;
-    handleKeyPress(c);
-    lastKeyMs_ = millis();
+    // Removed: direct I2C polling raced with kbI2cBase::runOnce() on Core 0 and
+    // consumed bytes needed for SYM+E → Ctrl+E modifier synthesis by InputBroker.
+    // All keyboard input now flows through handleInputEvent() via InputBroker.
 }
 
 // ── Emulator task (Core 1) ──────────────────────────────────────────────────
@@ -290,6 +274,10 @@ void MonsterMeshModule::emuTaskLoop()
     TickType_t lastWake = xTaskGetTickCount();
 
     while (true) {
+        // Keyboard input is handled by InputBroker via handleInputEvent() on Core 0.
+        // Direct I2C polling was removed — it raced with kbI2cBase::runOnce() and
+        // prevented SYM+E → Ctrl+E modifier synthesis.
+
         // Run emulator frame (always, even when UI is showing Meshtastic screens)
         emu_.runFrame();
 
@@ -389,8 +377,7 @@ void MonsterMeshModule::scanlineCallback(uint8_t line, const uint16_t *pixels320
     if (!self->emulatorActive_) return;  // don't draw if Meshtastic UI is showing
 
     // Access TFT directly via LovyanGFX (available on T-Deck)
-    // The LGFX class is defined locally in TFTDisplay.cpp, so we use the base
-    // class pointer exposed via getTftDevice(). For non-TFT builds, this is a no-op.
+    // getLovyanGfx() is provided by patches/TFTDisplay.patch applied to Meshtastic.
 #if HAS_TFT
     extern lgfx::LGFX_Device *getLovyanGfx();
     lgfx::LGFX_Device *gfx = getLovyanGfx();
@@ -426,15 +413,8 @@ void MonsterMeshModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *stat
 
 void MonsterMeshModule::handleKeyPress(uint8_t ascii)
 {
-    // ── ALT modifier (0x0c on T-Deck) ──────────────────────────────────
-    if (ascii == 0x0c) {
-        kbSym_ = !kbSym_;
-        return;
-    }
-
-    // ── ALT+E or Ctrl+E: toggle emulator/Meshtastic UI ─────────────────
-    if (ascii == 0x05 || (kbSym_ && (ascii == 'e' || ascii == 'E'))) {
-        kbSym_ = false;
+    // ── Ctrl+E: toggle emulator/Meshtastic UI ──────────────────────────
+    if (ascii == 0x05) {  // Ctrl+E
         emulatorActive_ = !emulatorActive_;
         if (emulatorActive_) {
 #if HAS_SCREEN
@@ -443,9 +423,6 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
         }
         return;
     }
-
-    // Clear sym on any non-modifier key
-    kbSym_ = false;
 
     if (!emulatorActive_) return;
 
