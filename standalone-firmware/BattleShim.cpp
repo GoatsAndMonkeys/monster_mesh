@@ -115,7 +115,9 @@ void BattleShim::radioTaskLoop() {
             size_t  len = 0;
             if (transport_.receive(buf, len, sizeof(buf))) {
                 handlePacket(buf, len);
-                lastPacketMs_ = millis();
+                // Note: lastPacketMs_ is updated inside handlePacket() only for
+                // session-relevant types (BATTLE_REQUEST, BATTLE_ACCEPT, SERIAL_DATA).
+                // Lobby beacons do NOT reset the battle timeout.
             }
         }
 

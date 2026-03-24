@@ -11,9 +11,9 @@
 class AlertDriver {
 public:
     void begin() {
-        ledcSetup(0, 1000, 8);            // channel 0, default 1kHz, 8-bit res
-        ledcAttachPin(PIN_BUZZER, 0);     // attach buzzer pin to channel 0
-        ledcWriteTone(0, 0);              // silence
+        ledcSetup(LEDC_CH_BUZZER, 1000, 8);            // default 1kHz, 8-bit res
+        ledcAttachPin(PIN_BUZZER, LEDC_CH_BUZZER);     // attach buzzer pin
+        ledcWriteTone(LEDC_CH_BUZZER, 0);              // silence
     }
 
     // ── Trigger alerts (safe from any core) ──────────────────────────────────
@@ -104,14 +104,14 @@ private:
 
     void playNote(uint16_t freqHz) {
         if (freqHz == 0) {
-            ledcWriteTone(0, 0);
+            ledcWriteTone(LEDC_CH_BUZZER, 0);
         } else {
-            ledcWriteTone(0, freqHz);
+            ledcWriteTone(LEDC_CH_BUZZER, freqHz);
         }
     }
 
     void stopTone() {
-        ledcWriteTone(0, 0);
+        ledcWriteTone(LEDC_CH_BUZZER, 0);
     }
 };
 

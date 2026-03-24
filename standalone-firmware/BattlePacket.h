@@ -34,10 +34,13 @@ enum class PktType : uint8_t {
     PONG            = 0x31,
 
     // ── Lobby (peer-to-peer matchmaking) ─────────────────────────────────
+    // LOBBY_CHALLENGE / LOBBY_ACCEPT / LOBBY_REJECT payload (8 bytes):
+    //   Bytes 0-3: sender chipId (big-endian)
+    //   Bytes 4-7: target chipId (big-endian)
     LOBBY_BEACON    = 0x40,   // broadcast: name + party + ELO
-    LOBBY_CHALLENGE = 0x41,   // unicast: "I challenge you"
-    LOBBY_ACCEPT    = 0x42,   // unicast: "Challenge accepted"
-    LOBBY_REJECT    = 0x43,   // unicast: "Challenge declined"
+    LOBBY_CHALLENGE = 0x41,   // broadcast w/ target: "I challenge you"
+    LOBBY_ACCEPT    = 0x42,   // broadcast w/ target: "Challenge accepted"
+    LOBBY_REJECT    = 0x43,   // broadcast w/ target: "Challenge declined"
 
     // ── Tournament (coordinator + client) ───────────────────────────────
     TOURNAMENT_ANNOUNCE      = 0x50,  // coordinator → broadcast: tournament info

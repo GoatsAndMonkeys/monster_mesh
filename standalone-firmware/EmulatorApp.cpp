@@ -47,9 +47,9 @@ bool EmulatorApp::begin(const char *romPath) {
 
     // 7. Display: fill black, enable backlight
     tft_.fillScreen(TFT_BLACK);
-    ledcSetup(0, 5000, 8);
-    ledcAttachPin(PIN_TFT_BL, 0);
-    ledcWrite(0, 200);  // ~78% brightness
+    ledcSetup(LEDC_CH_BACKLIGHT, 5000, 8);
+    ledcAttachPin(PIN_TFT_BL, LEDC_CH_BACKLIGHT);
+    ledcWrite(LEDC_CH_BACKLIGHT, 200);  // ~78% brightness
 
     running_ = true;
     Serial.printf("[EMU] started — ROM: %s (%u bytes)\n", romPath, (unsigned)romSize_);

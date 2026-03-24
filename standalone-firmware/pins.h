@@ -45,3 +45,9 @@
 
 // ── Battery ADC ───────────────────────────────────────────────
 #define PIN_BATTERY     4
+
+// ── LEDC channel assignments ──────────────────────────────────
+// Channel 0: TFT backlight (EmulatorApp)
+// Channel 1: piezo buzzer  (AlertDriver)
+#define LEDC_CH_BACKLIGHT  0
+#define LEDC_CH_BUZZER     1

@@ -52,88 +52,12 @@ MonsterMeshModule::MonsterMeshModule()
 
 void MonsterMeshModule::setup()
 {
-    setupStatus_ = "setup started";
-    LOG_INFO("[MonsterMesh] module setup\n");
-
-    // Configure channel 1 as "MonsterMesh Center" if not already set
-    setupStatus_ = "configuring channel";
+    // Meshtastic does not reliably call setup() before runOnce() for all module
+    // types, and the SPI bus / SD card may not yet be ready at this point.
+    // All real initialization is deferred to the runOnce() lazy-init block below.
+    LOG_INFO("[MonsterMesh] module registered\n");
+    setupStatus_ = "waiting for boot...";
     ensureMonsterMeshChannel();
-
-    // Init transport
-    transport_.begin();
-    transport_.setNodeId(nodeDB->getNodeNum());
-
-    // Init shim + lobby
-    shim_.begin();
-    shim_.setLobby(&lobby_);
-    lobby_.setShim(&shim_);
-
-    // Load saved stats (LittleFS should already be mounted by Meshtastic)
-    lobby_.loadStats();
-
-    // Wire serial link
-    emu_.setSerialLink(&shim_);
-
-    // Set up scanline callback for rendering
-    emu_.setScanlineCallback(scanlineCallback, this);
-
-    // Try to start emulator — try SD.begin() with and without explicit SPI bus
-    setupStatus_ = "SD init...";
-    bool sdOk = SD.begin(SPI_CS);
-    if (!sdOk) {
-        LOG_WARN("[MonsterMesh] SD.begin(CS=%d) failed, retrying with SPI bus...\n", SPI_CS);
-        sdOk = SD.begin(SPI_CS, SPI, 4000000);
-    }
-    if (!sdOk) {
-        LOG_WARN("[MonsterMesh] SD.begin() retry failed, trying without CS pin...\n");
-        sdOk = SD.begin();
-    }
-
-    if (sdOk) {
-        LOG_INFO("[MonsterMesh] SD card mounted OK\n");
-
-        // List root to help debug ROM path issues
-        File root = SD.open("/");
-        if (root) {
-            File f = root.openNextFile();
-            while (f) {
-                LOG_INFO("[MonsterMesh] SD: %s (%d bytes)\n", f.name(), f.size());
-                f = root.openNextFile();
-            }
-            root.close();
-        }
-
-        if (emu_.begin("/pokemon.gb")) {
-            emuInitialized_ = true;
-            LOG_INFO("[MonsterMesh] emulator initialized OK!\n");
-
-            // Launch emulator task on Core 1
-            xTaskCreatePinnedToCore(
-                emuTaskEntry, "monstermesh_emu",
-                16384,  // 16KB stack (peanut-gb + overlays)
-                this,
-                5,      // priority — high for smooth 60fps
-                &emuTaskHandle_,
-                1       // Core 1
-            );
-
-            // Don't auto-start — user presses ALT+E to launch
-            emulatorActive_ = false;
-            setupStatus_ = "ALT+E to play!";
-        } else {
-            setupStatus_ = "ROM /pokemon.gb not found";
-            LOG_WARN("[MonsterMesh] emu_.begin('/pokemon.gb') failed — ROM not found?\n");
-        }
-    } else {
-        setupStatus_ = "SD card init failed";
-        LOG_WARN("[MonsterMesh] all SD init attempts failed — emulator disabled\n");
-    }
-
-    // Subscribe to InputBroker for keyboard events
-    if (inputBroker) {
-        inputObserver_.observe(inputBroker);
-    }
-
     monsterMeshModule = this;
 }
 
@@ -233,16 +157,32 @@ int32_t MonsterMeshModule::runOnce()
         }
         setupDone_ = true;
 
-        // Mount SD card with spiLock (same pattern as Meshtastic's setupSDCard)
+        // ── Transport ────────────────────────────────────────────────────────
+        transport_.begin();
+        transport_.setNodeId(nodeDB->getNodeNum());
+
+        // ── Shim + Lobby ─────────────────────────────────────────────────────
+        shim_.begin();
+        shim_.setLobby(&lobby_);
+        lobby_.setShim(&shim_);
+        lobby_.loadStats();
+
+        // ── Wire serial link ─────────────────────────────────────────────────
+        emu_.setSerialLink(&shim_);
+
+        // ── Mount SD card with spiLock (Meshtastic's setupSDCard pattern) ────
         {
             extern concurrency::Lock *spiLock;
             concurrency::LockGuard g(spiLock);
             if (!SD.begin(SPI_CS, SPI)) {
                 setupStatus_ = "SD mount failed";
+                installKeyboardHook();
                 if (inputBroker) inputObserver_.observe(inputBroker);
                 return 1000;
             }
         }
+
+        LOG_INFO("[MonsterMesh] SD card mounted OK\n");
 
         emu_.setScanlineCallback(scanlineCallback, this);
         bool romOk = emu_.begin("/pokemon.gb");
@@ -255,8 +195,10 @@ int32_t MonsterMeshModule::runOnce()
                 emuTaskEntry, "monstermesh_emu",
                 16384, this, 5, &emuTaskHandle_, 1
             );
+            LOG_INFO("[MonsterMesh] emulator initialized OK!\n");
         } else {
             setupStatus_ = "ROM not found on SD";
+            LOG_WARN("[MonsterMesh] emu_.begin('/pokemon.gb') failed — ROM not found?\n");
         }
 
         // Hook keyboard: LVGL intercept for TFT builds, InputBroker for non-TFT
@@ -291,7 +233,15 @@ void MonsterMeshModule::drainTxQueue()
     }
 }
 
-// ── Keyboard — on base t-deck, InputBroker handles everything ────────────────
+// ── Keyboard ─────────────────────────────────────────────────────────────────
+// installKeyboardHook() and pollKeyboard() are stubs. On non-TFT Meshtastic
+// builds (base T-Deck with OLED), keyboard input is delivered entirely through
+// InputBroker via handleInputEvent() — no direct polling needed.
+//
+// A TFT/LVGL build would need to intercept LVGL keyboard events here, but that
+// requires getLovyanGfx(), which Meshtastic upstream does not expose. Until
+// Meshtastic provides that hook point, the TFT input path remains unimplemented.
+// See audit_log_02.md Finding 3.
 void MonsterMeshModule::installKeyboardHook() {}
 void MonsterMeshModule::handleKeyFromLVGL(uint8_t c) { handleKeyPress(c); lastKeyMs_ = millis(); }
 void MonsterMeshModule::pollKeyboard() {}
@@ -408,8 +358,10 @@ void MonsterMeshModule::scanlineCallback(uint8_t line, const uint16_t *pixels320
     if (!self->emulatorActive_) return;  // don't draw if Meshtastic UI is showing
 
     // Access TFT directly via LovyanGFX (available on T-Deck)
-    // The LGFX class is defined locally in TFTDisplay.cpp, so we use the base
-    // class pointer exposed via getTftDevice(). For non-TFT builds, this is a no-op.
+    // getLovyanGfx() is declared here but is NOT currently exposed by Meshtastic
+    // upstream (verified against v2.7.15 and current master/develop). This code
+    // will link only if a future Meshtastic version provides that symbol.
+    // See audit_log_02.md Finding 3.
 #if HAS_TFT
     extern lgfx::LGFX_Device *getLovyanGfx();
     lgfx::LGFX_Device *gfx = getLovyanGfx();

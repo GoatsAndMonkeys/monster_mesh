@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include <LittleFS.h>
+#include <freertos/semphr.h>
 #include "BattlePacket.h"
 #include "RadioTransport.h"
 #include "Gen1Species.h"
@@ -132,6 +133,13 @@ private:
     uint32_t        challengeFrom_   = 0;   // chipId that challenged us
     uint32_t        challengeMs_     = 0;   // when challenge was sent/received
     static constexpr uint32_t CHALLENGE_TIMEOUT_MS = 30000;
+
+    // ── Cross-core mutex ────────────────────────────────────────────────────
+    // handlePacket() is called from Core 0 (BattleShim radio task).
+    // tick() and navigation methods run on Core 1 (emuTask).
+    // This mutex protects all shared mutable state.
+    SemaphoreHandle_t mutex_ = nullptr;
+    static constexpr TickType_t MUTEX_TIMEOUT = pdMS_TO_TICKS(10);
 
     // ── Internal helpers ────────────────────────────────────────────────────
     void sendBeacon();

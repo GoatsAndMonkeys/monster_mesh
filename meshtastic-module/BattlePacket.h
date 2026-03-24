@@ -17,10 +17,10 @@ enum class PktType : uint8_t {
     SERIAL_DATA     = 0x20,
     PING            = 0x30,
     PONG            = 0x31,
-    LOBBY_BEACON    = 0x40,
-    LOBBY_CHALLENGE = 0x41,
-    LOBBY_ACCEPT    = 0x42,
-    LOBBY_REJECT    = 0x43,
+    LOBBY_BEACON    = 0x40,   // broadcast: name + party + ELO
+    LOBBY_CHALLENGE = 0x41,   // broadcast w/ target: "I challenge you"   payload[0-3]=senderChipId, payload[4-7]=targetChipId
+    LOBBY_ACCEPT    = 0x42,   // broadcast w/ target: "Challenge accepted" payload[0-3]=senderChipId, payload[4-7]=targetChipId
+    LOBBY_REJECT    = 0x43,   // broadcast w/ target: "Challenge declined" payload[0-3]=senderChipId, payload[4-7]=targetChipId
 };
 
 #pragma pack(push, 1)

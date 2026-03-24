@@ -11,46 +11,56 @@ Lobby::Lobby(RadioTransport &transport, EmulatorApp &emu)
     : transport_(transport), emu_(emu) {
     // Note: do NOT call loadStats() here — LittleFS isn't mounted yet
     // (globals construct before setup()). Call loadStats() from setup().
+    mutex_ = xSemaphoreCreateMutex();
 }
 
 // ── Open / Close ────────────────────────────────────────────────────────────
 
 void Lobby::open() {
-    if (state_ != State::CLOSED) return;
+    if (xSemaphoreTake(mutex_, MUTEX_TIMEOUT) != pdTRUE) return;
+    if (state_ != State::CLOSED) { xSemaphoreGive(mutex_); return; }
     state_ = State::BROWSING;
     cursor_ = 0;
     beaconSent_ = false;  // force immediate beacon
+    xSemaphoreGive(mutex_);
     Serial.println("[LOBBY] opened");
 }
 
 void Lobby::close() {
+    if (xSemaphoreTake(mutex_, MUTEX_TIMEOUT) != pdTRUE) return;
     if (state_ == State::CHALLENGING) {
-        // Cancel outgoing challenge silently
         challengeTarget_ = 0;
     }
+    uint32_t rejectTarget = 0;
     if (state_ == State::INCOMING) {
-        sendReject(challengeFrom_);
+        rejectTarget = challengeFrom_;
         challengeFrom_ = 0;
     }
     state_ = State::CLOSED;
+    xSemaphoreGive(mutex_);
+    if (rejectTarget) sendReject(rejectTarget);  // send outside lock
     Serial.println("[LOBBY] closed");
 }
 
 // ── tick() — called every frame from emuTask ────────────────────────────────
 
 void Lobby::tick(uint32_t now) {
-    if (state_ == State::CLOSED) return;
+    if (xSemaphoreTake(mutex_, MUTEX_TIMEOUT) != pdTRUE) return;
+
+    if (state_ == State::CLOSED) { xSemaphoreGive(mutex_); return; }
+
+    bool doBeacon = false;
 
     // ── Send first beacon immediately on open ──────────────────────────────
     if (!beaconSent_) {
-        sendBeacon();
+        doBeacon = true;
         lastBeaconMs_ = now;
         beaconSent_ = true;
     }
 
     // ── Periodic beacon ────────────────────────────────────────────────────
-    if (now - lastBeaconMs_ >= BEACON_INTERVAL_MS) {
-        sendBeacon();
+    if (!doBeacon && now - lastBeaconMs_ >= BEACON_INTERVAL_MS) {
+        doBeacon = true;
         lastBeaconMs_ = now;
     }
 
@@ -70,47 +80,76 @@ void Lobby::tick(uint32_t now) {
         challengeFrom_ = 0;
         state_ = State::BROWSING;
     }
+
+    xSemaphoreGive(mutex_);
+
+    if (doBeacon) sendBeacon();  // send outside lock (involves radio I/O)
 }
 
 // ── UI navigation ───────────────────────────────────────────────────────────
 
 void Lobby::navigateUp() {
-    if (state_ != State::BROWSING || peerCount_ == 0) return;
-    cursor_ = (cursor_ == 0) ? peerCount_ - 1 : cursor_ - 1;
+    if (xSemaphoreTake(mutex_, MUTEX_TIMEOUT) != pdTRUE) return;
+    if (state_ == State::BROWSING && peerCount_ > 0) {
+        cursor_ = (cursor_ == 0) ? peerCount_ - 1 : cursor_ - 1;
+    }
+    xSemaphoreGive(mutex_);
 }
 
 void Lobby::navigateDown() {
-    if (state_ != State::BROWSING || peerCount_ == 0) return;
-    cursor_ = (cursor_ + 1) % peerCount_;
+    if (xSemaphoreTake(mutex_, MUTEX_TIMEOUT) != pdTRUE) return;
+    if (state_ == State::BROWSING && peerCount_ > 0) {
+        cursor_ = (cursor_ + 1) % peerCount_;
+    }
+    xSemaphoreGive(mutex_);
 }
 
 void Lobby::selectPeer() {
+    uint32_t challengeTarget = 0;
+    uint32_t acceptFrom = 0;
+    bool doChallenge = false;
+    bool doAccept = false;
+
+    if (xSemaphoreTake(mutex_, MUTEX_TIMEOUT) != pdTRUE) return;
     if (state_ == State::BROWSING && peerCount_ > 0) {
-        // Send challenge to selected peer
-        uint32_t target = peers_[cursor_].chipId;
-        sendChallenge(target);
-        challengeTarget_ = target;
+        challengeTarget = peers_[cursor_].chipId;
+        challengeTarget_ = challengeTarget;
         challengeMs_ = millis();
         state_ = State::CHALLENGING;
-        Serial.printf("[LOBBY] challenging 0x%08X\n", (unsigned)target);
+        doChallenge = true;
+        Serial.printf("[LOBBY] challenging 0x%08X\n", (unsigned)challengeTarget);
     } else if (state_ == State::INCOMING) {
-        // Accept incoming challenge
-        sendAccept(challengeFrom_);
-        // Transition to PAIRED — BattleShim will take over
+        acceptFrom = challengeFrom_;
         state_ = State::PAIRED;
-        if (shim_) {
-            shim_->pairWith(challengeFrom_);
-        }
-        Serial.printf("[LOBBY] accepted challenge from 0x%08X\n", (unsigned)challengeFrom_);
+        doAccept = true;
+        Serial.printf("[LOBBY] accepted challenge from 0x%08X\n", (unsigned)acceptFrom);
+    }
+    xSemaphoreGive(mutex_);
+
+    // Perform I/O and BattleShim wiring outside the lock
+    if (doChallenge) {
+        sendChallenge(challengeTarget);
+    } else if (doAccept) {
+        sendAccept(acceptFrom);
+        if (shim_) shim_->pairWith(acceptFrom);
     }
 }
 
 void Lobby::rejectIncoming() {
-    if (state_ != State::INCOMING) return;
-    sendReject(challengeFrom_);
-    challengeFrom_ = 0;
-    state_ = State::BROWSING;
-    Serial.println("[LOBBY] rejected incoming challenge");
+    uint32_t rejectTarget = 0;
+
+    if (xSemaphoreTake(mutex_, MUTEX_TIMEOUT) != pdTRUE) return;
+    if (state_ == State::INCOMING) {
+        rejectTarget = challengeFrom_;
+        challengeFrom_ = 0;
+        state_ = State::BROWSING;
+    }
+    xSemaphoreGive(mutex_);
+
+    if (rejectTarget) {
+        sendReject(rejectTarget);
+        Serial.println("[LOBBY] rejected incoming challenge");
+    }
 }
 
 // ── handlePacket() — called from radio task ─────────────────────────────────
@@ -121,6 +160,9 @@ void Lobby::handlePacket(const uint8_t *buf, size_t len) {
     const BattlePacket &pkt = *reinterpret_cast<const BattlePacket *>(buf);
     auto type = static_cast<PktType>(pkt.type);
     uint8_t payloadLen = (uint8_t)(len - BATTLELINK_HDR_SIZE);
+
+    // Called from Core 0 (BattleShim radio task). Lock before touching shared state.
+    if (xSemaphoreTake(mutex_, MUTEX_TIMEOUT) != pdTRUE) return;
 
     switch (type) {
         case PktType::LOBBY_BEACON:
@@ -138,6 +180,8 @@ void Lobby::handlePacket(const uint8_t *buf, size_t len) {
         default:
             break;
     }
+
+    xSemaphoreGive(mutex_);
 }
 
 // ── Beacon ──────────────────────────────────────────────────────────────────
@@ -284,56 +328,70 @@ void Lobby::handleBeacon(const BattlePacket &pkt, uint8_t payloadLen) {
 }
 
 // ── Challenge / Accept / Reject ─────────────────────────────────────────────
-// Challenge payload (4 bytes): sender chipId (BE)
+// Payload layout (8 bytes):
+//   Bytes 0-3: sender chipId (big-endian)
+//   Bytes 4-7: target chipId (big-endian)
 
 void Lobby::sendChallenge(uint32_t targetId) {
     uint32_t id = transport_.nodeId();
-    uint8_t pl[4] = {
-        (uint8_t)(id >> 24), (uint8_t)(id >> 16),
-        (uint8_t)(id >>  8), (uint8_t)(id)
+    uint8_t pl[8] = {
+        (uint8_t)(id       >> 24), (uint8_t)(id       >> 16),
+        (uint8_t)(id       >>  8), (uint8_t)(id),
+        (uint8_t)(targetId >> 24), (uint8_t)(targetId >> 16),
+        (uint8_t)(targetId >>  8), (uint8_t)(targetId)
     };
     BattlePacket pkt;
     memset(&pkt, 0, sizeof(pkt));
     pkt.type = (uint8_t)PktType::LOBBY_CHALLENGE;
-    memcpy(pkt.payload, pl, 4);
-    transport_.send((uint8_t *)&pkt, BATTLELINK_HDR_SIZE + 4);
+    memcpy(pkt.payload, pl, 8);
+    transport_.send((uint8_t *)&pkt, BATTLELINK_HDR_SIZE + 8);
 }
 
 void Lobby::sendAccept(uint32_t targetId) {
     uint32_t id = transport_.nodeId();
-    uint8_t pl[4] = {
-        (uint8_t)(id >> 24), (uint8_t)(id >> 16),
-        (uint8_t)(id >>  8), (uint8_t)(id)
+    uint8_t pl[8] = {
+        (uint8_t)(id       >> 24), (uint8_t)(id       >> 16),
+        (uint8_t)(id       >>  8), (uint8_t)(id),
+        (uint8_t)(targetId >> 24), (uint8_t)(targetId >> 16),
+        (uint8_t)(targetId >>  8), (uint8_t)(targetId)
     };
     BattlePacket pkt;
     memset(&pkt, 0, sizeof(pkt));
     pkt.type = (uint8_t)PktType::LOBBY_ACCEPT;
-    memcpy(pkt.payload, pl, 4);
-    transport_.send((uint8_t *)&pkt, BATTLELINK_HDR_SIZE + 4);
+    memcpy(pkt.payload, pl, 8);
+    transport_.send((uint8_t *)&pkt, BATTLELINK_HDR_SIZE + 8);
 }
 
 void Lobby::sendReject(uint32_t targetId) {
     uint32_t id = transport_.nodeId();
-    uint8_t pl[4] = {
-        (uint8_t)(id >> 24), (uint8_t)(id >> 16),
-        (uint8_t)(id >>  8), (uint8_t)(id)
+    uint8_t pl[8] = {
+        (uint8_t)(id       >> 24), (uint8_t)(id       >> 16),
+        (uint8_t)(id       >>  8), (uint8_t)(id),
+        (uint8_t)(targetId >> 24), (uint8_t)(targetId >> 16),
+        (uint8_t)(targetId >>  8), (uint8_t)(targetId)
     };
     BattlePacket pkt;
     memset(&pkt, 0, sizeof(pkt));
     pkt.type = (uint8_t)PktType::LOBBY_REJECT;
-    memcpy(pkt.payload, pl, 4);
-    transport_.send((uint8_t *)&pkt, BATTLELINK_HDR_SIZE + 4);
+    memcpy(pkt.payload, pl, 8);
+    transport_.send((uint8_t *)&pkt, BATTLELINK_HDR_SIZE + 8);
 }
 
 void Lobby::handleChallenge(const BattlePacket &pkt, uint8_t payloadLen) {
-    if (payloadLen < 4) return;
+    if (payloadLen < 8) return;
 
     uint32_t fromId = ((uint32_t)pkt.payload[0] << 24) |
                       ((uint32_t)pkt.payload[1] << 16) |
                       ((uint32_t)pkt.payload[2] <<  8) |
                       pkt.payload[3];
 
+    uint32_t targetId = ((uint32_t)pkt.payload[4] << 24) |
+                        ((uint32_t)pkt.payload[5] << 16) |
+                        ((uint32_t)pkt.payload[6] <<  8) |
+                        pkt.payload[7];
+
     if (fromId == transport_.nodeId()) return;
+    if (targetId != transport_.nodeId()) return;  // not addressed to us
 
     // Only accept challenges while actively browsing the lobby
     if (state_ != State::BROWSING) {
@@ -355,13 +413,19 @@ void Lobby::handleChallenge(const BattlePacket &pkt, uint8_t payloadLen) {
 }
 
 void Lobby::handleAcceptPkt(const BattlePacket &pkt, uint8_t payloadLen) {
-    if (payloadLen < 4) return;
+    if (payloadLen < 8) return;
 
     uint32_t fromId = ((uint32_t)pkt.payload[0] << 24) |
                       ((uint32_t)pkt.payload[1] << 16) |
                       ((uint32_t)pkt.payload[2] <<  8) |
                       pkt.payload[3];
 
+    uint32_t targetId = ((uint32_t)pkt.payload[4] << 24) |
+                        ((uint32_t)pkt.payload[5] << 16) |
+                        ((uint32_t)pkt.payload[6] <<  8) |
+                        pkt.payload[7];
+
+    if (targetId != transport_.nodeId()) return;  // not addressed to us
     if (state_ != State::CHALLENGING || fromId != challengeTarget_) return;
 
     Serial.printf("[LOBBY] ← ACCEPT from 0x%08X\n", (unsigned)fromId);
@@ -373,13 +437,19 @@ void Lobby::handleAcceptPkt(const BattlePacket &pkt, uint8_t payloadLen) {
 }
 
 void Lobby::handleRejectPkt(const BattlePacket &pkt, uint8_t payloadLen) {
-    if (payloadLen < 4) return;
+    if (payloadLen < 8) return;
 
     uint32_t fromId = ((uint32_t)pkt.payload[0] << 24) |
                       ((uint32_t)pkt.payload[1] << 16) |
                       ((uint32_t)pkt.payload[2] <<  8) |
                       pkt.payload[3];
 
+    uint32_t targetId = ((uint32_t)pkt.payload[4] << 24) |
+                        ((uint32_t)pkt.payload[5] << 16) |
+                        ((uint32_t)pkt.payload[6] <<  8) |
+                        pkt.payload[7];
+
+    if (targetId != transport_.nodeId()) return;  // not addressed to us
     if (state_ != State::CHALLENGING || fromId != challengeTarget_) return;
 
     Serial.println("[LOBBY] ← REJECT");
