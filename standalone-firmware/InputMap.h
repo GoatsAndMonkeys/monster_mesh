@@ -64,12 +64,17 @@ public:
         if (!Wire.available()) return;
         uint8_t key = Wire.read();
         if (key == 0) {
-            noInterrupts();
-            state   &= ~kbMask_;
-            kbMask_  = 0;
-            interrupts();
+            // Timer-based release: hold keys for KEY_RELEASE_MS after last press.
+            // T-Deck keyboard sends a single byte on press, then 0 on subsequent polls.
+            if (kbMask_ && lastKeyMs_ && (millis() - lastKeyMs_ > KEY_RELEASE_MS)) {
+                noInterrupts();
+                state   &= ~kbMask_;
+                kbMask_  = 0;
+                interrupts();
+            }
         } else {
             applyKey(key);
+            lastKeyMs_ = millis();
         }
     }
 
@@ -141,6 +146,8 @@ public:
 
 private:
     uint8_t          kbMask_           = 0;
+    uint32_t         lastKeyMs_        = 0;
+    static constexpr uint32_t KEY_RELEASE_MS = 100;
     volatile bool    debugToggle_      = false;
     volatile bool    lobbyToggle_      = false;
     volatile bool    tournamentToggle_ = false;

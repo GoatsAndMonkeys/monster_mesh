@@ -150,35 +150,51 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
 
 int32_t MonsterMeshModule::runOnce()
 {
-    // Lazy init — setup() is never called by Meshtastic, so we do it here
+    // Lazy init — setup() is never called by Meshtastic, so we do it here.
+    // setupDone_ is only set true after SD mounts successfully (or retries exhausted),
+    // so transient SD failures can be retried on subsequent runOnce() calls.
     if (!setupDone_) {
         if (millis() < 8000) {
             return 500;
         }
-        setupDone_ = true;
 
-        // ── Transport ────────────────────────────────────────────────────────
-        transport_.begin();
-        transport_.setNodeId(nodeDB->getNodeNum());
+        // ── One-time subsystem init (guarded so retries don't re-init) ────────
+        if (setupRetries_ == 0) {
+            // ── Transport ────────────────────────────────────────────────────
+            transport_.begin();
+            transport_.setNodeId(nodeDB->getNodeNum());
 
-        // ── Shim + Lobby ─────────────────────────────────────────────────────
-        shim_.begin();
-        shim_.setLobby(&lobby_);
-        lobby_.setShim(&shim_);
-        lobby_.loadStats();
+            // ── Shim + Lobby ─────────────────────────────────────────────────
+            shim_.begin();
+            shim_.setLobby(&lobby_);
+            lobby_.setShim(&shim_);
+            lobby_.loadStats();
 
-        // ── Wire serial link ─────────────────────────────────────────────────
-        emu_.setSerialLink(&shim_);
+            // ── Wire serial link ─────────────────────────────────────────────
+            emu_.setSerialLink(&shim_);
+        }
 
         // ── Mount SD card with spiLock (Meshtastic's setupSDCard pattern) ────
         {
             extern concurrency::Lock *spiLock;
             concurrency::LockGuard g(spiLock);
             if (!SD.begin(SPI_CS, SPI)) {
-                setupStatus_ = "SD mount failed";
-                installKeyboardHook();
-                if (inputBroker) inputObserver_.observe(inputBroker);
-                return 1000;
+                setupRetries_++;
+                if (setupRetries_ >= MAX_SETUP_RETRIES) {
+                    // Retries exhausted — give up on SD, still register keyboard
+                    setupDone_ = true;
+                    setupStatus_ = "SD mount failed";
+                    LOG_WARN("[MonsterMesh] SD mount failed after %d attempts\n", (int)setupRetries_);
+                    installKeyboardHook();
+                    if (inputBroker) inputObserver_.observe(inputBroker);
+                    return 1000;
+                }
+                snprintf(setupStatusBuf_, sizeof(setupStatusBuf_),
+                         "SD retry %d/%d...", (int)setupRetries_, (int)MAX_SETUP_RETRIES);
+                setupStatus_ = setupStatusBuf_;
+                LOG_INFO("[MonsterMesh] SD mount failed, retry %d/%d in 2s\n",
+                         (int)setupRetries_, (int)MAX_SETUP_RETRIES);
+                return 2000;
             }
         }
 
@@ -200,6 +216,9 @@ int32_t MonsterMeshModule::runOnce()
             setupStatus_ = "ROM not found on SD";
             LOG_WARN("[MonsterMesh] emu_.begin('/pokemon.gb') failed — ROM not found?\n");
         }
+
+        // SD succeeded — init is complete regardless of ROM result
+        setupDone_ = true;
 
         // Hook keyboard: LVGL intercept for TFT builds, InputBroker for non-TFT
         installKeyboardHook();
@@ -231,26 +250,15 @@ void MonsterMeshModule::drainTxQueue()
 }
 
 // ── Keyboard ─────────────────────────────────────────────────────────────────
-// pollKeyboard() reads the T-Deck keyboard directly via I2C (address 0x55).
-// This bypasses InputBroker entirely, which avoids issues on TFT builds where
-// InputBroker may be disabled or routed through device-ui/LVGL.
-// Called every frame from emuTaskLoop() on Core 1.
-void MonsterMeshModule::installKeyboardHook() {}
+void MonsterMeshModule::installKeyboardHook() {
+    // No-op: keyboard input flows through InputBroker (handleInputEvent).
+    // For future LVGL/TFT integration, register handleKeyFromLVGL() here.
+}
 void MonsterMeshModule::handleKeyFromLVGL(uint8_t c) { handleKeyPress(c); lastKeyMs_ = millis(); }
 void MonsterMeshModule::pollKeyboard() {
-    // Read T-Deck keyboard at I2C address 0x55
-    // Returns ASCII char on press, 0 on no key
-    static uint32_t dbgCount = 0;
-    Wire.requestFrom((uint8_t)0x55, (uint8_t)1);
-    if (!Wire.available()) {
-        if (++dbgCount % 3000 == 0) Serial.printf("[MM-KB] no Wire.available (poll #%u)\n", dbgCount);
-        return;
-    }
-    uint8_t c = Wire.read();
-    if (c == 0) return;
-    Serial.printf("[MM-KB] key=0x%02X '%c'\n", c, (c >= 0x20 && c < 0x7f) ? c : '?');
-    handleKeyPress(c);
-    lastKeyMs_ = millis();
+    // Removed: direct I2C polling raced with kbI2cBase::runOnce() on Core 0 and
+    // consumed bytes needed for SYM+E → Ctrl+E modifier synthesis by InputBroker.
+    // All keyboard input now flows through handleInputEvent() via InputBroker.
 }
 
 // ── Emulator task (Core 1) ──────────────────────────────────────────────────
@@ -266,8 +274,9 @@ void MonsterMeshModule::emuTaskLoop()
     TickType_t lastWake = xTaskGetTickCount();
 
     while (true) {
-        // Poll T-Deck keyboard directly via I2C (works on both base and TFT builds)
-        pollKeyboard();
+        // Keyboard input is handled by InputBroker via handleInputEvent() on Core 0.
+        // Direct I2C polling was removed — it raced with kbI2cBase::runOnce() and
+        // prevented SYM+E → Ctrl+E modifier synthesis.
 
         // Run emulator frame (always, even when UI is showing Meshtastic screens)
         emu_.runFrame();

@@ -2,6 +2,13 @@
 #include <LittleFS.h>
 #include <SPI.h>
 
+// peanut_gb error callback — must not return (called on invalid opcode / bad read)
+static void pm_gbError(struct gb_s *gb, const enum gb_error_e err, const uint16_t addr)
+{
+    Serial.printf("[EMU] FATAL gb_error: err=%d addr=0x%04X\n", (int)err, addr);
+    while (true) vTaskDelay(portMAX_DELAY);
+}
+
 // ── begin() ──────────────────────────────────────────────────────────────────
 
 bool EmulatorApp::begin(const char *romPath) {
@@ -30,7 +37,7 @@ bool EmulatorApp::begin(const char *romPath) {
         EmulatorApp::romRead,
         EmulatorApp::cartRamRead,
         EmulatorApp::cartRamWrite,
-        nullptr,    // error callback — set to null for now
+        pm_gbError, // error callback — logs + halts (must not return)
         this);      // priv pointer
 
     if (err != GB_INIT_NO_ERROR) {

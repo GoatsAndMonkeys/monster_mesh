@@ -14,6 +14,13 @@ static void    pm_lcdDrawLine(struct gb_s *gb, const uint8_t *pixels, const uint
 static void    pm_serialTx(struct gb_s *gb, const uint8_t tx);
 static enum gb_serial_rx_ret_e pm_serialRx(struct gb_s *gb, uint8_t *rx);
 
+// peanut_gb error callback — must not return (called on invalid opcode / bad read)
+static void pm_gbError(struct gb_s *gb, const enum gb_error_e err, const uint16_t addr)
+{
+    Serial.printf("[EMU] FATAL gb_error: err=%d addr=0x%04X\n", (int)err, addr);
+    while (true) vTaskDelay(portMAX_DELAY);
+}
+
 // ── begin() ──────────────────────────────────────────────────────────────────
 
 bool MonsterMeshEmulator::begin(const char *romPath) {
@@ -37,7 +44,7 @@ bool MonsterMeshEmulator::begin(const char *romPath) {
         pm_romRead,
         pm_cartRamRead,
         pm_cartRamWrite,
-        nullptr,
+        pm_gbError,
         this);
 
     if (err != GB_INIT_NO_ERROR) {
