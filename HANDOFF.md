@@ -134,3 +134,27 @@ This means the crash is in:
 - `src/modules/monstermesh/` -- entire module directory (copy from `meshtastic-module/`)
 - `src/modules/Modules.cpp` -- include + instantiation (see `patches/Modules.patch`)
 - `src/graphics/TFTDisplay.cpp` -- getLovyanGfx() accessor (see `patches/TFTDisplay.patch`)
+
+## ROOT CAUSE FOUND: SD.h Global Constructor (2026-03-24 session 2, late)
+
+**The boot freeze is caused by `#include <SD.h>`** pulling in the Arduino SD library, which has a global constructor:
+```cpp
+// SD.cpp
+SDFS SD = SDFS(FSImplPtr(new VFSImpl()));
+```
+This runs before `main()` and freezes the ESP32-S3 on the base t-deck build (which doesn't normally link the SD library).
+
+### Proof:
+- Module enabled + SD.h included → **freezes at boot logo**
+- Module enabled + SD.h removed (SD.begin disabled) → **boots normally**
+
+### The standalone PokeMesh firmware avoids this because:
+1. It's the ONLY firmware on the device (no Meshtastic VFS conflicts)
+2. It calls `SPI.begin()` AFTER `tft.init()` — never before
+3. It uses `PEANUT_GB_HEADER_ONLY=1` build flag for peanut_gb.h
+
+### Fix options:
+1. **Add `-D HAS_SDCARD` to t-deck build** — Meshtastic includes SD.h itself when this is defined (FSCommon.cpp) and handles init via `setupSDCard()`. The SD global constructor would run but in the right context. Previously crashed but that was before spiLock fix.
+2. **Use ESP-IDF SD/MMC driver directly** — bypass Arduino SD library entirely. Use `esp_vfs_fat_sdmmc_mount()` which doesn't have a global constructor.
+3. **Load ROM from LittleFS instead of SD** — put pokemon.gb in the LittleFS partition (if it fits). No SD library needed.
+4. **Use Meshtastic's FSCom for file access** — if HAS_SDCARD is enabled and setupSDCard() succeeds, `SD.open()` works through FSCom.
