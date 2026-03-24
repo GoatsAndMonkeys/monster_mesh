@@ -1,0 +1,21 @@
+diff --git a/src/input/kbI2cBase.cpp b/src/input/kbI2cBase.cpp
+index 0ed2df116..6d13b45e8 100644
+--- a/src/input/kbI2cBase.cpp
++++ b/src/input/kbI2cBase.cpp
+@@ -429,6 +429,16 @@ int32_t KbI2cBase::runOnce()
+                     e.kbchar = c;
+                 }
+                 break;
++            case 0x65: // letter e. Modifier sends Ctrl+E (MonsterMesh emulator toggle)
++                if (is_sym) {
++                    is_sym = false;
++                    e.inputEvent = INPUT_BROKER_ANYKEY;
++                    e.kbchar = 0x05; // Ctrl+E
++                } else {
++                    e.inputEvent = INPUT_BROKER_ANYKEY;
++                    e.kbchar = c;
++                }
++                break;
+             case 0x67: // letter g. toggle gps
+                 if (is_sym) {
+                     is_sym = false;

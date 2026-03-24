@@ -1,0 +1,24 @@
+diff --git a/src/modules/Modules.cpp b/src/modules/Modules.cpp
+index e477574dd..59261f5af 100644
+--- a/src/modules/Modules.cpp
++++ b/src/modules/Modules.cpp
+@@ -49,6 +49,9 @@
+ #include "modules/PowerStressModule.h"
+ #endif
+ #include "modules/RoutingModule.h"
++#if defined(T_DECK) && !MESHTASTIC_EXCLUDE_MONSTERMESH
++#include "modules/monstermesh/MonsterMeshModule.h"
++#endif
+ #include "modules/TextMessageModule.h"
+ #if !MESHTASTIC_EXCLUDE_TRACEROUTE
+ #include "modules/TraceRouteModule.h"
+@@ -297,6 +300,9 @@ void setupModules()
+ #if !MESHTASTIC_EXCLUDE_RANGETEST && !MESHTASTIC_EXCLUDE_GPS
+     if (moduleConfig.has_range_test && moduleConfig.range_test.enabled)
+         new RangeTestModule();
++#endif
++#if defined(T_DECK) && !MESHTASTIC_EXCLUDE_MONSTERMESH
++    monsterMeshModule = new MonsterMeshModule();
+ #endif
+     // NOTE! This module must be added LAST because it likes to check for replies from other modules and avoid sending extra
+     // acks
