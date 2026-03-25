@@ -1,4 +1,7 @@
 #include "MonsterMeshEmulator.h"
+#include <LittleFS.h>
+#include <stdio.h>
+#include <sys/stat.h>
 
 // peanut_gb.h is a single-header library with all function bodies inline.
 // It MUST only be included in this one translation unit.
@@ -163,25 +166,30 @@ static enum gb_serial_rx_ret_e pm_serialRx(struct gb_s *gb, uint8_t *rx) {
 // ── ROM loading ──────────────────────────────────────────────────────────────
 
 bool MonsterMeshEmulator::loadROM(const char *path) {
-    File f = SD.open(path, FILE_READ);
-    if (!f) {
+    // Use standard C I/O — SD is mounted via ESP-IDF at /sd
+    struct stat st;
+    if (stat(path, &st) != 0) {
         Serial.printf("[EMU] ROM not found: %s\n", path);
         return false;
     }
-    romSize_ = f.size();
+    romSize_ = st.st_size;
     if (romSize_ == 0 || romSize_ > 1024 * 1024) {
         Serial.printf("[EMU] ROM bad size: %u\n", (unsigned)romSize_);
-        f.close();
         return false;
     }
     romData_ = static_cast<uint8_t *>(ps_malloc(romSize_));
     if (!romData_) {
         Serial.println("[EMU] PSRAM alloc failed for ROM");
-        f.close();
         return false;
     }
-    size_t n = f.read(romData_, romSize_);
-    f.close();
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        Serial.printf("[EMU] ROM open failed: %s\n", path);
+        free(romData_); romData_ = nullptr;
+        return false;
+    }
+    size_t n = fread(romData_, 1, romSize_, f);
+    fclose(f);
     if (n != romSize_) {
         Serial.printf("[EMU] ROM read short: %u / %u\n", (unsigned)n, (unsigned)romSize_);
         return false;

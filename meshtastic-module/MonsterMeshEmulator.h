@@ -1,7 +1,6 @@
 #pragma once
 #include <Arduino.h>
-#include <SD.h>
-#include <LittleFS.h>
+#include <FS.h>
 #include "ISerialLink.h"
 
 // Forward declaration — full peanut_gb.h only included in MonsterMeshEmulator.cpp

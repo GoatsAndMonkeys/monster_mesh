@@ -158,3 +158,82 @@ This runs before `main()` and freezes the ESP32-S3 on the base t-deck build (whi
 2. **Use ESP-IDF SD/MMC driver directly** — bypass Arduino SD library entirely. Use `esp_vfs_fat_sdmmc_mount()` which doesn't have a global constructor.
 3. **Load ROM from LittleFS instead of SD** — put pokemon.gb in the LittleFS partition (if it fits). No SD library needed.
 4. **Use Meshtastic's FSCom for file access** — if HAS_SDCARD is enabled and setupSDCard() succeeds, `SD.open()` works through FSCom.
+
+## Session 2 Final Findings (2026-03-25)
+
+### Keyboard on base t-deck: HAS_BUTTON missing
+
+The base t-deck variant.h does NOT define `BUTTON_PIN` or `HAS_BUTTON`. Without these, Meshtastic's Modules.cpp guard:
+```cpp
+#if (HAS_BUTTON || ARCH_PORTDUINO) && !MESHTASTIC_EXCLUDE_INPUTBROKER
+    inputBroker = new InputBroker();
+```
+...never creates InputBroker. **The keyboard has NEVER worked on the base t-deck build.**
+
+**Fix (applied to variant.h but not yet tested):**
+```cpp
+#define BUTTON_PIN 0              // trackball press = user button
+#define HAS_BUTTON 1
+```
+
+### NVS corruption from t-deck-tft flashes
+
+Flashing `t-deck-tft` firmware sets `config.display.displaymode = COLOR` in NVS. When you later flash the base `t-deck` firmware, it reads this from NVS and skips InputBroker. **Always erase flash before switching between t-deck and t-deck-tft:**
+```bash
+esptool --chip esp32s3 --port PORT erase-flash
+```
+
+### ESP-IDF SD driver also freezes boot
+
+Attempted `esp_vfs_fat_sdspi_mount()` (from `driver/sdspi_host.h`, `esp_vfs_fat.h`, `sdmmc_cmd.h`) — also froze at boot logo. May be pulling in the same VFS infrastructure that conflicts.
+
+### HAS_SDCARD also freezes base t-deck
+
+Adding `-D HAS_SDCARD` to base t-deck platformio.ini still causes boot freeze (even with NVS erased). The SD library global constructor is incompatible with the base t-deck boot sequence.
+
+### Clean build of v2.7.15 is broken
+
+Running `pio run -e t-deck -t clean` wipes cached objects. A full clean rebuild fails because several modules were added to the tree after the v2.7.15 tag and don't compile against the v2.7.15 protos:
+- `ReplyBotModule` — `getHopsAway` undeclared
+- `StatusLEDModule` — `LED_STATE_OFF` undeclared  
+- `StatusMessageModule` — `sensor_config`, `statusmessage` members don't exist
+- `SEN5XSensor` — `sensor_config` member doesn't exist
+- `MAX17048Sensor` — base class mismatch
+- `PMSA003ISensor` — `pendingForReadyMs` override mismatch
+
+**Fix:** Delete these files before building:
+```bash
+rm -f src/modules/ReplyBotModule.* src/modules/StatusLEDModule.* src/modules/StatusMessageModule.*
+rm -f src/modules/Telemetry/Sensor/SEN5XSensor.* src/modules/Telemetry/Sensor/MAX17048Sensor.*
+rm -f src/modules/Telemetry/Sensor/PMSA003ISensor.*
+```
+And add to platformio.ini: `-D MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR=1`
+
+### Current state of variant.h changes
+
+Added to `variants/esp32s3/t-deck/variant.h`:
+```cpp
+#define BUTTON_PIN 0
+#define HAS_BUTTON 1
+```
+
+Added to `variants/esp32s3/t-deck/platformio.ini`:
+```
+-D MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR=1
+```
+
+### SD.h removed from all module headers
+
+- `MonsterMeshEmulator.h` — changed `#include <SD.h>` to `#include <FS.h>`
+- `MonsterMeshModule.cpp` — SD.h removed, SD access stubbed out
+- `MonsterMeshEmulator.cpp` — loadROM() rewritten to use `fopen()`/`fread()` (standard C I/O, works with ESP-IDF VFS mount)
+
+### Remaining work
+
+1. Get clean build working (delete broken modules + exclude flag)
+2. Flash and verify keyboard works with HAS_BUTTON
+3. Solve SD card access — none of these work:
+   - Arduino SD.h (global constructor freezes boot)
+   - ESP-IDF sdspi mount (also freezes)
+   - HAS_SDCARD flag (also freezes)
+   - Possible alternatives: embed ROM in firmware, load from LittleFS, or use raw SPI to read SD

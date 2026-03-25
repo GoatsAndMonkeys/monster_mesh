@@ -8,8 +8,6 @@
 #include "mesh/Channels.h"
 #include "mesh/generated/meshtastic/portnums.pb.h"
 #include "input/InputBroker.h"
-#include <SD.h>
-#include <LittleFS.h>
 #include <SPI.h>
 #include <Wire.h>
 #include "concurrency/LockGuard.h"
@@ -57,7 +55,7 @@ void MonsterMeshModule::setup()
     // All real initialization is deferred to the runOnce() lazy-init block below.
     LOG_INFO("[MonsterMesh] module registered\n");
     setupStatus_ = "waiting for boot...";
-    ensureMonsterMeshChannel();
+    // ensureMonsterMeshChannel();  // DISABLED — may crash if called before channels ready
     monsterMeshModule = this;
 }
 
@@ -174,34 +172,21 @@ int32_t MonsterMeshModule::runOnce()
             emu_.setSerialLink(&shim_);
         }
 
-        // ── Mount SD card with spiLock (Meshtastic's setupSDCard pattern) ────
+        // ── SD card disabled — ROM loading not yet implemented ────────
         {
-            extern concurrency::Lock *spiLock;
-            concurrency::LockGuard g(spiLock);
-            if (!SD.begin(SPI_CS, SPI)) {
-                setupRetries_++;
-                if (setupRetries_ >= MAX_SETUP_RETRIES) {
-                    // Retries exhausted — give up on SD, still register keyboard
-                    setupDone_ = true;
-                    setupStatus_ = "SD mount failed";
-                    LOG_WARN("[MonsterMesh] SD mount failed after %d attempts\n", (int)setupRetries_);
-                    installKeyboardHook();
-                    if (inputBroker) inputObserver_.observe(inputBroker);
-                    return 1000;
-                }
-                snprintf(setupStatusBuf_, sizeof(setupStatusBuf_),
-                         "SD retry %d/%d...", (int)setupRetries_, (int)MAX_SETUP_RETRIES);
-                setupStatus_ = setupStatusBuf_;
-                LOG_INFO("[MonsterMesh] SD mount failed, retry %d/%d in 2s\n",
-                         (int)setupRetries_, (int)MAX_SETUP_RETRIES);
-                return 2000;
+            if (true) {
+                setupDone_ = true;
+                setupStatus_ = "No SD (WIP)";
+                installKeyboardHook();
+                // if (inputBroker) inputObserver_.observe(inputBroker);  // DISABLED for keyboard debug
+                return 1000;
             }
         }
 
-        LOG_INFO("[MonsterMesh] SD card mounted OK\n");
+        LOG_INFO("[MonsterMesh] SD card mounted at /sd\n");
 
         emu_.setScanlineCallback(scanlineCallback, this);
-        bool romOk = emu_.begin("/pokemon.gb");
+        bool romOk = emu_.begin("/sd/pokemon.gb");
         if (romOk) {
             emuInitialized_ = true;
             setupStatus_ = "ALT+E to play!";
