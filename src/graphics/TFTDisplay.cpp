@@ -111,6 +111,9 @@ class LGFX : public lgfx::LGFX_Device
 
 static LGFX *tft = nullptr;
 
+// Expose LovyanGFX device for modules (e.g. MonsterMesh emulator)
+lgfx::LGFX_Device *getLovyanGfx() { return tft; }
+
 #elif defined(RAK14014)
 #include <RAK14014_FT6336U.h>
 #include <TFT_eSPI.h>
@@ -610,6 +613,9 @@ class LGFX : public lgfx::LGFX_Device
 };
 
 static LGFX *tft = nullptr;
+
+// Expose LovyanGFX device for modules (e.g. MonsterMesh emulator)
+lgfx::LGFX_Device *getLovyanGfx() { return tft; }
 
 #elif defined(ST7796_CS)
 #include <LovyanGFX.hpp> // Graphics and font library for ST7796 driver chip

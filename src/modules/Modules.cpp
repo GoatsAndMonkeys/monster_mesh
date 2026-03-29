@@ -107,6 +107,10 @@
 #include "modules/DropzoneModule.h"
 #endif
 
+#if defined(T_DECK) && !MESHTASTIC_EXCLUDE_MONSTERMESH
+#include "modules/monstermesh/MonsterMeshModule.h"
+#endif
+
 /**
  * Create module instances here.  If you are adding a new module, you must 'new' it here (or somewhere else)
  */
@@ -118,6 +122,9 @@ void setupModules()
         systemCommandsModule = new SystemCommandsModule();
         buzzerFeedbackThread = new BuzzerFeedbackThread();
     }
+#endif
+#if defined(T_DECK) && !MESHTASTIC_EXCLUDE_MONSTERMESH
+    monsterMeshModule = new MonsterMeshModule();
 #endif
 #if !MESHTASTIC_EXCLUDE_ADMIN
     adminModule = new AdminModule();

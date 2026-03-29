@@ -1,0 +1,707 @@
+#include "MonsterMeshModule.h"
+
+#if defined(T_DECK) && !MESHTASTIC_EXCLUDE_MONSTERMESH
+
+#include "MeshService.h"
+#include "Router.h"
+#include "NodeDB.h"
+#include "mesh/Channels.h"
+#include "mesh/generated/meshtastic/portnums.pb.h"
+#include "input/InputBroker.h"
+#include <SPI.h>
+#include <Wire.h>
+#include "concurrency/LockGuard.h"
+#include "SPILock.h"
+
+#include "PokemonData.h"
+#include "Gen1Species.h"
+
+// LovyanGFX is available on T-Deck in both t-deck and t-deck-tft builds
+#include <LovyanGFX.hpp>
+#if HAS_TFT
+#include <lvgl.h>
+#include "display/lv_display_private.h"
+#endif
+
+MonsterMeshModule *monsterMeshModule = nullptr;
+
+extern "C" void monstermesh_set_toggle_cb(void (*cb)(void));
+
+// Global LGFX pointer set by device-ui LGFXDriver::init_lgfx()
+static lgfx::LGFX_Device *g_deviceUiLgfx = nullptr;
+extern "C" void monstermesh_set_lgfx(void *ptr)
+{
+    g_deviceUiLgfx = static_cast<lgfx::LGFX_Device *>(ptr);
+}
+
+// Called from device-ui tools menu button via function pointer
+static void mmToggle()
+{
+    if (monsterMeshModule) {
+        monsterMeshModule->handleKeyFromLVGL(0x05); // toggle emulator on/off
+    }
+}
+
+// Status getter for device-ui debug overlay
+static const char *g_mmStatus = "module not created";
+extern "C" const char *monstermesh_get_status(void)
+{
+    if (monsterMeshModule) {
+        return monsterMeshModule->getSetupStatus();
+    }
+    return g_mmStatus;
+}
+
+// ── GB button bit positions ─────────────────────────────────────────────────
+#define GB_BTN_A        (1 << 0)
+#define GB_BTN_B        (1 << 1)
+#define GB_BTN_SELECT   (1 << 2)
+#define GB_BTN_START    (1 << 3)
+#define GB_BTN_RIGHT    (1 << 4)
+#define GB_BTN_LEFT     (1 << 5)
+#define GB_BTN_UP       (1 << 6)
+#define GB_BTN_DOWN     (1 << 7)
+
+// ── Constructor ─────────────────────────────────────────────────────────────
+
+MonsterMeshModule::MonsterMeshModule()
+    : SinglePortModule("MonsterMesh", meshtastic_PortNum_PRIVATE_APP),
+      concurrency::OSThread("MonsterMesh"),
+      shim_(transport_),
+      lobby_(transport_, emu_)
+{
+    // We want to see all PRIVATE_APP packets on any channel, not just "our" channel,
+    // because wantPacket filters by channel anyway.
+    isPromiscuous = false;
+    loopbackOk = false;
+
+    // Register toggle callback for device-ui tools menu button
+    monstermesh_set_toggle_cb(mmToggle);
+}
+
+// ── setup() — called once after mesh is initialized ─────────────────────────
+
+void MonsterMeshModule::setup()
+{
+    // Meshtastic does not reliably call setup() before runOnce() for all module
+    // types, and the SPI bus / SD card may not yet be ready at this point.
+    // All real initialization is deferred to the runOnce() lazy-init block below.
+    LOG_INFO("[MonsterMesh] module registered\n");
+    setupStatus_ = "waiting for boot...";
+    // ensureMonsterMeshChannel();  // DISABLED — may crash if called before channels ready
+    monsterMeshModule = this;
+}
+
+// ── handleInputEvent() — InputBroker callback ───────────────────────────────
+
+int MonsterMeshModule::handleInputEvent(const InputEvent *event)
+{
+    if (!event) return 0;
+
+    // Always process Ctrl+E regardless of emulator state
+    if (event->kbchar == 0x05) {  // Ctrl+E
+        handleKeyPress(0x05);
+        return 0;
+    }
+
+    if (!emulatorActive_) return 0;  // let Meshtastic handle keys
+
+    // ANYKEY with kbchar = raw character
+    if (event->inputEvent == INPUT_BROKER_ANYKEY && event->kbchar != 0) {
+        handleKeyPress(event->kbchar);
+        lastKeyMs_ = millis();
+        return 0;
+    }
+
+    // Trackball events → viewport scroll
+    if (event->inputEvent == INPUT_BROKER_UP) {
+        viewportDelta_--;
+        return 0;
+    }
+    if (event->inputEvent == INPUT_BROKER_DOWN) {
+        viewportDelta_++;
+        return 0;
+    }
+    if (event->inputEvent == INPUT_BROKER_SELECT) {
+        viewportRecenter_ = true;
+        return 0;
+    }
+
+    return 0;
+}
+
+// ── ensureMonsterMeshChannel() ─────────────────────────────────────────────────
+
+void MonsterMeshModule::ensureMonsterMeshChannel()
+{
+    // Check if channel 1 already has a name set
+    auto &ch = channels.getByIndex(MONSTERMESH_CHANNEL);
+    if (ch.role == meshtastic_Channel_Role_DISABLED ||
+        strlen(ch.settings.name) == 0) {
+        // Set up channel 1 as "MonsterMesh Center"
+        ch.role = meshtastic_Channel_Role_SECONDARY;
+        strncpy(ch.settings.name, "MonsterMesh", sizeof(ch.settings.name) - 1);
+        ch.settings.name[sizeof(ch.settings.name) - 1] = '\0';
+        // Use default PSK (no encryption for easy joining)
+        ch.settings.psk.size = 1;
+        ch.settings.psk.bytes[0] = 0; // no encryption
+        channels.setChannel(ch);
+        Serial.println("[MonsterMesh] channel 1 configured as 'MonsterMesh Center'");
+    }
+}
+
+// ── wantPacket() — filter incoming packets ──────────────────────────────────
+
+bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
+{
+    // Accept PRIVATE_APP packets on our channel
+    if (p->decoded.portnum == meshtastic_PortNum_PRIVATE_APP &&
+        p->channel == MONSTERMESH_CHANNEL) {
+        return true;
+    }
+    return false;
+}
+
+// ── handleReceived() — incoming mesh packet ─────────────────────────────────
+
+ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp)
+{
+    // Push the raw payload into transport for BattleShim/Lobby to process
+    if (mp.decoded.payload.size > 0) {
+        transport_.pushReceivedPacket(
+            mp.decoded.payload.bytes,
+            mp.decoded.payload.size,
+            mp.rx_rssi
+        );
+    }
+    return ProcessMessage::STOP;  // consumed — don't pass to other modules
+}
+
+// ── runOnce() — OSThread periodic drain of tx queue ─────────────────────────
+
+int32_t MonsterMeshModule::runOnce()
+{
+    // Register keyboard observer as early as possible (after 1s) so SYM+E works
+    // even before the emulator finishes loading.
+    if (!kbObserverRegistered_ && millis() > 1000 && inputBroker) {
+        kbObserverRegistered_ = true;
+        installKeyboardHook();
+        inputObserver_.observe(inputBroker);
+    }
+
+    // Lazy init — setup() is never called by Meshtastic, so we do it here.
+    // setupDone_ is only set true after SD mounts successfully (or retries exhausted),
+    // so transient SD failures can be retried on subsequent runOnce() calls.
+    if (!setupDone_) {
+        if (millis() < 8000) {
+            return 500;
+        }
+
+        // ── One-time subsystem init (guarded so retries don't re-init) ────────
+        if (setupRetries_ == 0) {
+            // ── Transport ────────────────────────────────────────────────────
+            transport_.begin();
+            transport_.setNodeId(nodeDB->getNodeNum());
+
+            // ── Shim + Lobby ─────────────────────────────────────────────────
+            shim_.begin();
+            shim_.setLobby(&lobby_);
+            lobby_.setShim(&shim_);
+            lobby_.loadStats();
+
+            // ── Wire serial link ─────────────────────────────────────────────
+            emu_.setSerialLink(&shim_);
+        }
+
+
+        emu_.setScanlineCallback(scanlineCallback, this);
+        // Try both SD mount points: /sdcard (device-ui/TFT) and /sd (base firmware)
+        bool romOk = emu_.begin("/sdcard/pokemon.gb");
+        if (!romOk) romOk = emu_.begin("/sd/pokemon.gb");
+        if (romOk) {
+            emuInitialized_ = true;
+            setupStatus_ = "ALT+E to play!";
+            emulatorActive_ = false;  // boot into Meshtastic, ALT+E launches emulator
+
+            xTaskCreatePinnedToCore(
+                emuTaskEntry, "monstermesh_emu",
+                16384, this, 5, &emuTaskHandle_, 1
+            );
+            LOG_INFO("[MonsterMesh] emulator initialized OK!\n");
+        } else {
+            setupStatus_ = "ROM not found on SD";
+            LOG_WARN("[MonsterMesh] emu_.begin('/pokemon.gb') failed — ROM not found?\n");
+        }
+
+        // SD succeeded — init is complete regardless of ROM result
+        setupDone_ = true;
+
+        // Keyboard hook installed early (at 1s) via kbObserverRegistered_ path above.
+        // Re-install the LVGL hook here in case LVGL wasn't ready at 1s.
+        if (!kbObserverRegistered_) {
+            kbObserverRegistered_ = true;
+            installKeyboardHook();
+            if (inputBroker) inputObserver_.observe(inputBroker);
+        } else {
+            installKeyboardHook(); // re-run hook install in case LVGL indev wasn't ready yet
+        }
+    }
+    drainTxQueue();
+    return 50;
+}
+
+void MonsterMeshModule::drainTxQueue()
+{
+    uint8_t buf[237];
+    size_t len = 0;
+
+    while (transport_.hasPendingSend()) {
+        if (!transport_.dequeueSend(buf, len, sizeof(buf))) break;
+
+        meshtastic_MeshPacket *p = router->allocForSending();
+        p->to = NODENUM_BROADCAST;
+        p->channel = MONSTERMESH_CHANNEL;
+        p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
+        p->decoded.payload.size = len;
+        memcpy(p->decoded.payload.bytes, buf, len);
+
+        service->sendToMesh(p);
+    }
+}
+
+// ── Keyboard ─────────────────────────────────────────────────────────────────
+//
+// Approach 1: swap the LVGL indev read callback.
+//
+// The MUI (device-ui) registers a TDeckKeyboardInputDriver as an LVGL keypad
+// indev during DeviceGUI::init(). LVGL calls its read_cb each frame, consuming
+// the raw I2C byte and normalising it into LV_KEY_* codes.  By replacing that
+// callback with our own we can intercept before normalisation happens:
+//   - Emulator active → consume I2C byte, route to handleKeyPress(), tell LVGL nothing.
+//   - Meshtastic UI   → call original callback so the MUI keeps working.
+
+#if HAS_TFT
+static lv_indev_t *g_kbIndev      = nullptr;
+static bool        g_symActive    = false;  // KEY mode: SYM modifier latch
+static bool        g_rawMode      = false;  // true when MCU is in RAW (5-byte) mode
+static bool        g_symEConsumed = false;  // RAW mode: debounce SYM+E toggle
+
+// Switch keyboard MCU between KEY mode (0x04, 1 byte) and RAW mode (0x03, 5 bytes).
+// T-Deck keyboard MCU (ESP32-C3 at 0x55) supports this via PR #87.
+static void kbSetMode(bool raw)
+{
+    Wire.beginTransmission(0x55);
+    Wire.write(raw ? 0x03 : 0x04);
+    Wire.endTransmission();
+    g_rawMode = raw;
+    LOG_INFO("[MonsterMesh] kb → %s mode\n", raw ? "RAW" : "KEY");
+}
+
+// T-Deck keyboard matrix column/row → RAW byte bit positions:
+//   byte[0]: q=0x01  w=0x02  SYM=0x04  a=0x08  ALT=0x10  SPACE=0x20  Mic=0x40
+//   byte[1]: e=0x01  s=0x02  d=0x04    p=0x08  x=0x10    z=0x20      LShift=0x40
+//   byte[2]: r=0x01  g=0x02  t=0x04    RShift=0x08 v=0x10 c=0x20     f=0x40
+//   byte[3]: u=0x01  h=0x02  y=0x04    Enter=0x08  b=0x10 n=0x20     j=0x40
+//   byte[4]: o=0x01  l=0x02  i=0x04    BSP=0x08    $=0x10 m=0x20     k=0x40
+static uint8_t rawBytesToJoypad(const uint8_t b[5])
+{
+    uint8_t joy = 0;
+    if (b[0] & 0x02) joy |= GB_BTN_UP;     // W → Up
+    if (b[0] & 0x08) joy |= GB_BTN_LEFT;   // A → Left
+    if (b[1] & 0x02) joy |= GB_BTN_DOWN;   // S → Down
+    if (b[1] & 0x04) joy |= GB_BTN_RIGHT;  // D → Right
+    if (b[4] & 0x40) joy |= GB_BTN_A;      // K → A button
+    if (b[4] & 0x02) joy |= GB_BTN_B;      // L → B button
+    if (b[3] & 0x08) joy |= GB_BTN_START;  // Enter → Start
+    if (b[0] & 0x20) joy |= GB_BTN_SELECT; // Space → Select
+    return joy;
+}
+
+// We are the sole I2C reader for the T-Deck keyboard.
+// RAW mode (emulator active): read 5 bytes, map to GB joypad directly.
+// KEY mode (Meshtastic UI): read 1 byte, map to LVGL keys.
+// SYM+E always toggles between modes regardless of current state.
+static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
+{
+    data->state = LV_INDEV_STATE_RELEASED;
+
+    if (g_rawMode) {
+        // ── RAW mode: read 5-byte bitmask ────────────────────────────────
+        Wire.requestFrom((uint8_t)0x55, (uint8_t)5);
+        uint8_t b[5] = {};
+        for (int i = 0; i < 5 && Wire.available(); i++) b[i] = Wire.read();
+
+        // SYM+E simultaneously → exit emulator, switch back to KEY mode
+        bool symHeld = (b[0] & 0x04) != 0;
+        bool eHeld   = (b[1] & 0x01) != 0;
+        if (symHeld && eHeld) {
+            if (!g_symEConsumed) {
+                g_symEConsumed = true;
+                if (monsterMeshModule) {
+                    monsterMeshModule->setJoypadDirect(0);
+                    monsterMeshModule->handleKeyFromLVGL(0x05); // toggles emulatorActive_
+                    kbSetMode(false);
+                }
+            }
+            return;
+        }
+        g_symEConsumed = false;
+
+        // Map current key state directly to joypad (RAW = live state, no press/release)
+        if (monsterMeshModule) {
+            monsterMeshModule->setJoypadDirect(rawBytesToJoypad(b));
+        }
+        // LVGL gets nothing while emulator is active
+        return;
+    }
+
+    // ── KEY mode: read 1-byte ASCII ──────────────────────────────────────
+    Wire.requestFrom((uint8_t)0x55, (uint8_t)1);
+    uint8_t key = Wire.available() ? Wire.read() : 0;
+
+    if (key == 0) return;
+
+    LOG_DEBUG("[MonsterMesh] key=0x%02X emu=%d\n", key, monsterMeshModule ? (int)monsterMeshModule->isEmulatorActive() : -1);
+
+    // ── ALT+E (0x05 = Ctrl+E) toggles emulator on/off ───────────────────
+    // On T-Deck, ALT+letter produces control codes (ALT+E = 0x05).
+    // Also handle SYM(0x0C) + E as backup toggle.
+    if (key == 0x05) {
+        if (monsterMeshModule) {
+            monsterMeshModule->handleKeyFromLVGL(0x05);
+        }
+        return;
+    }
+
+    // SYM modifier latch (0x0c = SYM or ALT+C)
+    if (key == 0x0c) {
+        g_symActive = true;
+        return;
+    }
+    if (g_symActive && (key == 'e' || key == 'E')) {
+        g_symActive = false;
+        if (monsterMeshModule) {
+            monsterMeshModule->handleKeyFromLVGL(0x05);
+        }
+        return;
+    }
+    g_symActive = false;
+
+    // ── When emulator is active, route keys to game instead of LVGL ──────
+    if (monsterMeshModule && monsterMeshModule->isEmulatorActive()) {
+        monsterMeshModule->handleKeyFromLVGL(key);
+        return; // consume — don't pass to LVGL
+    }
+
+    // Normal MUI LVGL key mapping (replicates TDeckKeyboardInputDriver)
+    switch (key) {
+        case 0x0D: case '\n': data->key = LV_KEY_ENTER;    break;
+        case 0x08:            data->key = LV_KEY_BACKSPACE; break;
+        case 0x09:            data->key = LV_KEY_NEXT;      break;
+        case 0x1B:            data->key = LV_KEY_ESC;       break;
+        default:              data->key = key;               break;
+    }
+    data->state = LV_INDEV_STATE_PRESSED;
+}
+#endif // HAS_TFT
+
+void MonsterMeshModule::installKeyboardHook()
+{
+#if HAS_TFT
+    // Guarantee keyboard MCU starts in KEY mode
+    Wire.beginTransmission(0x55);
+    Wire.write(0x04);
+    Wire.endTransmission();
+    g_rawMode    = false;
+    g_symActive  = false;
+    g_symEConsumed = false;
+
+    lv_indev_t *indev = nullptr;
+    while ((indev = lv_indev_get_next(indev)) != nullptr) {
+        if (lv_indev_get_type(indev) == LV_INDEV_TYPE_KEYPAD) {
+            g_kbIndev = indev;
+            lv_indev_set_read_cb(indev, monsterMeshKeyboardRead);
+            LOG_INFO("[MonsterMesh] LVGL kb hook installed (indev=%p)\n", indev);
+            return;
+        }
+    }
+    LOG_WARN("[MonsterMesh] No LVGL keypad indev found — hook not installed\n");
+#endif
+}
+
+void MonsterMeshModule::handleKeyFromLVGL(uint8_t c) { handleKeyPress(c); lastKeyMs_ = millis(); }
+
+void MonsterMeshModule::pollKeyboard() {
+    // Unused: keyboard flows through LVGL hook (HAS_TFT) or InputBroker (non-TFT).
+}
+
+// ── Emulator task (Core 1) ──────────────────────────────────────────────────
+
+void MonsterMeshModule::emuTaskEntry(void *pv)
+{
+    static_cast<MonsterMeshModule *>(pv)->emuTaskLoop();
+}
+
+void MonsterMeshModule::emuTaskLoop()
+{
+    const TickType_t framePeriod = pdMS_TO_TICKS(16);  // ~60fps
+    TickType_t lastWake = xTaskGetTickCount();
+
+    while (true) {
+        // Keyboard input is handled by InputBroker via handleInputEvent() on Core 0.
+        // Direct I2C polling was removed — it raced with kbI2cBase::runOnce() and
+        // prevented SYM+E → Ctrl+E modifier synthesis.
+
+        // Run emulator frame (always, even when UI is showing Meshtastic screens)
+        emu_.runFrame();
+
+        // BattleShim tick (drives state machine + serial batch flush)
+        shim_.tick();
+
+        // ── Auto-save on battle end + ELO ────────────────────────────────
+        uint8_t curBattle = emu_.readWRAM(Gen1::wIsInBattle);
+
+        if (prevBattle_ == 0 && curBattle == 2 && opponentElo_ == 0) {
+            uint16_t sid = shim_.sessionId();
+            if (sid != 0) {
+                uint32_t myId = transport_.nodeId();
+                for (uint8_t i = 0; i < lobby_.peerCount(); i++) {
+                    uint16_t testSid = (uint16_t)(myId ^ lobby_.peer(i).chipId);
+                    if (testSid == sid) {
+                        opponentElo_ = lobby_.peer(i).elo;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (prevBattle_ != 0 && curBattle == 0) {
+            emu_.save();
+            if (opponentElo_ > 0) {
+                uint8_t partyCount = emu_.readWRAM(Gen1::wPartyCount);
+                bool won = false;
+                for (uint8_t i = 0; i < partyCount && i < 6; i++) {
+                    uint16_t hp = ((uint16_t)emu_.readWRAM(Gen1::wPartyMons + i * 44 + 1) << 8) |
+                                  emu_.readWRAM(Gen1::wPartyMons + i * 44 + 2);
+                    if (hp > 0) { won = true; break; }
+                }
+                lobby_.recordResult(won, opponentElo_);
+                opponentElo_ = 0;
+            }
+        }
+        prevBattle_ = curBattle;
+
+        // ── Lobby tick ───────────────────────────────────────────────────
+        lobby_.tick(millis());
+
+        // ── Viewport scroll ──────────────────────────────────────────────
+        if (viewportRecenter_) {
+            emu_.centerViewport();
+            viewportRecenter_ = false;
+        }
+        int8_t vd = viewportDelta_;
+        if (vd != 0) {
+            emu_.scrollViewport(vd);
+            viewportDelta_ = 0;
+        }
+
+        // ── Lobby key input ──────────────────────────────────────────────
+        uint8_t lk = lobbyKey_;
+        if (lk) {
+            lobbyKey_ = 0;
+            // Process lobby key
+            if (lobbyOpen_) {
+                switch (lk) {
+                    case 'w': case 'W': lobby_.navigateUp();   break;
+                    case 's': case 'S': lobby_.navigateDown(); break;
+                    case 'k': case 'K': lobby_.selectPeer();   break;
+                    case 'l': case 'L':
+                        if (lobby_.state() == MonsterMeshLobby::State::INCOMING)
+                            lobby_.rejectIncoming();
+                        else if (lobby_.state() == MonsterMeshLobby::State::CHALLENGING) {
+                            lobby_.close();
+                            lobby_.open();
+                        }
+                        break;
+                }
+            }
+        }
+
+        // ── Auto-release keys after KEY_RELEASE_MS ──────────────────────
+        // T-Deck keyboard sends press only, no release events.
+        // Release all keys after a short hold time.
+        if (kbMask_ && lastKeyMs_ && (millis() - lastKeyMs_ > KEY_RELEASE_MS)) {
+            joypadState_ &= ~kbMask_;
+            kbMask_ = 0;
+        }
+
+        // ── Push joypad state to emulator ────────────────────────────────
+        emu_.setJoypad(joypadState_);
+
+        vTaskDelayUntil(&lastWake, framePeriod);
+    }
+}
+
+// ── Scanline callback — blits to TFT via Meshtastic's display ───────────────
+
+void MonsterMeshModule::scanlineCallback(uint8_t line, const uint16_t *pixels320,
+                                       int16_t screenY0, int16_t screenY1, void *ctx)
+{
+    MonsterMeshModule *self = static_cast<MonsterMeshModule *>(ctx);
+    if (!self->emulatorActive_) return;  // don't draw if Meshtastic UI is showing
+
+    static uint32_t scanCount = 0;
+    if (scanCount++ < 5) {
+        LOG_INFO("[MonsterMesh] scanline line=%d y0=%d y1=%d\n", line, screenY0, screenY1);
+    }
+
+    // Access TFT directly via LovyanGFX.
+    // Access TFT via device-ui's LGFX pointer (set by LGFXDriver::init_lgfx).
+    lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
+    if (!gfx) { if (scanCount < 10) LOG_WARN("[MonsterMesh] gfx=NULL in scanline!\n"); return; }
+    if (screenY0 >= 0 && screenY0 < PM_DISP_H)
+        gfx->pushImage(0, screenY0, PM_DISP_W, 1, pixels320);
+    if (screenY1 >= 0 && screenY1 < PM_DISP_H)
+        gfx->pushImage(0, screenY1, PM_DISP_W, 1, pixels320);
+}
+
+// ── drawFrame() — Meshtastic OLED/TFT UI frame ─────────────────────────────
+
+#if HAS_SCREEN
+void MonsterMeshModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *state,
+                                int16_t x, int16_t y)
+{
+    // When in emulator mode, the actual rendering is done by the scanline
+    // callback in the emulator task. This drawFrame just shows status text
+    // if the emulator isn't running, or overlays.
+    if (!emulatorActive_) {
+        display->setTextAlignment(TEXT_ALIGN_CENTER);
+        display->setFont(ArialMT_Plain_16);
+        display->drawString(x + 64, y + 20, "MonsterMesh");
+        display->setFont(ArialMT_Plain_10);
+        display->drawString(x + 64, y + 40, setupStatus_);
+        return;
+    }
+}
+#endif
+
+// ── handleKeyPress() — process keyboard input ───────────────────────────────
+
+void MonsterMeshModule::handleKeyPress(uint8_t ascii)
+{
+    // ── Ctrl+E: toggle emulator/Meshtastic UI ──────────────────────────
+    if (ascii == 0x05) {  // Ctrl+E
+        if (!emuInitialized_) {
+            LOG_WARN("[MonsterMesh] emulator not ready — status: %s\n", setupStatus_);
+#if HAS_TFT
+            // Show status on screen briefly via LVGL message box
+            static lv_obj_t *msgbox = nullptr;
+            if (!msgbox) {
+                msgbox = lv_label_create(lv_layer_top());
+                lv_obj_set_style_bg_opa(msgbox, LV_OPA_80, 0);
+                lv_obj_set_style_bg_color(msgbox, lv_color_hex(0x000000), 0);
+                lv_obj_set_style_text_color(msgbox, lv_color_hex(0xFFFFFF), 0);
+                lv_obj_set_style_pad_all(msgbox, 10, 0);
+                lv_obj_center(msgbox);
+            }
+            lv_label_set_text_fmt(msgbox, "MonsterMesh: %s", setupStatus_);
+            lv_obj_remove_flag(msgbox, LV_OBJ_FLAG_HIDDEN);
+            // Auto-hide after 3 seconds
+            lv_anim_t a;
+            lv_anim_init(&a);
+            lv_anim_set_var(&a, msgbox);
+            lv_anim_set_duration(&a, 3000);
+            lv_anim_set_completed_cb(&a, [](lv_anim_t *anim) {
+                lv_obj_add_flag((lv_obj_t *)anim->var, LV_OBJ_FLAG_HIDDEN);
+            });
+            lv_anim_start(&a);
+#endif
+            return;
+        }
+        emulatorActive_ = !emulatorActive_;
+#if HAS_TFT
+        // Show brief on-screen diagnostic before switching
+        {
+            lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
+            if (gfx && emulatorActive_) {
+                gfx->fillScreen(0x0000);
+                gfx->setTextColor(0xFFFF);
+                gfx->setTextSize(1);
+                gfx->setCursor(10, 10);
+                gfx->printf("EMU ON  task=%p  init=%d", emuTaskHandle_, (int)emuInitialized_);
+                gfx->setCursor(10, 30);
+                gfx->printf("running=%d  joypad=0x%02X", (int)emu_.isRunning(), (int)joypadState_);
+            }
+        }
+        // Disable/enable LVGL display flush so it doesn't overwrite emulator
+        lv_display_t *disp = lv_display_get_default();
+        if (disp) {
+            if (emulatorActive_) {
+                // Save real flush callback, replace with no-op
+                savedFlushCb_ = (void *)disp->flush_cb;
+                lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
+                    lv_display_flush_ready(d); // must signal done or LVGL stalls
+                });
+            } else {
+                // Restore real flush callback
+                if (savedFlushCb_) {
+                    lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
+                    savedFlushCb_ = nullptr;
+                }
+                lv_obj_invalidate(lv_screen_active()); // force full redraw
+            }
+        }
+#endif
+#if HAS_SCREEN
+        if (emulatorActive_) requestFocus();
+#endif
+        return;
+    }
+
+    if (!emulatorActive_) return;
+
+    // ── Tab: debug overlay toggle ──────────────────────────────────────
+    if (ascii == 0x09) {
+        debugActive_ = !debugActive_;
+        return;
+    }
+
+    // ── P: lobby toggle ────────────────────────────────────────────────
+    if (ascii == 'p' || ascii == 'P') {
+        if (lobbyOpen_) {
+            lobby_.close();
+            lobbyOpen_ = false;
+        } else {
+            lobby_.open();
+            lobbyOpen_ = true;
+        }
+        return;
+    }
+
+    // ── Lobby capture mode ─────────────────────────────────────────────
+    if (lobbyOpen_) {
+        if (ascii == 'w' || ascii == 'W' || ascii == 's' || ascii == 'S' ||
+            ascii == 'k' || ascii == 'K' || ascii == 'l' || ascii == 'L') {
+            lobbyKey_ = ascii;
+            return;
+        }
+    }
+
+    // ── Game Boy button mapping ────────────────────────────────────────
+    uint8_t bit = 0;
+    switch (ascii) {
+        case 'w': case 'W': bit = GB_BTN_UP;     break;
+        case 's': case 'S': bit = GB_BTN_DOWN;   break;
+        case 'a': case 'A': bit = GB_BTN_LEFT;   break;
+        case 'd': case 'D': bit = GB_BTN_RIGHT;  break;
+        case 'k': case 'K': bit = GB_BTN_A;      break;
+        case 'l': case 'L': bit = GB_BTN_B;      break;
+        case '\r': case '\n': bit = GB_BTN_START;  break;
+        case ' ': case 0x08: bit = GB_BTN_SELECT; break;
+        default: return;
+    }
+    joypadState_ |= bit;
+    kbMask_ |= bit;
+}
+
+#endif // T_DECK && !MESHTASTIC_EXCLUDE_MONSTERMESH
