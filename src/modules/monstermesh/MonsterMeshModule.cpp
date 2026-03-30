@@ -10,6 +10,7 @@
 #include "input/InputBroker.h"
 #include <SPI.h>
 #include <Wire.h>
+#include <SD.h>
 #include "concurrency/LockGuard.h"
 #include "SPILock.h"
 
@@ -214,14 +215,33 @@ int32_t MonsterMeshModule::runOnce()
         }
 
 
+        // Mount SD via Arduino SD library — registers VFS at /sd
+        // Must use same SPI bus config as FSCommon.cpp (shared bus with TFT)
+        setupStatus_ = "mounting SD...";
+        bool sdOk = false;
+        {
+            concurrency::LockGuard g(spiLock);
+            SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+            sdOk = SD.begin(SDCARD_CS, SPI, 4000000U);
+        }
+        if (!sdOk) {
+            setupStatus_ = "SD mount FAILED";
+            LOG_WARN("[MonsterMesh] SD.begin() failed\n");
+            setupDone_ = true;
+            return 50;
+        }
+        setupStatus_ = "SD OK, loading ROM...";
+
         emu_.setScanlineCallback(scanlineCallback, this);
-        // Try both SD mount points: /sdcard (device-ui/TFT) and /sd (base firmware)
-        bool romOk = emu_.begin("/sdcard/pokemon.gb");
-        if (!romOk) romOk = emu_.begin("/sd/pokemon.gb");
+        bool romOk = emu_.begin("/sd/pokemon.gb");
+        if (!romOk) {
+            setupStatus_ = "try /sdcard path...";
+            romOk = emu_.begin("/sdcard/pokemon.gb");
+        }
         if (romOk) {
             emuInitialized_ = true;
             setupStatus_ = "ALT+E to play!";
-            emulatorActive_ = false;  // boot into Meshtastic, ALT+E launches emulator
+            emulatorActive_ = false;
 
             xTaskCreatePinnedToCore(
                 emuTaskEntry, "monstermesh_emu",
@@ -230,7 +250,7 @@ int32_t MonsterMeshModule::runOnce()
             LOG_INFO("[MonsterMesh] emulator initialized OK!\n");
         } else {
             setupStatus_ = "ROM not found on SD";
-            LOG_WARN("[MonsterMesh] emu_.begin('/pokemon.gb') failed — ROM not found?\n");
+            LOG_WARN("[MonsterMesh] ROM not found at /sd/ or /sdcard/\n");
         }
 
         // SD succeeded — init is complete regardless of ROM result
@@ -555,10 +575,9 @@ void MonsterMeshModule::scanlineCallback(uint8_t line, const uint16_t *pixels320
         LOG_INFO("[MonsterMesh] scanline line=%d y0=%d y1=%d\n", line, screenY0, screenY1);
     }
 
-    // Access TFT directly via LovyanGFX.
-    // Access TFT via device-ui's LGFX pointer (set by LGFXDriver::init_lgfx).
     lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
     if (!gfx) { if (scanCount < 10) LOG_WARN("[MonsterMesh] gfx=NULL in scanline!\n"); return; }
+
     if (screenY0 >= 0 && screenY0 < PM_DISP_H)
         gfx->pushImage(0, screenY0, PM_DISP_W, 1, pixels320);
     if (screenY1 >= 0 && screenY1 < PM_DISP_H)
@@ -620,35 +639,36 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
         }
         emulatorActive_ = !emulatorActive_;
 #if HAS_TFT
-        // Show brief on-screen diagnostic before switching
-        {
-            lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
-            if (gfx && emulatorActive_) {
-                gfx->fillScreen(0x0000);
-                gfx->setTextColor(0xFFFF);
-                gfx->setTextSize(1);
-                gfx->setCursor(10, 10);
-                gfx->printf("EMU ON  task=%p  init=%d", emuTaskHandle_, (int)emuInitialized_);
-                gfx->setCursor(10, 30);
-                gfx->printf("running=%d  joypad=0x%02X", (int)emu_.isRunning(), (int)joypadState_);
-            }
-        }
-        // Disable/enable LVGL display flush so it doesn't overwrite emulator
         lv_display_t *disp = lv_display_get_default();
         if (disp) {
             if (emulatorActive_) {
-                // Save real flush callback, replace with no-op
+                // Disable LVGL flush FIRST so it can't overwrite our clear
                 savedFlushCb_ = (void *)disp->flush_cb;
                 lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
-                    lv_display_flush_ready(d); // must signal done or LVGL stalls
+                    lv_display_flush_ready(d);
                 });
+                // Now clear screen and show diagnostic
+                lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
+                if (gfx) {
+                    gfx->fillScreen(0x0000);
+                    gfx->setTextColor(0xFFFF);
+                    gfx->setTextSize(1);
+                    gfx->setCursor(10, 10);
+                    gfx->printf("gfx=%p task=%p init=%d", gfx, emuTaskHandle_, (int)emuInitialized_);
+                    gfx->setCursor(10, 25);
+                    gfx->printf("running=%d status=%s", (int)emu_.isRunning(), setupStatus_);
+                    gfx->setCursor(10, 40);
+                    gfx->printf("active=%d viewportY=%d", (int)emulatorActive_, (int)emu_.viewportY());
+                } else {
+                    LOG_WARN("[MonsterMesh] gfx is NULL on toggle!\n");
+                }
             } else {
-                // Restore real flush callback
+                // Restore LVGL flush callback
                 if (savedFlushCb_) {
                     lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
                     savedFlushCb_ = nullptr;
                 }
-                lv_obj_invalidate(lv_screen_active()); // force full redraw
+                lv_obj_invalidate(lv_screen_active());
             }
         }
 #endif
