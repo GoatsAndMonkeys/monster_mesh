@@ -14,6 +14,7 @@
 #include "concurrency/LockGuard.h"
 #include "SPILock.h"
 
+#include "PowerFSM.h"
 #include "PokemonData.h"
 #include "Gen1Species.h"
 
@@ -217,7 +218,9 @@ int32_t MonsterMeshModule::runOnce()
 
         // Mount SD via Arduino SD library — registers VFS at /sd
         // Must use same SPI bus config as FSCommon.cpp (shared bus with TFT)
-        setupStatus_ = "mounting SD...";
+        // Retries handle SPI bus contention with TFT driver
+        snprintf(setupStatusBuf_, sizeof(setupStatusBuf_), "SD attempt %d/%d...", setupRetries_ + 1, MAX_SETUP_RETRIES);
+        setupStatus_ = setupStatusBuf_;
         bool sdOk = false;
         {
             concurrency::LockGuard g(spiLock);
@@ -225,10 +228,17 @@ int32_t MonsterMeshModule::runOnce()
             sdOk = SD.begin(SDCARD_CS, SPI, 4000000U);
         }
         if (!sdOk) {
-            setupStatus_ = "SD mount FAILED";
-            LOG_WARN("[MonsterMesh] SD.begin() failed\n");
-            setupDone_ = true;
-            return 50;
+            setupRetries_++;
+            if (setupRetries_ >= MAX_SETUP_RETRIES) {
+                setupStatus_ = "SD mount FAILED";
+                LOG_WARN("[MonsterMesh] SD.begin() failed after %d retries\n", MAX_SETUP_RETRIES);
+                setupDone_ = true;
+            } else {
+                snprintf(setupStatusBuf_, sizeof(setupStatusBuf_), "SD retry %d/%d...", setupRetries_ + 1, MAX_SETUP_RETRIES);
+                setupStatus_ = setupStatusBuf_;
+                LOG_WARN("[MonsterMesh] SD.begin() failed, retry %d\n", setupRetries_);
+            }
+            return 2000; // retry in 2 seconds
         }
         setupStatus_ = "SD OK, loading ROM...";
 
@@ -253,7 +263,6 @@ int32_t MonsterMeshModule::runOnce()
             LOG_WARN("[MonsterMesh] ROM not found at /sd/ or /sdcard/\n");
         }
 
-        // SD succeeded — init is complete regardless of ROM result
         setupDone_ = true;
 
         // Keyboard hook installed early (at 1s) via kbObserverRegistered_ path above.
@@ -266,6 +275,21 @@ int32_t MonsterMeshModule::runOnce()
             installKeyboardHook(); // re-run hook install in case LVGL indev wasn't ready yet
         }
     }
+    // Re-suppress LVGL flush if emulator is active — screen sleep/wake
+    // may restore the real flush callback behind our back
+#if HAS_TFT
+    if (emulatorActive_ && savedFlushCb_) {
+        lv_display_t *disp = lv_display_get_default();
+        if (disp && disp->flush_cb != nullptr) {
+            // Check if LVGL's flush was restored (not our no-op)
+            // Our no-op is a lambda, so we can't easily compare — just re-set it
+            lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
+                lv_display_flush_ready(d);
+            });
+        }
+    }
+#endif
+
     drainTxQueue();
     return 50;
 }
@@ -578,10 +602,18 @@ void MonsterMeshModule::scanlineCallback(uint8_t line, const uint16_t *pixels320
     lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
     if (!gfx) { if (scanCount < 10) LOG_WARN("[MonsterMesh] gfx=NULL in scanline!\n"); return; }
 
+    // Reset LGFX state at start of each frame — screen sleep/wake
+    // corrupts the internal draw window, causing shifted rendering
+    if (line == 0) {
+        gfx->clearClipRect();
+    }
+
+    gfx->startWrite();
     if (screenY0 >= 0 && screenY0 < PM_DISP_H)
         gfx->pushImage(0, screenY0, PM_DISP_W, 1, pixels320);
     if (screenY1 >= 0 && screenY1 < PM_DISP_H)
         gfx->pushImage(0, screenY1, PM_DISP_W, 1, pixels320);
+    gfx->endWrite();
 }
 
 // ── drawFrame() — Meshtastic OLED/TFT UI frame ─────────────────────────────
@@ -608,6 +640,11 @@ void MonsterMeshModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *stat
 
 void MonsterMeshModule::handleKeyPress(uint8_t ascii)
 {
+    // Keep screen awake on any keypress while emulator is active
+    if (emulatorActive_) {
+        powerFSM.trigger(EVENT_INPUT);
+    }
+
     // ── Ctrl+E: toggle emulator/Meshtastic UI ──────────────────────────
     if (ascii == 0x05) {  // Ctrl+E
         if (!emuInitialized_) {
@@ -647,20 +684,13 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
                 lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
                     lv_display_flush_ready(d);
                 });
-                // Now clear screen and show diagnostic
+                // Reset LGFX draw state and clear screen
                 lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
                 if (gfx) {
+                    gfx->clearClipRect();
+                    gfx->startWrite();
                     gfx->fillScreen(0x0000);
-                    gfx->setTextColor(0xFFFF);
-                    gfx->setTextSize(1);
-                    gfx->setCursor(10, 10);
-                    gfx->printf("gfx=%p task=%p init=%d", gfx, emuTaskHandle_, (int)emuInitialized_);
-                    gfx->setCursor(10, 25);
-                    gfx->printf("running=%d status=%s", (int)emu_.isRunning(), setupStatus_);
-                    gfx->setCursor(10, 40);
-                    gfx->printf("active=%d viewportY=%d", (int)emulatorActive_, (int)emu_.viewportY());
-                } else {
-                    LOG_WARN("[MonsterMesh] gfx is NULL on toggle!\n");
+                    gfx->endWrite();
                 }
             } else {
                 // Restore LVGL flush callback

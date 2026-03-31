@@ -70,7 +70,7 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     bool setupDone_          = false;
     bool kbObserverRegistered_ = false;
     uint8_t setupRetries_ = 0;
-    static constexpr uint8_t MAX_SETUP_RETRIES = 3;
+    static constexpr uint8_t MAX_SETUP_RETRIES = 10;
     const char *setupStatus_ = "waiting...";
     char setupStatusBuf_[64] = {};
     bool emuInitialized_  = false;
