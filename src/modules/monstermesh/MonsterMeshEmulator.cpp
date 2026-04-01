@@ -126,11 +126,13 @@ static void pm_lcdDrawLine(struct gb_s *gb, const uint8_t *pixels,
                             const uint_fast8_t line) {
     MonsterMeshEmulator *self = static_cast<MonsterMeshEmulator *>(gb->direct.priv);
 
-    int16_t y0 = (int16_t)(line * GB_SCALE) - self->viewportY_;
-    int16_t y1 = y0 + 1;
+    // Stretch 144 GB lines to fill 240 screen rows (1.667x vertical)
+    int16_t y0 = (int16_t)((uint16_t)line * PM_DISP_H / GB_SCREEN_H);
+    int16_t y1 = (int16_t)(((uint16_t)line + 1) * PM_DISP_H / GB_SCREEN_H - 1);
 
     if (y1 < 0 || y0 >= PM_DISP_H) return;
 
+    // 2x horizontal: 160 → 320
     uint16_t *buf = self->lineBuf_;
     for (int x = 0; x < GB_SCREEN_W; x++) {
         uint16_t c = DMG_PALETTE[pixels[x] & 0x03];

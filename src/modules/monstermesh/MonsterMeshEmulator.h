@@ -52,7 +52,7 @@ public:
         viewportY_ = constrain(viewportY_ + delta * VIEWPORT_SCROLL_STEP,
                                VIEWPORT_MIN, VIEWPORT_MAX);
     }
-    void centerViewport() { viewportY_ = VIEWPORT_CENTER; }
+    void centerViewport() { viewportY_ = 0; }
 
     // ── Framebuffer access (for MonsterMeshModule to blit to display) ──────────
     // lineBuf_ is written by lcdDrawLine. The module reads it to push to TFT.
@@ -77,7 +77,7 @@ public:
     bool         running_     = false;
     ISerialLink *serialLink_  = nullptr;
     char         romPath_[64] = {};
-    int16_t      viewportY_   = VIEWPORT_CENTER;
+    int16_t      viewportY_   = 0;
     uint16_t     lineBuf_[PM_DISP_W];
     volatile uint8_t joypadState_ = 0;
 

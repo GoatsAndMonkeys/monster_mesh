@@ -592,27 +592,25 @@ void MonsterMeshModule::scanlineCallback(uint8_t line, const uint16_t *pixels320
                                        int16_t screenY0, int16_t screenY1, void *ctx)
 {
     MonsterMeshModule *self = static_cast<MonsterMeshModule *>(ctx);
-    if (!self->emulatorActive_) return;  // don't draw if Meshtastic UI is showing
+    if (!self->emulatorActive_) return;
 
-    static uint32_t scanCount = 0;
-    if (scanCount++ < 5) {
-        LOG_INFO("[MonsterMesh] scanline line=%d y0=%d y1=%d\n", line, screenY0, screenY1);
-    }
+    // NOTE: startWrite()/endWrite() are called in emuTaskLoop() around the
+    // entire frame, NOT per-scanline.  This prevents other SPI users (LVGL,
+    // SD card) from changing the ST7789 address window between scanlines,
+    // which was causing the horizontal-wrap / off-center artefact.
 
     lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
-    if (!gfx) { if (scanCount < 10) LOG_WARN("[MonsterMesh] gfx=NULL in scanline!\n"); return; }
-
-    // Reset LGFX state at start of each frame — screen sleep/wake
-    // corrupts the internal draw window, causing shifted rendering
-    if (line == 0) {
-        gfx->clearClipRect();
-    }
+    if (!gfx) return;
 
     gfx->startWrite();
-    if (screenY0 >= 0 && screenY0 < PM_DISP_H)
-        gfx->pushImage(0, screenY0, PM_DISP_W, 1, pixels320);
-    if (screenY1 >= 0 && screenY1 < PM_DISP_H)
-        gfx->pushImage(0, screenY1, PM_DISP_W, 1, pixels320);
+    // screenY0..screenY1 is the range of screen rows for this GB line
+    // (1 or 2 rows depending on the 144→240 stretch)
+    for (int16_t y = screenY0; y <= screenY1; y++) {
+        if (y >= 0 && y < PM_DISP_H) {
+            gfx->setAddrWindow(0, y, PM_DISP_W, 1);
+            gfx->pushPixels((lgfx::rgb565_t *)pixels320, PM_DISP_W);
+        }
+    }
     gfx->endWrite();
 }
 
