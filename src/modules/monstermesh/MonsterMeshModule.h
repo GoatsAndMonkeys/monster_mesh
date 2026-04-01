@@ -111,6 +111,11 @@ private:
     // Debug overlay
     bool debugActive_ = false;
 
+    // Hardware button toggle (GPIO 0 / mic button)
+    volatile bool buttonTogglePending_ = false;
+    uint32_t lastButtonMs_ = 0;
+    static void IRAM_ATTR buttonISR(void *arg);
+
     // Saved LVGL flush callback (swapped out when emulator is active)
     void *savedFlushCb_ = nullptr;
 

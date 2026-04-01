@@ -36,6 +36,13 @@ extern "C" void monstermesh_set_lgfx(void *ptr)
     g_deviceUiLgfx = static_cast<lgfx::LGFX_Device *>(ptr);
 }
 
+// GPIO 0 ISR — sets flag for runOnce() to handle the toggle
+void IRAM_ATTR MonsterMeshModule::buttonISR(void *arg)
+{
+    MonsterMeshModule *self = static_cast<MonsterMeshModule *>(arg);
+    self->buttonTogglePending_ = true;
+}
+
 // Called from device-ui tools menu button via function pointer
 static void mmToggle()
 {
@@ -265,6 +272,11 @@ int32_t MonsterMeshModule::runOnce()
 
         setupDone_ = true;
 
+        // Set up GPIO 0 (mic/boot button) interrupt to toggle emulator
+        pinMode(0, INPUT_PULLUP);
+        attachInterruptArg(0, buttonISR, this, FALLING);
+        LOG_INFO("[MonsterMesh] GPIO 0 button interrupt attached\n");
+
         // Keyboard hook installed early (at 1s) via kbObserverRegistered_ path above.
         // Re-install the LVGL hook here in case LVGL wasn't ready at 1s.
         if (!kbObserverRegistered_) {
@@ -275,6 +287,16 @@ int32_t MonsterMeshModule::runOnce()
             installKeyboardHook(); // re-run hook install in case LVGL indev wasn't ready yet
         }
     }
+    // Check for hardware button toggle (GPIO 0 / mic button)
+    if (buttonTogglePending_) {
+        uint32_t now = millis();
+        if (now - lastButtonMs_ > 300) {  // 300ms debounce
+            lastButtonMs_ = now;
+            handleKeyPress(0x05);  // same as Ctrl+E toggle
+        }
+        buttonTogglePending_ = false;
+    }
+
     // Re-suppress LVGL flush if emulator is active — screen sleep/wake
     // may restore the real flush callback behind our back
 #if HAS_TFT
