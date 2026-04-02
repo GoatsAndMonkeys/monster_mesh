@@ -36,13 +36,6 @@ extern "C" void monstermesh_set_lgfx(void *ptr)
     g_deviceUiLgfx = static_cast<lgfx::LGFX_Device *>(ptr);
 }
 
-// GPIO 0 ISR — sets flag for runOnce() to handle the toggle
-void IRAM_ATTR MonsterMeshModule::buttonISR(void *arg)
-{
-    MonsterMeshModule *self = static_cast<MonsterMeshModule *>(arg);
-    self->buttonTogglePending_ = true;
-}
-
 // Called from device-ui tools menu button via function pointer
 static void mmToggle()
 {
@@ -113,6 +106,8 @@ int MonsterMeshModule::handleInputEvent(const InputEvent *event)
         return 0;
     }
 
+    // Trackball press toggle is handled by GPIO 0 polling in monsterMeshKeyboardRead()
+
     if (!emulatorActive_) return 0;  // let Meshtastic handle keys
 
     // ANYKEY with kbchar = raw character
@@ -129,10 +124,6 @@ int MonsterMeshModule::handleInputEvent(const InputEvent *event)
     }
     if (event->inputEvent == INPUT_BROKER_DOWN) {
         viewportDelta_++;
-        return 0;
-    }
-    if (event->inputEvent == INPUT_BROKER_SELECT) {
-        viewportRecenter_ = true;
         return 0;
     }
 
@@ -272,10 +263,7 @@ int32_t MonsterMeshModule::runOnce()
 
         setupDone_ = true;
 
-        // Set up GPIO 0 (mic/boot button) interrupt to toggle emulator
-        pinMode(0, INPUT_PULLUP);
-        attachInterruptArg(0, buttonISR, this, FALLING);
-        LOG_INFO("[MonsterMesh] GPIO 0 button interrupt attached\n");
+        // Trackball press (GPIO 0 / TB_PRESS) handled via InputBroker SELECT event
 
         // Keyboard hook installed early (at 1s) via kbObserverRegistered_ path above.
         // Re-install the LVGL hook here in case LVGL wasn't ready at 1s.
@@ -287,15 +275,7 @@ int32_t MonsterMeshModule::runOnce()
             installKeyboardHook(); // re-run hook install in case LVGL indev wasn't ready yet
         }
     }
-    // Check for hardware button toggle (GPIO 0 / mic button)
-    if (buttonTogglePending_) {
-        uint32_t now = millis();
-        if (now - lastButtonMs_ > 300) {  // 300ms debounce
-            lastButtonMs_ = now;
-            handleKeyPress(0x05);  // same as Ctrl+E toggle
-        }
-        buttonTogglePending_ = false;
-    }
+    // Trackball press toggle is handled in handleInputEvent() via INPUT_BROKER_SELECT
 
     // Keep screen awake while emulator is active — prevent sleep entirely
     // so we never hit the sleep/wake LGFX state corruption
@@ -397,9 +377,27 @@ static uint8_t rawBytesToJoypad(const uint8_t b[5])
 // RAW mode (emulator active): read 5 bytes, map to GB joypad directly.
 // KEY mode (Meshtastic UI): read 1 byte, map to LVGL keys.
 // SYM+E always toggles between modes regardless of current state.
+static bool    g_tbWasPressed = false;  // trackball press edge detection
+static uint32_t g_tbLastToggleMs = 0;
+
 static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
 {
     data->state = LV_INDEV_STATE_RELEASED;
+
+    // ── Trackball press (GPIO 0 / TB_PRESS) toggle ───────────────────────
+    // Poll directly here on Core 0 — reliable and thread-safe for LVGL ops.
+    // TrackballInterrupt's attachInterrupt still fires but we just read the pin state.
+    {
+        bool pressed = (digitalRead(0) == LOW);
+        if (pressed && !g_tbWasPressed && monsterMeshModule) {
+            uint32_t now = millis();
+            if (now - g_tbLastToggleMs > 600) {
+                g_tbLastToggleMs = now;
+                monsterMeshModule->handleKeyFromLVGL(0x05);
+            }
+        }
+        g_tbWasPressed = pressed;
+    }
 
     if (g_rawMode) {
         // ── RAW mode: read 5-byte bitmask ────────────────────────────────
@@ -630,6 +628,7 @@ void MonsterMeshModule::scanlineCallback(uint8_t line, const uint16_t *pixels320
     if (!gfx) return;
 
     gfx->startWrite();
+    gfx->setSwapBytes(true);
     // screenY0..screenY1 is the range of screen rows for this GB line
     // (1 or 2 rows depending on the 144→240 stretch)
     for (int16_t y = screenY0; y <= screenY1; y++) {
@@ -703,20 +702,25 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
         lv_display_t *disp = lv_display_get_default();
         if (disp) {
             if (emulatorActive_) {
-                // Disable LVGL flush FIRST so it can't overwrite our clear
+                // Disable LVGL flush FIRST so it can't overwrite emulator output
                 savedFlushCb_ = (void *)disp->flush_cb;
                 lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
                     lv_display_flush_ready(d);
                 });
-                // Reset LGFX draw state and clear screen
+                // Reset LGFX draw state for emulator rendering
                 lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
                 if (gfx) {
                     gfx->clearClipRect();
-                    gfx->startWrite();
-                    gfx->fillScreen(0x0000);
-                    gfx->endWrite();
+                    gfx->setSwapBytes(true);
+                    // Don't fillScreen — emulator will paint over in <16ms
                 }
             } else {
+                // Restore LGFX state before giving control back to LVGL
+                lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
+                if (gfx) {
+                    gfx->setSwapBytes(false);
+                    gfx->clearClipRect();
+                }
                 // Restore LVGL flush callback
                 if (savedFlushCb_) {
                     lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
