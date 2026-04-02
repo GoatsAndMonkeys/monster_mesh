@@ -297,17 +297,27 @@ int32_t MonsterMeshModule::runOnce()
         buttonTogglePending_ = false;
     }
 
+    // Keep screen awake while emulator is active — prevent sleep entirely
+    // so we never hit the sleep/wake LGFX state corruption
+    if (emulatorActive_) {
+        powerFSM.trigger(EVENT_INPUT);
+    }
+
     // Re-suppress LVGL flush if emulator is active — screen sleep/wake
     // may restore the real flush callback behind our back
 #if HAS_TFT
     if (emulatorActive_ && savedFlushCb_) {
         lv_display_t *disp = lv_display_get_default();
         if (disp && disp->flush_cb != nullptr) {
-            // Check if LVGL's flush was restored (not our no-op)
-            // Our no-op is a lambda, so we can't easily compare — just re-set it
             lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
                 lv_display_flush_ready(d);
             });
+        }
+
+        // Reset LGFX clip state every cycle in case screen wake corrupted it
+        lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
+        if (gfx) {
+            gfx->clearClipRect();
         }
     }
 #endif
@@ -616,11 +626,6 @@ void MonsterMeshModule::scanlineCallback(uint8_t line, const uint16_t *pixels320
     MonsterMeshModule *self = static_cast<MonsterMeshModule *>(ctx);
     if (!self->emulatorActive_) return;
 
-    // NOTE: startWrite()/endWrite() are called in emuTaskLoop() around the
-    // entire frame, NOT per-scanline.  This prevents other SPI users (LVGL,
-    // SD card) from changing the ST7789 address window between scanlines,
-    // which was causing the horizontal-wrap / off-center artefact.
-
     lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
     if (!gfx) return;
 
@@ -629,8 +634,7 @@ void MonsterMeshModule::scanlineCallback(uint8_t line, const uint16_t *pixels320
     // (1 or 2 rows depending on the 144→240 stretch)
     for (int16_t y = screenY0; y <= screenY1; y++) {
         if (y >= 0 && y < PM_DISP_H) {
-            gfx->setAddrWindow(0, y, PM_DISP_W, 1);
-            gfx->pushPixels((lgfx::rgb565_t *)pixels320, PM_DISP_W);
+            gfx->pushImage(0, y, PM_DISP_W, 1, pixels320);
         }
     }
     gfx->endWrite();
