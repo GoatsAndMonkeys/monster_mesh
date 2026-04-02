@@ -377,26 +377,41 @@ static uint8_t rawBytesToJoypad(const uint8_t b[5])
 // RAW mode (emulator active): read 5 bytes, map to GB joypad directly.
 // KEY mode (Meshtastic UI): read 1 byte, map to LVGL keys.
 // SYM+E always toggles between modes regardless of current state.
-static bool    g_tbWasPressed = false;  // trackball press edge detection
-static uint32_t g_tbLastToggleMs = 0;
+static bool     g_micWasPressed  = false;  // mic button edge detection
+static uint32_t g_micLastToggleMs = 0;
+static uint8_t  g_micPollCounter = 0;      // only peek every N cycles
 
 static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
 {
     data->state = LV_INDEV_STATE_RELEASED;
 
-    // ── Trackball press (GPIO 0 / TB_PRESS) toggle ───────────────────────
-    // Poll directly here on Core 0 — reliable and thread-safe for LVGL ops.
-    // TrackballInterrupt's attachInterrupt still fires but we just read the pin state.
-    {
-        bool pressed = (digitalRead(0) == LOW);
-        if (pressed && !g_tbWasPressed && monsterMeshModule) {
+    // ── Mic button toggle ────────────────────────────────────────────────
+    // The mic button is on the keyboard MCU matrix (byte[0] bit 0x40 in RAW mode).
+    // Peek at RAW mode every few cycles to check it, then switch back to KEY mode.
+    if (!g_rawMode && monsterMeshModule && (++g_micPollCounter >= 3)) {
+        g_micPollCounter = 0;
+        // Quick switch to RAW, read mic bit, switch back to KEY
+        Wire.beginTransmission(0x55);
+        Wire.write(0x03);  // RAW mode
+        Wire.endTransmission();
+
+        Wire.requestFrom((uint8_t)0x55, (uint8_t)5);
+        uint8_t rb[5] = {};
+        for (int i = 0; i < 5 && Wire.available(); i++) rb[i] = Wire.read();
+
+        Wire.beginTransmission(0x55);
+        Wire.write(0x04);  // back to KEY mode
+        Wire.endTransmission();
+
+        bool micPressed = (rb[0] & 0x40) != 0;
+        if (micPressed && !g_micWasPressed) {
             uint32_t now = millis();
-            if (now - g_tbLastToggleMs > 600) {
-                g_tbLastToggleMs = now;
+            if (now - g_micLastToggleMs > 600) {
+                g_micLastToggleMs = now;
                 monsterMeshModule->handleKeyFromLVGL(0x05);
             }
         }
-        g_tbWasPressed = pressed;
+        g_micWasPressed = micPressed;
     }
 
     if (g_rawMode) {
@@ -404,6 +419,21 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
         Wire.requestFrom((uint8_t)0x55, (uint8_t)5);
         uint8_t b[5] = {};
         for (int i = 0; i < 5 && Wire.available(); i++) b[i] = Wire.read();
+
+        // Mic button in RAW mode — toggle emulator off
+        bool micHeld = (b[0] & 0x40) != 0;
+        if (micHeld && !g_micWasPressed) {
+            uint32_t now = millis();
+            if (now - g_micLastToggleMs > 600) {
+                g_micLastToggleMs = now;
+                if (monsterMeshModule) {
+                    monsterMeshModule->setJoypadDirect(0);
+                    monsterMeshModule->handleKeyFromLVGL(0x05);
+                    kbSetMode(false);
+                }
+            }
+        }
+        g_micWasPressed = micHeld;
 
         // SYM+E simultaneously → exit emulator, switch back to KEY mode
         bool symHeld = (b[0] & 0x04) != 0;
