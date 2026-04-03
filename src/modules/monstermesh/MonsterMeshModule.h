@@ -14,6 +14,7 @@
 #include "MonsterMeshEmulator.h"
 #include "MonsterMeshBattleShim.h"
 #include "MonsterMeshLobby.h"
+#include "MonsterMeshFileBrowser.h"
 
 // ── MonsterMeshModule ──────────────────────────────────────────────────────────
 // Meshtastic module that runs a Game Boy Pokemon emulator with LoRa-based
@@ -40,6 +41,7 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
 
     // Is the emulator view currently active (vs Meshtastic UI)?
     bool isEmulatorActive() const { return emulatorActive_; }
+    bool isBrowserActive()  const { return browserActive_; }
 
   protected:
     // ── SinglePortModule overrides ──────────────────────────────────────────
@@ -51,7 +53,7 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     virtual bool wantUIFrame() override { return true; }  // always show frame for debug
     virtual void drawFrame(OLEDDisplay *display, OLEDDisplayUiState *state,
                            int16_t x, int16_t y) override;
-    virtual bool interceptingKeyboardInput() override { return emulatorActive_; }
+    virtual bool interceptingKeyboardInput() override { return emulatorActive_ || browserActive_; }
 #endif
 
     // ── OSThread override ───────────────────────────────────────────────────
@@ -65,8 +67,10 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     MonsterMeshEmulator      emu_;
     MonsterMeshBattleShim    shim_;
     MonsterMeshLobby         lobby_;
+    MonsterMeshFileBrowser   browser_;
 
     bool emulatorActive_     = false;
+    bool browserActive_      = false;
     bool setupDone_          = false;
     bool kbObserverRegistered_ = false;
     uint8_t setupRetries_ = 0;
@@ -99,6 +103,9 @@ private:
     // Lobby UI state
     bool lobbyOpen_ = false;
     volatile uint8_t lobbyKey_ = 0;
+
+    // Buffered browser key (set by LVGL callback, consumed by runOnce)
+    volatile uint8_t pendingBrowserKey_ = 0;
 
     // Auto-save tracking
     uint8_t prevBattle_ = 0;
@@ -144,6 +151,10 @@ private:
     void renderLobbyOverlay();
     void renderStatusOverlay();
     void renderDebugOverlay();
+
+    // File browser
+    void renderBrowser();
+    void launchROM(const char *path);
 };
 
 extern MonsterMeshModule *monsterMeshModule;

@@ -1,5 +1,9 @@
 #include "MonsterMeshEmulator.h"
+#include "SPILock.h"
+#include "variant.h"
+#include <SPI.h>
 #include <LittleFS.h>
+#include <SD.h>
 #include <stdio.h>
 #include <sys/stat.h>
 
@@ -27,6 +31,10 @@ static void pm_gbError(struct gb_s *gb, const enum gb_error_e err, const uint16_
 // ── begin() ──────────────────────────────────────────────────────────────────
 
 bool MonsterMeshEmulator::begin(const char *romPath) {
+    // Clean up previous run if any
+    running_ = false;
+    if (gb_) { free(gb_); gb_ = nullptr; }
+
     strncpy(romPath_, romPath, sizeof(romPath_) - 1);
     romPath_[sizeof(romPath_) - 1] = '\0';
 
@@ -34,7 +42,7 @@ bool MonsterMeshEmulator::begin(const char *romPath) {
 
     gb_ = static_cast<struct gb_s *>(ps_malloc(sizeof(struct gb_s)));
     if (!gb_) {
-        Serial.println("[EMU] PSRAM alloc failed for gb_s");
+        Serial.printf("[EMU] PSRAM alloc failed for gb_s (free=%u)\n", (unsigned)ESP.getFreePsram());
         return false;
     }
     memset(gb_, 0, sizeof(struct gb_s));
@@ -168,35 +176,88 @@ static enum gb_serial_rx_ret_e pm_serialRx(struct gb_s *gb, uint8_t *rx) {
 // ── ROM loading ──────────────────────────────────────────────────────────────
 
 bool MonsterMeshEmulator::loadROM(const char *path) {
-    // Use standard C I/O — SD is mounted via ESP-IDF at /sd
-    struct stat st;
-    if (stat(path, &st) != 0) {
-        Serial.printf("[EMU] ROM not found: %s\n", path);
+    // Use Arduino SD library — POSIX fopen("/sd/...") is unreliable on some builds.
+    // Path should be SD-relative like "/pokemon.gb" (what SD.open expects).
+    // Also accept "/sd/..." prefix and strip it.
+    const char *sdPath = path;
+    if (strncmp(path, "/sd/", 4) == 0) sdPath = path + 3;  // "/sd/foo" → "/foo"
+    if (strncmp(path, "/sd", 3) == 0 && path[3] == '\0') sdPath = "/";
+
+    Serial.printf("[EMU] loadROM: path='%s' sdPath='%s'\n", path, sdPath);
+
+    // Free previous ROM if reloading
+    if (romData_) { free(romData_); romData_ = nullptr; romSize_ = 0; }
+
+    // SD shares SPI bus with radio and TFT — must hold spiLock
+    concurrency::LockGuard g(spiLock);
+
+    // Full re-init of SD — end first, then begin fresh
+    SD.end();
+    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+    bool sdOk = SD.begin(SDCARD_CS, SPI);
+    Serial.printf("[EMU] SD re-init: %d cardType=%d\n", (int)sdOk, (int)SD.cardType());
+    if (!sdOk) {
+        Serial.printf("[EMU] SD.begin() failed\n");
         return false;
     }
-    romSize_ = st.st_size;
+
+    // Try direct open first
+    File f = SD.open(sdPath, FILE_READ);
+    Serial.printf("[EMU] SD.open('%s') = %d\n", sdPath, (int)(bool)f);
+    if (!f) {
+        // Try with /sd prefix
+        f = SD.open(path, FILE_READ);
+        Serial.printf("[EMU] SD.open('%s') = %d\n", path, (int)(bool)f);
+    }
+    if (!f) {
+        // Try directory iteration as last resort
+        File dir = SD.open("/");
+        Serial.printf("[EMU] SD.open('/') dir = %d isDir=%d\n", (int)(bool)dir, dir ? (int)dir.isDirectory() : -1);
+        if (dir && dir.isDirectory()) {
+            const char *targetName = strrchr(sdPath, '/');
+            targetName = targetName ? targetName + 1 : sdPath;
+            File entry = dir.openNextFile();
+            while (entry) {
+                const char *ename = entry.name();
+                const char *slash = strrchr(ename, '/');
+                const char *fname = slash ? slash + 1 : ename;
+                Serial.printf("[EMU] dir entry: '%s'\n", fname);
+                if (!entry.isDirectory() && strcasecmp(fname, targetName) == 0) {
+                    f = entry;
+                    Serial.printf("[EMU] Found match!\n");
+                    break;
+                }
+                entry.close();
+                entry = dir.openNextFile();
+            }
+            dir.close();
+        }
+    }
+    if (!f) {
+        Serial.printf("[EMU] All methods failed\n");
+        return false;
+    }
+    romSize_ = f.size();
+    Serial.printf("[EMU] ROM file opened: size=%u\n", (unsigned)romSize_);
     if (romSize_ == 0 || romSize_ > 1024 * 1024) {
-        Serial.printf("[EMU] ROM bad size: %u\n", (unsigned)romSize_);
+        f.close();
         return false;
     }
     romData_ = static_cast<uint8_t *>(ps_malloc(romSize_));
     if (!romData_) {
-        Serial.println("[EMU] PSRAM alloc failed for ROM");
+        Serial.printf("[EMU] PSRAM alloc failed (%u bytes, free=%u)\n",
+                      (unsigned)romSize_, (unsigned)ESP.getFreePsram());
+        f.close();
         return false;
     }
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        Serial.printf("[EMU] ROM open failed: %s\n", path);
+    size_t n = f.read(romData_, romSize_);
+    f.close();
+    Serial.printf("[EMU] ROM read: %u / %u bytes\n", (unsigned)n, (unsigned)romSize_);
+    if (n != romSize_) {
         free(romData_); romData_ = nullptr;
         return false;
     }
-    size_t n = fread(romData_, 1, romSize_, f);
-    fclose(f);
-    if (n != romSize_) {
-        Serial.printf("[EMU] ROM read short: %u / %u\n", (unsigned)n, (unsigned)romSize_);
-        return false;
-    }
-    Serial.printf("[EMU] ROM loaded: %u bytes\n", (unsigned)romSize_);
+    Serial.printf("[EMU] ROM loaded OK: %u bytes\n", (unsigned)romSize_);
     return true;
 }
 

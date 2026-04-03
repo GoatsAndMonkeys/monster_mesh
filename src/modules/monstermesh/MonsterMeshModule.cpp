@@ -27,7 +27,8 @@
 
 MonsterMeshModule *monsterMeshModule = nullptr;
 
-extern "C" void monstermesh_set_toggle_cb(void (*cb)(void));
+// Weak default — device-ui provides the real implementation when present
+extern "C" __attribute__((weak)) void monstermesh_set_toggle_cb(void (*cb)(void)) { (void)cb; }
 
 // Global LGFX pointer set by device-ui LGFXDriver::init_lgfx()
 static lgfx::LGFX_Device *g_deviceUiLgfx = nullptr;
@@ -108,7 +109,7 @@ int MonsterMeshModule::handleInputEvent(const InputEvent *event)
 
     // Trackball press toggle is handled by GPIO 0 polling in monsterMeshKeyboardRead()
 
-    if (!emulatorActive_) return 0;  // let Meshtastic handle keys
+    if (!emulatorActive_ && !browserActive_) return 0;  // let Meshtastic handle keys
 
     // ANYKEY with kbchar = raw character
     if (event->inputEvent == INPUT_BROKER_ANYKEY && event->kbchar != 0) {
@@ -140,8 +141,7 @@ void MonsterMeshModule::ensureMonsterMeshChannel()
         strlen(ch.settings.name) == 0) {
         // Set up channel 1 as "MonsterMesh Center"
         ch.role = meshtastic_Channel_Role_SECONDARY;
-        strncpy(ch.settings.name, "MonsterMesh", sizeof(ch.settings.name) - 1);
-        ch.settings.name[sizeof(ch.settings.name) - 1] = '\0';
+        snprintf(ch.settings.name, sizeof(ch.settings.name), "MonsterMesh");
         // Use default PSK (no encryption for easy joining)
         ch.settings.psk.size = 1;
         ch.settings.psk.bytes[0] = 0; // no encryption
@@ -238,32 +238,12 @@ int32_t MonsterMeshModule::runOnce()
             }
             return 2000; // retry in 2 seconds
         }
-        setupStatus_ = "SD OK, loading ROM...";
+        setupStatus_ = "SD OK";
 
+        // Register scanline callback (used once a ROM is loaded)
         emu_.setScanlineCallback(scanlineCallback, this);
-        bool romOk = emu_.begin("/sd/pokemon.gb");
-        if (!romOk) {
-            setupStatus_ = "try /sdcard path...";
-            romOk = emu_.begin("/sdcard/pokemon.gb");
-        }
-        if (romOk) {
-            emuInitialized_ = true;
-            setupStatus_ = "ALT+E to play!";
-            emulatorActive_ = false;
-
-            xTaskCreatePinnedToCore(
-                emuTaskEntry, "monstermesh_emu",
-                16384, this, 5, &emuTaskHandle_, 1
-            );
-            LOG_INFO("[MonsterMesh] emulator initialized OK!\n");
-        } else {
-            setupStatus_ = "ROM not found on SD";
-            LOG_WARN("[MonsterMesh] ROM not found at /sd/ or /sdcard/\n");
-        }
 
         setupDone_ = true;
-
-        // Trackball press (GPIO 0 / TB_PRESS) handled via InputBroker SELECT event
 
         // Keyboard hook installed early (at 1s) via kbObserverRegistered_ path above.
         // Re-install the LVGL hook here in case LVGL wasn't ready at 1s.
@@ -274,33 +254,74 @@ int32_t MonsterMeshModule::runOnce()
         } else {
             installKeyboardHook(); // re-run hook install in case LVGL indev wasn't ready yet
         }
+
+        // Auto-open file browser now that SD is ready
+        setupStatus_ = "Opening browser...";
+        LOG_INFO("[MonsterMesh] SD ready — opening file browser\n");
+        browserActive_ = true;
+        {
+            concurrency::LockGuard g(spiLock);
+            browser_.open("/");
+        }
+#if HAS_TFT
+        {
+            lv_display_t *disp = lv_display_get_default();
+            if (disp && !savedFlushCb_) {
+                savedFlushCb_ = (void *)disp->flush_cb;
+                lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
+                    lv_display_flush_ready(d);
+                });
+            }
+        }
+#endif
     }
     // Trackball press toggle is handled in handleInputEvent() via INPUT_BROKER_SELECT
 
-    // Keep screen awake while emulator is active — prevent sleep entirely
-    // so we never hit the sleep/wake LGFX state corruption
-    if (emulatorActive_) {
+    // Retry keyboard hook install if it wasn't found on earlier attempts
+    if (browserActive_ || emulatorActive_) {
+        installKeyboardHook();
+    }
+
+    // Keep PowerFSM awake while emulator or browser is active
+    if (emulatorActive_ || browserActive_) {
         powerFSM.trigger(EVENT_INPUT);
     }
 
-    // Re-suppress LVGL flush if emulator is active — screen sleep/wake
+    // Re-suppress LVGL flush if emulator or browser is active — screen sleep/wake
     // may restore the real flush callback behind our back
 #if HAS_TFT
-    if (emulatorActive_ && savedFlushCb_) {
+    if ((emulatorActive_ || browserActive_) && savedFlushCb_) {
         lv_display_t *disp = lv_display_get_default();
         if (disp && disp->flush_cb != nullptr) {
             lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
                 lv_display_flush_ready(d);
             });
         }
-
-        // Reset LGFX clip state every cycle in case screen wake corrupted it
-        lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
-        if (gfx) {
-            gfx->clearClipRect();
-        }
+        // NOTE: Do NOT call clearClipRect() or any LGFX method here — runOnce runs
+        // on Core 0 and would race with scanline callback on Core 1, causing palette corruption
     }
 #endif
+
+    // Process buffered browser keys and render
+    if (browserActive_) {
+        uint8_t key = pendingBrowserKey_;
+        if (key != 0) {
+            pendingBrowserKey_ = 0;
+            LOG_DEBUG("[MonsterMesh] browser key=0x%02X cursor=%d count=%d\n",
+                      key, browser_.cursor(), browser_.count());
+            bool selected;
+            {
+                concurrency::LockGuard g(spiLock);
+                selected = browser_.handleKey(key);
+            }
+            LOG_DEBUG("[MonsterMesh] handleKey returned selected=%d\n", (int)selected);
+            if (selected) {
+                LOG_DEBUG("[MonsterMesh] selectedPath='%s'\n", browser_.selectedPath());
+                launchROM(browser_.selectedPath());
+            }
+        }
+        renderBrowser();
+    }
 
     drainTxQueue();
     return 50;
@@ -385,10 +406,19 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
 {
     data->state = LV_INDEV_STATE_RELEASED;
 
+    // Keep device-ui backlight alive while emulator or browser is active.
+    bool keepAlive = (monsterMeshModule &&
+                      (monsterMeshModule->isEmulatorActive() || monsterMeshModule->isBrowserActive()));
+    if (keepAlive) {
+        lv_display_trigger_activity(NULL);
+    }
+
     // ── Mic button toggle ────────────────────────────────────────────────
     // The mic button is on the keyboard MCU matrix (byte[0] bit 0x40 in RAW mode).
     // Peek at RAW mode every few cycles to check it, then switch back to KEY mode.
-    if (!g_rawMode && monsterMeshModule && (++g_micPollCounter >= 3)) {
+    // Skip when browser is active — the mode switching eats buffered keypresses.
+    bool browserUp = monsterMeshModule && monsterMeshModule->isBrowserActive();
+    if (!g_rawMode && monsterMeshModule && !browserUp && (++g_micPollCounter >= 3)) {
         g_micPollCounter = 0;
         // Quick switch to RAW, read mic bit, switch back to KEY
         Wire.beginTransmission(0x55);
@@ -491,8 +521,9 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
     }
     g_symActive = false;
 
-    // ── When emulator is active, route keys to game instead of LVGL ──────
-    if (monsterMeshModule && monsterMeshModule->isEmulatorActive()) {
+    // ── When emulator or browser is active, route keys to game instead of LVGL
+    if (monsterMeshModule && (monsterMeshModule->isEmulatorActive() ||
+                              monsterMeshModule->isBrowserActive())) {
         monsterMeshModule->handleKeyFromLVGL(key);
         return; // consume — don't pass to LVGL
     }
@@ -512,6 +543,9 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
 void MonsterMeshModule::installKeyboardHook()
 {
 #if HAS_TFT
+    // Already hooked — don't reset keyboard MCU again
+    if (g_kbIndev) return;
+
     // Guarantee keyboard MCU starts in KEY mode
     Wire.beginTransmission(0x55);
     Wire.write(0x04);
@@ -520,6 +554,8 @@ void MonsterMeshModule::installKeyboardHook()
     g_symActive  = false;
     g_symEConsumed = false;
 
+    // Find the KEYPAD indev (type 2) — that's the keyboard.
+    // Type 3 (ENCODER) is the trackball — don't hook that.
     lv_indev_t *indev = nullptr;
     while ((indev = lv_indev_get_next(indev)) != nullptr) {
         if (lv_indev_get_type(indev) == LV_INDEV_TYPE_KEYPAD) {
@@ -657,10 +693,11 @@ void MonsterMeshModule::scanlineCallback(uint8_t line, const uint16_t *pixels320
     lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
     if (!gfx) return;
 
+    // spiLock prevents starving the LoRa radio SPI on Core 0.
+    // Without this, TX IRQ timeout → watchdog reboot after ~60s.
+    concurrency::LockGuard g(spiLock);
     gfx->startWrite();
     gfx->setSwapBytes(true);
-    // screenY0..screenY1 is the range of screen rows for this GB line
-    // (1 or 2 rows depending on the 144→240 stretch)
     for (int16_t y = screenY0; y <= screenY1; y++) {
         if (y >= 0 && y < PM_DISP_H) {
             gfx->pushImage(0, y, PM_DISP_W, 1, pixels320);
@@ -693,65 +730,73 @@ void MonsterMeshModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *stat
 
 void MonsterMeshModule::handleKeyPress(uint8_t ascii)
 {
-    // Keep screen awake on any keypress while emulator is active
-    if (emulatorActive_) {
+    // Keep screen awake on any keypress while emulator or browser is active
+    if (emulatorActive_ || browserActive_) {
         powerFSM.trigger(EVENT_INPUT);
     }
 
-    // ── Ctrl+E: toggle emulator/Meshtastic UI ──────────────────────────
+    // ── Ctrl+E / mic button: toggle display modes ──────────────────────
     if (ascii == 0x05) {  // Ctrl+E
-        if (!emuInitialized_) {
-            LOG_WARN("[MonsterMesh] emulator not ready — status: %s\n", setupStatus_);
+        if (browserActive_) {
+            // ── Exit browser → Meshtastic UI ──────────────────────────────
+            browserActive_ = false;
 #if HAS_TFT
-            // Show status on screen briefly via LVGL message box
-            static lv_obj_t *msgbox = nullptr;
-            if (!msgbox) {
-                msgbox = lv_label_create(lv_layer_top());
-                lv_obj_set_style_bg_opa(msgbox, LV_OPA_80, 0);
-                lv_obj_set_style_bg_color(msgbox, lv_color_hex(0x000000), 0);
-                lv_obj_set_style_text_color(msgbox, lv_color_hex(0xFFFFFF), 0);
-                lv_obj_set_style_pad_all(msgbox, 10, 0);
-                lv_obj_center(msgbox);
+            lv_display_t *disp = lv_display_get_default();
+            if (disp && savedFlushCb_) {
+                lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
+                savedFlushCb_ = nullptr;
+                lv_obj_invalidate(lv_screen_active());
             }
-            lv_label_set_text_fmt(msgbox, "MonsterMesh: %s", setupStatus_);
-            lv_obj_remove_flag(msgbox, LV_OBJ_FLAG_HIDDEN);
-            // Auto-hide after 3 seconds
-            lv_anim_t a;
-            lv_anim_init(&a);
-            lv_anim_set_var(&a, msgbox);
-            lv_anim_set_duration(&a, 3000);
-            lv_anim_set_completed_cb(&a, [](lv_anim_t *anim) {
-                lv_obj_add_flag((lv_obj_t *)anim->var, LV_OBJ_FLAG_HIDDEN);
-            });
-            lv_anim_start(&a);
 #endif
             return;
         }
+
+        if (!emuInitialized_ && !setupDone_) {
+            // Setup hasn't finished (SD not mounted yet)
+            LOG_WARN("[MonsterMesh] not ready — status: %s\n", setupStatus_);
+            return;
+        }
+
+        if (!emuInitialized_) {
+            // ── No ROM loaded → open file browser ─────────────────────────
+            browserActive_ = true;
+            {
+                concurrency::LockGuard g(spiLock);
+                browser_.open("/");
+            }
+#if HAS_TFT
+            lv_display_t *disp = lv_display_get_default();
+            if (disp && !savedFlushCb_) {
+                savedFlushCb_ = (void *)disp->flush_cb;
+                lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
+                    lv_display_flush_ready(d);
+                });
+            }
+#endif
+            return;
+        }
+
+        // ── Toggle emulator on/off ────────────────────────────────────────
         emulatorActive_ = !emulatorActive_;
 #if HAS_TFT
         lv_display_t *disp = lv_display_get_default();
         if (disp) {
             if (emulatorActive_) {
-                // Disable LVGL flush FIRST so it can't overwrite emulator output
                 savedFlushCb_ = (void *)disp->flush_cb;
                 lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
                     lv_display_flush_ready(d);
                 });
-                // Reset LGFX draw state for emulator rendering
                 lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
                 if (gfx) {
                     gfx->clearClipRect();
                     gfx->setSwapBytes(true);
-                    // Don't fillScreen — emulator will paint over in <16ms
                 }
             } else {
-                // Restore LGFX state before giving control back to LVGL
                 lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
                 if (gfx) {
                     gfx->setSwapBytes(false);
                     gfx->clearClipRect();
                 }
-                // Restore LVGL flush callback
                 if (savedFlushCb_) {
                     lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
                     savedFlushCb_ = nullptr;
@@ -763,6 +808,28 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
 #if HAS_SCREEN
         if (emulatorActive_) requestFocus();
 #endif
+        return;
+    }
+
+    // ── File browser key handling ──────────────────────────────────────
+    if (browserActive_) {
+        // Backspace exits browser → Meshtastic UI (since mic button is
+        // disabled in browser mode to avoid eating keypresses)
+        if (ascii == 0x08) {
+            browserActive_ = false;
+#if HAS_TFT
+            lv_display_t *disp2 = lv_display_get_default();
+            if (disp2 && savedFlushCb_) {
+                lv_display_set_flush_cb(disp2, (lv_display_flush_cb_t)savedFlushCb_);
+                savedFlushCb_ = nullptr;
+                lv_obj_invalidate(lv_screen_active());
+            }
+#endif
+            return;
+        }
+        // Buffer key for processing in runOnce — avoid doing SPI/rendering
+        // from within the LVGL callback context
+        pendingBrowserKey_ = ascii;
         return;
     }
 
@@ -810,6 +877,169 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
     }
     joypadState_ |= bit;
     kbMask_ |= bit;
+}
+
+// ── renderBrowser() — draw file browser to TFT ─────────────────────────────
+
+void MonsterMeshModule::renderBrowser()
+{
+#if HAS_TFT
+    if (!browser_.isDirty()) return;
+    browser_.clearDirty();
+
+    lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
+    if (!gfx) return;
+
+    // At textSize(1): 6x8px per char → 53 chars/line, 30 rows
+    // Row layout: 14px per row, max ~26 chars with textSize(1) scaled x2 would wrap
+    // Use textSize(1) for entries — fits more, no wrapping
+    static constexpr int ROW_H = 14;
+    static constexpr int LIST_Y = 28;
+    static constexpr int MAX_ROWS = 14;
+    static constexpr int MAX_CHARS = 52;  // 320px / 6px per char
+
+    concurrency::LockGuard g(spiLock);
+    gfx->startWrite();
+    gfx->setClipRect(0, 0, 320, 240);
+    gfx->fillScreen(0x0000);
+    gfx->setTextWrap(false);  // prevent wrapping into next row
+
+    // Title
+    gfx->setTextSize(2);
+    gfx->setTextColor(0x07E0);  // green
+    gfx->setCursor(4, 2);
+    gfx->print("Select ROM");
+
+    // Current directory (right-aligned, small)
+    gfx->setTextSize(1);
+    gfx->setTextColor(0x7BEF);  // grey
+    gfx->setCursor(200, 8);
+    gfx->print(browser_.currentDir());
+
+    gfx->setTextSize(1);
+
+    if (browser_.count() == 0) {
+        gfx->setTextSize(2);
+        gfx->setTextColor(0xF800);  // red
+        gfx->setCursor(4, LIST_Y + 20);
+        gfx->print("No files found");
+        gfx->setTextSize(1);
+        gfx->setTextColor(0xFFFF);
+        gfx->setCursor(4, LIST_Y + 44);
+        gfx->print("Path: ");
+        gfx->print(browser_.currentDir());
+    } else {
+        int scroll = browser_.scroll();
+        int cursor = browser_.cursor();
+        for (int i = 0; i < MAX_ROWS && (scroll + i) < browser_.count(); i++) {
+            int idx = scroll + i;
+            int y = LIST_Y + i * ROW_H;
+
+            if (idx == cursor) {
+                gfx->fillRect(0, y, 320, ROW_H, 0x000F);  // dark blue highlight
+            }
+
+            gfx->setCursor(4, y + 3);
+
+            const auto &entry = browser_.entries()[idx];
+            // Truncate name to fit screen
+            char dispName[MAX_CHARS + 1];
+
+            if (entry.isDir) {
+                gfx->setTextColor(0xFFE0);  // yellow
+                snprintf(dispName, sizeof(dispName), "[%s]", entry.name);
+            } else {
+                size_t nlen = strlen(entry.name);
+                bool isRom = (nlen >= 3 && strcasecmp(entry.name + nlen - 3, ".gb") == 0) ||
+                             (nlen >= 4 && strcasecmp(entry.name + nlen - 4, ".gbc") == 0);
+                gfx->setTextColor(isRom ? 0x07E0 : 0x7BEF);  // green for ROMs, grey otherwise
+                strncpy(dispName, entry.name, MAX_CHARS);
+                dispName[MAX_CHARS] = '\0';
+            }
+            gfx->print(dispName);
+        }
+    }
+
+    // Footer with status
+    gfx->setTextColor(0x528A);
+    gfx->setCursor(4, 212);
+    gfx->print("W/S:Nav  K:Open  L:Back  MIC:Exit");
+    // Show error/status if any
+    if (setupStatus_ && strstr(setupStatus_, "FAIL")) {
+        gfx->setCursor(4, 222);
+        gfx->setTextColor(0xF800);  // red
+        gfx->print(setupStatus_);
+    }
+
+    // Debug: show indev info
+    gfx->setCursor(4, 232);
+    gfx->setTextColor(0xF800);  // red
+    {
+        int nIndev = 0;
+        char types[32] = {};
+        lv_indev_t *ind = nullptr;
+        while ((ind = lv_indev_get_next(ind)) != nullptr) {
+            if (nIndev < 8) {
+                char t[4];
+                snprintf(t, sizeof(t), "%d ", (int)lv_indev_get_type(ind));
+                strcat(types, t);
+            }
+            nIndev++;
+        }
+        char dbg[64];
+        snprintf(dbg, sizeof(dbg), "indevs:%d types:[%s] hook:%s", nIndev, types,
+                 g_kbIndev ? "YES" : "NO");
+        gfx->print(dbg);
+    }
+
+    gfx->clearClipRect();
+    gfx->endWrite();
+#endif
+}
+
+// ── launchROM() — load selected ROM and start emulator ──────────────────────
+
+void MonsterMeshModule::launchROM(const char *path)
+{
+    // Browser returns SD-relative paths like "/pokemon.gb"
+    // POSIX fopen needs VFS path "/sd/pokemon.gb"
+    char vfsPath[FB_MAX_PATH + 4];
+    snprintf(vfsPath, sizeof(vfsPath), "/sd%s", path);
+    LOG_INFO("[MonsterMesh] Launching ROM: %s\n", vfsPath);
+
+    // Don't hold spiLock here — SD.open() needs SPI access internally
+    bool romOk = emu_.begin(vfsPath);
+    if (!romOk) {
+        LOG_WARN("[MonsterMesh] Failed to load ROM: %s\n", vfsPath);
+        snprintf(setupStatusBuf_, sizeof(setupStatusBuf_), "FAIL: %s", vfsPath);
+        setupStatus_ = setupStatusBuf_;
+        browser_.markDirty();  // redraw browser
+        return;
+    }
+
+    emuInitialized_ = true;
+    browserActive_ = false;
+    emulatorActive_ = true;
+
+    // Create emulator FreeRTOS task on Core 1
+    if (!emuTaskHandle_) {
+        xTaskCreatePinnedToCore(
+            emuTaskEntry, "monstermesh_emu",
+            16384, this, 5, &emuTaskHandle_, 1
+        );
+    }
+
+    // Set up LGFX for emulator rendering (LVGL flush already suppressed)
+#if HAS_TFT
+    lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
+    if (gfx) {
+        gfx->clearClipRect();
+        gfx->setSwapBytes(true);
+    }
+#endif
+
+    setupStatus_ = "Playing!";
+    LOG_INFO("[MonsterMesh] ROM loaded, emulator started\n");
 }
 
 #endif // T_DECK && !MESHTASTIC_EXCLUDE_MONSTERMESH
