@@ -35,8 +35,8 @@ bool MonsterMeshAudio::begin() {
     i2s_config.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
     i2s_config.communication_format = I2S_COMM_FORMAT_STAND_I2S;
     i2s_config.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
-    i2s_config.dma_buf_count = 8;
-    i2s_config.dma_buf_len = 512;
+    i2s_config.dma_buf_count = 16;
+    i2s_config.dma_buf_len = 1024;
     i2s_config.use_apll = false;
     i2s_config.tx_desc_auto_clear = true;
 
@@ -98,5 +98,5 @@ void MonsterMeshAudio::processFrame() {
     // Write to I2S DMA — non-blocking with short timeout to avoid stalling emulator
     size_t bytes_written = 0;
     i2s_write(I2S_NUM_0, sampleBuf_, sizeof(sampleBuf_),
-              &bytes_written, pdMS_TO_TICKS(5));
+              &bytes_written, pdMS_TO_TICKS(20));
 }

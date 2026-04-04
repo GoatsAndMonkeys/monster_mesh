@@ -812,6 +812,8 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
 #if HAS_SCREEN
         if (emulatorActive_) requestFocus();
 #endif
+        // Switch keyboard mode to match emulator state
+        kbSetMode(emulatorActive_);
         return;
     }
 
@@ -1041,6 +1043,7 @@ void MonsterMeshModule::launchROM(const char *path)
     }
 #endif
 
+    kbSetMode(true);  // RAW mode for held-key d-pad input
     setupStatus_ = "Playing!";
     LOG_INFO("[MonsterMesh] ROM loaded, emulator started\n");
 }

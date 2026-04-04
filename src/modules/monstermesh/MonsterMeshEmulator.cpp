@@ -69,6 +69,7 @@ bool MonsterMeshEmulator::begin(const char *romPath) {
 
     gb_init_lcd(gb_, pm_lcdDrawLine);
     gb_init_serial(gb_, pm_serialTx, pm_serialRx);
+    gb_->direct.frame_skip = true;  // render every other frame — keeps audio smooth
 
     // Initialize audio
     if (!audio_) {
