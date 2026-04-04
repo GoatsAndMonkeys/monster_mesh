@@ -1,7 +1,9 @@
 #pragma once
 #include <Arduino.h>
 #include <SD.h>
+#include <SPI.h>
 #include <cstring>
+#include "variant.h"
 
 #define FB_MAX_ENTRIES 64
 #define FB_MAX_PATH 256
@@ -90,6 +92,15 @@ private:
             strncpy(entries_[count_].name, "..", sizeof(entries_[0].name) - 1);
             entries_[count_].isDir = true;
             count_++;
+        }
+
+        // Re-init SD before scanning — SPI bus state gets corrupted by TFT/LoRa
+        SD.end();
+        SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+        if (!SD.begin(SDCARD_CS, SPI)) {
+            log_w("[FileBrowser] SD reinit failed");
+            dirty_ = true;
+            return;
         }
 
         // Use Arduino SD library API for directory listing

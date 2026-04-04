@@ -693,14 +693,20 @@ void MonsterMeshModule::scanlineCallback(uint8_t line, const uint16_t *pixels320
     lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
     if (!gfx) return;
 
+    // Swap bytes in software so we never touch gfx->setSwapBytes() —
+    // that flag is shared with LVGL on Core 0 and toggling it causes
+    // color inversion races.
+    uint16_t swapped[PM_DISP_W];
+    for (int i = 0; i < PM_DISP_W; i++)
+        swapped[i] = __builtin_bswap16(pixels320[i]);
+
     // spiLock prevents starving the LoRa radio SPI on Core 0.
     // Without this, TX IRQ timeout → watchdog reboot after ~60s.
     concurrency::LockGuard g(spiLock);
     gfx->startWrite();
-    gfx->setSwapBytes(true);
     for (int16_t y = screenY0; y <= screenY1; y++) {
         if (y >= 0 && y < PM_DISP_H) {
-            gfx->pushImage(0, y, PM_DISP_W, 1, pixels320);
+            gfx->pushImage(0, y, PM_DISP_W, 1, swapped);
         }
     }
     gfx->endWrite();
@@ -789,12 +795,10 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
                 lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
                 if (gfx) {
                     gfx->clearClipRect();
-                    gfx->setSwapBytes(true);
                 }
             } else {
                 lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
                 if (gfx) {
-                    gfx->setSwapBytes(false);
                     gfx->clearClipRect();
                 }
                 if (savedFlushCb_) {
@@ -1034,7 +1038,6 @@ void MonsterMeshModule::launchROM(const char *path)
     lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
     if (gfx) {
         gfx->clearClipRect();
-        gfx->setSwapBytes(true);
     }
 #endif
 

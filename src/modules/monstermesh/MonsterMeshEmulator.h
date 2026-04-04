@@ -3,8 +3,9 @@
 #include <FS.h>
 #include "ISerialLink.h"
 
-// Forward declaration — full peanut_gb.h only included in MonsterMeshEmulator.cpp
+// Forward declarations — full headers only included in MonsterMeshEmulator.cpp
 struct gb_s;
+class MonsterMeshAudio;
 
 // ── Display / viewport geometry ───────────────────────────────────────────────
 #define GB_SCREEN_W          160
@@ -83,6 +84,7 @@ public:
 
     ScanlineCallback scanlineCb_  = nullptr;
     void            *scanlineCtx_ = nullptr;
+    MonsterMeshAudio *audio_      = nullptr;
 
     static void romPathToSavePath(const char *romPath, char *out, size_t outLen);
     bool loadROM(const char *path);

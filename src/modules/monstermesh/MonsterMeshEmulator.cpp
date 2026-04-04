@@ -1,4 +1,5 @@
 #include "MonsterMeshEmulator.h"
+#include "MonsterMeshAudio.h"
 #include "SPILock.h"
 #include "variant.h"
 #include <SPI.h>
@@ -9,8 +10,9 @@
 
 // peanut_gb.h is a single-header library with all function bodies inline.
 // It MUST only be included in this one translation unit.
+// audio_read() and audio_write() are defined in MonsterMeshAudio.cpp
 #define ENABLE_LCD 1
-#define ENABLE_SOUND 0
+#define ENABLE_SOUND 1
 #include "peanut_gb.h"
 
 // Forward declarations for Peanut-GB callbacks (defined below)
@@ -33,6 +35,7 @@ static void pm_gbError(struct gb_s *gb, const enum gb_error_e err, const uint16_
 bool MonsterMeshEmulator::begin(const char *romPath) {
     // Clean up previous run if any
     running_ = false;
+    if (audio_) { audio_->stop(); delete audio_; audio_ = nullptr; }
     if (gb_) { free(gb_); gb_ = nullptr; }
 
     strncpy(romPath_, romPath, sizeof(romPath_) - 1);
@@ -67,6 +70,16 @@ bool MonsterMeshEmulator::begin(const char *romPath) {
     gb_init_lcd(gb_, pm_lcdDrawLine);
     gb_init_serial(gb_, pm_serialTx, pm_serialRx);
 
+    // Initialize audio
+    if (!audio_) {
+        audio_ = new MonsterMeshAudio();
+        if (!audio_->begin()) {
+            Serial.println("[EMU] Audio init failed — continuing without sound");
+            delete audio_;
+            audio_ = nullptr;
+        }
+    }
+
     running_ = true;
     Serial.printf("[EMU] started — ROM: %s (%u bytes)\n", romPath, (unsigned)romSize_);
     return true;
@@ -78,6 +91,9 @@ void MonsterMeshEmulator::runFrame() {
     if (!running_) return;
     gb_->direct.joypad = ~joypadState_;
     gb_run_frame(gb_);
+
+    // Generate and queue audio samples for this frame
+    if (audio_) audio_->processFrame();
 }
 
 // ── WRAM access ──────────────────────────────────────────────────────────────
