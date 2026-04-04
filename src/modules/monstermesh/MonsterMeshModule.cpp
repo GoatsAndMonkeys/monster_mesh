@@ -671,7 +671,6 @@ void MonsterMeshModule::emuTaskLoop()
 {
     const TickType_t framePeriod = pdMS_TO_TICKS(16);  // ~60fps
     TickType_t lastWake = xTaskGetTickCount();
-    uint32_t lastAutoSaveMs = millis();
     uint8_t frameCount = 0;
 
     while (true) {
@@ -768,14 +767,8 @@ void MonsterMeshModule::emuTaskLoop()
         // ── Push joypad state to emulator ────────────────────────────────
         emu_.setJoypad(joypadState_);
 
-        // ── Auto-save every 120 seconds ──────────────────────────────────
-        // SD writes hold spiLock for ~100ms+ (32KB write) — less frequent
-        // saves reduce watchdog pressure on Core 1
-        uint32_t nowMs = millis();
-        if (nowMs - lastAutoSaveMs > 120000) {
-            lastAutoSaveMs = nowMs;
-            emu_.save();
-        }
+        // No periodic auto-save — SD operations on large cards cause input lag.
+        // Saves happen on: emulator exit (toggle off) and battle end.
 
         vTaskDelayUntil(&lastWake, framePeriod);
     }
@@ -918,6 +911,10 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
 
         // ── Toggle emulator on/off ────────────────────────────────────────
         emulatorActive_ = !emulatorActive_;
+        // Save when switching away from emulator
+        if (!emulatorActive_ && emu_.isRunning()) {
+            emu_.save();
+        }
 #if HAS_TFT
         lv_display_t *disp = lv_display_get_default();
         if (disp) {
