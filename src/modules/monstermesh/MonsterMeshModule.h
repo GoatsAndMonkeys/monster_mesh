@@ -70,6 +70,7 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     MonsterMeshFileBrowser   browser_;
 
     bool emulatorActive_     = false;
+    uint8_t brightness_      = 255;
     bool browserActive_      = false;
     bool setupDone_          = false;
     bool kbObserverRegistered_ = false;
@@ -97,6 +98,8 @@ public:
     void handleKeyFromLVGL(uint8_t c);
     void handleKeyPress(uint8_t ascii);
     void toggleSound();
+    void adjustVolume(int8_t delta);
+    void adjustBrightness(int8_t delta);
     const char *getSetupStatus() const { return setupStatus_; }
     // RAW mode: set joypad directly from bitmask (bypasses press/release timer)
     void setJoypadDirect(uint8_t mask) { joypadState_ = mask; kbMask_ = 0; }

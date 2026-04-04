@@ -500,6 +500,26 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
         }
         g_micWasPressed = micHeld;
 
+        // O key (+) → volume up, I key (-) → volume down
+        // byte[4]: o=0x01, i=0x04
+        static bool g_volUpWas = false, g_volDnWas = false;
+        bool volUp = (b[4] & 0x01) != 0;
+        bool volDn = (b[4] & 0x04) != 0;
+        if (volUp && !g_volUpWas && monsterMeshModule) monsterMeshModule->adjustVolume(1);
+        if (volDn && !g_volDnWas && monsterMeshModule) monsterMeshModule->adjustVolume(-1);
+        g_volUpWas = volUp;
+        g_volDnWas = volDn;
+
+        // Y key ()) → brightness up, T key (() → brightness down
+        // byte[3]: y=0x04, byte[2]: t=0x04
+        static bool g_brtUpWas = false, g_brtDnWas = false;
+        bool brtUp = (b[3] & 0x04) != 0;
+        bool brtDn = (b[2] & 0x04) != 0;
+        if (brtUp && !g_brtUpWas && monsterMeshModule) monsterMeshModule->adjustBrightness(1);
+        if (brtDn && !g_brtDnWas && monsterMeshModule) monsterMeshModule->adjustBrightness(-1);
+        g_brtUpWas = brtUp;
+        g_brtDnWas = brtDn;
+
         // SYM+E simultaneously → exit emulator, switch back to KEY mode
         bool symHeld = (b[0] & 0x04) != 0;
         bool eHeld   = (b[1] & 0x01) != 0;
@@ -612,6 +632,28 @@ void MonsterMeshModule::toggleSound()
         emu_.audio_->setMuted(!emu_.audio_->isMuted());
         LOG_INFO("[MonsterMesh] Sound %s\n", emu_.audio_->isMuted() ? "OFF" : "ON");
     }
+}
+
+void MonsterMeshModule::adjustVolume(int8_t delta)
+{
+    if (!emu_.audio_) return;
+    int8_t vol = (int8_t)emu_.audio_->volume() + delta;
+    if (vol < 0) vol = 0;
+    if (vol > 8) vol = 8;
+    emu_.audio_->setVolume((uint8_t)vol);
+    LOG_INFO("[MonsterMesh] Volume: %d/8\n", vol);
+}
+
+void MonsterMeshModule::adjustBrightness(int8_t delta)
+{
+    lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
+    if (!gfx) return;
+    int16_t b = brightness_ + delta * 32;
+    if (b < 16) b = 16;
+    if (b > 255) b = 255;
+    brightness_ = (uint8_t)b;
+    gfx->setBrightness(brightness_);
+    LOG_INFO("[MonsterMesh] Brightness: %d/255\n", brightness_);
 }
 
 void MonsterMeshModule::pollKeyboard() {
