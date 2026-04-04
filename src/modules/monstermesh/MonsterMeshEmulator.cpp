@@ -3,7 +3,7 @@
 #include "SPILock.h"
 #include "variant.h"
 #include <SPI.h>
-#include <LittleFS.h>
+#include "FSCommon.h"
 #include <SD.h>
 #include <stdio.h>
 #include <sys/stat.h>
@@ -279,8 +279,11 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
 }
 
 void MonsterMeshEmulator::romPathToSavePath(const char *romPath, char *out, size_t outLen) {
-    strncpy(out, romPath, outLen - 1);
-    out[outLen - 1] = '\0';
+    // Extract just the filename (strip any /sd/ or directory prefix)
+    const char *fname = strrchr(romPath, '/');
+    fname = fname ? fname + 1 : romPath;
+    // Build save path on internal flash: /monstermesh/<name>.sav
+    snprintf(out, outLen, "/monstermesh/%s", fname);
     char *dot = strrchr(out, '.');
     if (dot) strcpy(dot, ".sav");
     else strncat(out, ".sav", outLen - strlen(out) - 1);
@@ -289,8 +292,11 @@ void MonsterMeshEmulator::romPathToSavePath(const char *romPath, char *out, size
 void MonsterMeshEmulator::loadSaveFile(const char *romPath) {
     char savPath[64];
     romPathToSavePath(romPath, savPath, sizeof(savPath));
-    File f = LittleFS.open(savPath, "r");
-    if (!f) return;
+    File f = FSCom.open(savPath, FILE_O_READ);
+    if (!f) {
+        Serial.printf("[EMU] no save file: %s\n", savPath);
+        return;
+    }
     size_t n = f.read(cartRam_, sizeof(cartRam_));
     f.close();
     Serial.printf("[EMU] save loaded: %s (%u bytes)\n", savPath, (unsigned)n);
@@ -299,9 +305,11 @@ void MonsterMeshEmulator::loadSaveFile(const char *romPath) {
 void MonsterMeshEmulator::writeSaveFile(const char *romPath) {
     char savPath[64];
     romPathToSavePath(romPath, savPath, sizeof(savPath));
-    File f = LittleFS.open(savPath, "w");
-    if (!f) { Serial.println("[EMU] save write failed"); return; }
+    // Ensure directory exists
+    FSCom.mkdir("/monstermesh");
+    File f = FSCom.open(savPath, FILE_O_WRITE);
+    if (!f) { Serial.printf("[EMU] save write failed: %s\n", savPath); return; }
     f.write(cartRam_, sizeof(cartRam_));
     f.close();
-    Serial.printf("[EMU] save written: %s\n", savPath);
+    Serial.printf("[EMU] save written: %s (%u bytes)\n", savPath, (unsigned)sizeof(cartRam_));
 }

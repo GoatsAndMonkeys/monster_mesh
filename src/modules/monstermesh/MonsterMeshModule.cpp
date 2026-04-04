@@ -586,6 +586,7 @@ void MonsterMeshModule::emuTaskLoop()
 {
     const TickType_t framePeriod = pdMS_TO_TICKS(16);  // ~60fps
     TickType_t lastWake = xTaskGetTickCount();
+    uint32_t lastAutoSaveMs = millis();
 
     while (true) {
         // Keyboard input is handled by InputBroker via handleInputEvent() on Core 0.
@@ -677,6 +678,13 @@ void MonsterMeshModule::emuTaskLoop()
 
         // ── Push joypad state to emulator ────────────────────────────────
         emu_.setJoypad(joypadState_);
+
+        // ── Auto-save every 30 seconds ───────────────────────────────────
+        uint32_t nowMs = millis();
+        if (nowMs - lastAutoSaveMs > 30000) {
+            lastAutoSaveMs = nowMs;
+            emu_.save();
+        }
 
         vTaskDelayUntil(&lastWake, framePeriod);
     }
