@@ -77,7 +77,7 @@ public:
     uint8_t      cartRam_[0x8000];
     bool         running_     = false;
     ISerialLink *serialLink_  = nullptr;
-    char         romPath_[64] = {};
+    char         romPath_[256] = {};
     int16_t      viewportY_   = 0;
     uint16_t     lineBuf_[PM_DISP_W];
     volatile uint8_t joypadState_ = 0;

@@ -292,9 +292,9 @@ void MonsterMeshEmulator::romPathToSavePath(const char *romPath, char *out, size
 }
 
 void MonsterMeshEmulator::loadSaveFile(const char *romPath) {
-    char savPath[128];
+    char savPath[256];
     romPathToSavePath(romPath, savPath, sizeof(savPath));
-    Serial.printf("[EMU] loading save: %s\n", savPath);
+    Serial.printf("[EMU] loading save: %s (ROM: %s)\n", savPath, romPath);
 
     // SD shares SPI bus — reinit before access
     SD.end();
@@ -315,9 +315,9 @@ void MonsterMeshEmulator::loadSaveFile(const char *romPath) {
 }
 
 void MonsterMeshEmulator::writeSaveFile(const char *romPath) {
-    char savPath[128];
+    char savPath[256];
     romPathToSavePath(romPath, savPath, sizeof(savPath));
-    Serial.printf("[EMU] writing save: %s\n", savPath);
+    Serial.printf("[EMU] writing save: %s (ROM: %s)\n", savPath, romPath);
 
     // SD shares SPI bus — reinit before access
     concurrency::LockGuard g(spiLock);
