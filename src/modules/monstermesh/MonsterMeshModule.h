@@ -84,6 +84,11 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     static void emuTaskEntry(void *pv);
     void emuTaskLoop();
 
+    // Render task — blits framebuffer to TFT without blocking emulator
+    TaskHandle_t renderTaskHandle_ = nullptr;
+    static void renderTaskEntry(void *pv);
+    void renderTaskLoop();
+
     // Keyboard input (LVGL hook for TFT builds, InputBroker for non-TFT)
     void pollKeyboard();
     void installKeyboardHook();

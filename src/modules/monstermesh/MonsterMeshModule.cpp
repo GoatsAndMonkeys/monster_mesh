@@ -633,18 +633,15 @@ void MonsterMeshModule::emuTaskLoop()
     uint8_t frameCount = 0;
 
     while (true) {
-        // Only render every 3rd frame — other 2 frames run pure emulation + audio
+        // Write to framebuffer every 3rd frame — render task blits to TFT separately
         frameCount++;
         renderFrame_ = (emulatorActive_ && frameCount >= 3);
         emu_.runFrame();
         if (renderFrame_) {
             frameCount = 0;
-            blitFrame();
+            // frameDirty_ is set by scanlineCallback — render task picks it up
         }
         renderFrame_ = false;
-
-        // Yield to idle task so it can feed the watchdog timer
-        vTaskDelay(1);
 
         // BattleShim tick (drives state machine + serial batch flush)
         shim_.tick();
@@ -739,6 +736,24 @@ void MonsterMeshModule::emuTaskLoop()
         }
 
         vTaskDelayUntil(&lastWake, framePeriod);
+    }
+}
+
+// ── Render task (separate from emulator, so SPI blit doesn't stall audio) ────
+
+void MonsterMeshModule::renderTaskEntry(void *pv)
+{
+    static_cast<MonsterMeshModule *>(pv)->renderTaskLoop();
+}
+
+void MonsterMeshModule::renderTaskLoop()
+{
+    while (true) {
+        if (emulatorActive_ && frameDirty_) {
+            blitFrame();
+        }
+        // ~30fps render rate — emulator runs at 60fps independently
+        vTaskDelay(pdMS_TO_TICKS(33));
     }
 }
 
@@ -1116,11 +1131,20 @@ void MonsterMeshModule::launchROM(const char *path)
         }
     }
 
-    // Create emulator FreeRTOS task on Core 1
+    // Create emulator FreeRTOS task on Core 1 (high priority — never stalls)
     if (!emuTaskHandle_) {
         xTaskCreatePinnedToCore(
             emuTaskEntry, "monstermesh_emu",
             16384, this, 5, &emuTaskHandle_, 1
+        );
+    }
+
+    // Create render task on Core 0 (lower priority — blits framebuffer to TFT
+    // without blocking the emulator task, so audio stays smooth)
+    if (!renderTaskHandle_) {
+        xTaskCreatePinnedToCore(
+            renderTaskEntry, "monstermesh_render",
+            4096, this, 2, &renderTaskHandle_, 0
         );
     }
 
