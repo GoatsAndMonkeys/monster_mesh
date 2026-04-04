@@ -4,7 +4,7 @@
 
 // Use 16-bit signed samples for I2S output
 #define MINIGB_APU_AUDIO_FORMAT_S16SYS
-#define AUDIO_SAMPLE_RATE 16384
+#define AUDIO_SAMPLE_RATE 32768
 #include "minigb_apu.h"
 
 // Free functions called by peanut_gb when ENABLE_SOUND=1

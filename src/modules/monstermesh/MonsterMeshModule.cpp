@@ -277,8 +277,9 @@ int32_t MonsterMeshModule::runOnce()
     }
     // Trackball press toggle is handled in handleInputEvent() via INPUT_BROKER_SELECT
 
-    // Retry keyboard hook install if it wasn't found on earlier attempts
-    if (browserActive_ || emulatorActive_) {
+    // Keep keyboard hook installed at all times — needed to detect mic button
+    // even when emulator/browser is inactive (to toggle back on)
+    if (emuInitialized_ || browserActive_ || emulatorActive_) {
         installKeyboardHook();
     }
 
@@ -301,6 +302,8 @@ int32_t MonsterMeshModule::runOnce()
         // on Core 0 and would race with scanline callback on Core 1, causing palette corruption
     }
 #endif
+
+    // blitFrame() moved to emulator task on Core 1 — runOnce() is too slow for screen updates
 
     // Process buffered browser keys and render
     if (browserActive_) {
@@ -438,7 +441,9 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
             uint32_t now = millis();
             if (now - g_micLastToggleMs > 600) {
                 g_micLastToggleMs = now;
+                g_micWasPressed = true;  // set before toggle so RAW mode sees it as already pressed
                 monsterMeshModule->handleKeyFromLVGL(0x05);
+                return;  // don't process further this cycle
             }
         }
         g_micWasPressed = micPressed;
@@ -587,14 +592,18 @@ void MonsterMeshModule::emuTaskLoop()
     const TickType_t framePeriod = pdMS_TO_TICKS(16);  // ~60fps
     TickType_t lastWake = xTaskGetTickCount();
     uint32_t lastAutoSaveMs = millis();
+    uint8_t frameCount = 0;
 
     while (true) {
-        // Keyboard input is handled by InputBroker via handleInputEvent() on Core 0.
-        // Direct I2C polling was removed — it raced with kbI2cBase::runOnce() and
-        // prevented SYM+E → Ctrl+E modifier synthesis.
-
-        // Run emulator frame (always, even when UI is showing Meshtastic screens)
+        // Only render every 3rd frame — other 2 frames run pure emulation + audio
+        frameCount++;
+        renderFrame_ = (emulatorActive_ && frameCount >= 3);
         emu_.runFrame();
+        if (renderFrame_) {
+            frameCount = 0;
+            blitFrame();
+        }
+        renderFrame_ = false;
 
         // BattleShim tick (drives state machine + serial batch flush)
         shim_.tick();
@@ -690,32 +699,41 @@ void MonsterMeshModule::emuTaskLoop()
     }
 }
 
-// ── Scanline callback — blits to TFT via Meshtastic's display ───────────────
+// ── Scanline callback — writes to PSRAM framebuffer (no SPI, no lock) ───────
 
 void MonsterMeshModule::scanlineCallback(uint8_t line, const uint16_t *pixels320,
                                        int16_t screenY0, int16_t screenY1, void *ctx)
 {
     MonsterMeshModule *self = static_cast<MonsterMeshModule *>(ctx);
-    if (!self->emulatorActive_) return;
+    if (!self->renderFrame_ || !self->frameBuf_) return;
+
+    // Write scanline to PSRAM framebuffer with byte swap
+    for (int16_t y = screenY0; y <= screenY1; y++) {
+        if (y >= 0 && y < PM_DISP_H) {
+            uint16_t *row = &self->frameBuf_[y * PM_DISP_W];
+            for (int i = 0; i < PM_DISP_W; i++)
+                row[i] = __builtin_bswap16(pixels320[i]);
+        }
+    }
+    self->frameDirty_ = true;
+}
+
+// ── Blit entire framebuffer to TFT in one SPI transaction ───────────────────
+
+void MonsterMeshModule::blitFrame()
+{
+    if (!frameDirty_ || !frameBuf_) return;
+    frameDirty_ = false;
 
     lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
     if (!gfx) return;
 
-    // Swap bytes in software so we never touch gfx->setSwapBytes() —
-    // that flag is shared with LVGL on Core 0 and toggling it causes
-    // color inversion races.
-    uint16_t swapped[PM_DISP_W];
-    for (int i = 0; i < PM_DISP_W; i++)
-        swapped[i] = __builtin_bswap16(pixels320[i]);
-
-    // spiLock prevents starving the LoRa radio SPI on Core 0.
-    // Without this, TX IRQ timeout → watchdog reboot after ~60s.
+    // Single lock acquisition, push line by line from PSRAM
+    // (full-frame pushImage from PSRAM can fail on some ESP32-S3 DMA configs)
     concurrency::LockGuard g(spiLock);
     gfx->startWrite();
-    for (int16_t y = screenY0; y <= screenY1; y++) {
-        if (y >= 0 && y < PM_DISP_H) {
-            gfx->pushImage(0, y, PM_DISP_W, 1, swapped);
-        }
+    for (int y = 0; y < PM_DISP_H; y++) {
+        gfx->pushImage(0, y, PM_DISP_W, 1, &frameBuf_[y * PM_DISP_W]);
     }
     gfx->endWrite();
 }
@@ -1034,6 +1052,18 @@ void MonsterMeshModule::launchROM(const char *path)
     emuInitialized_ = true;
     browserActive_ = false;
     emulatorActive_ = true;
+
+    // Allocate PSRAM framebuffer for rendering (320x240 RGB565 = 153,600 bytes)
+    if (!frameBuf_) {
+        frameBuf_ = static_cast<uint16_t *>(ps_malloc(PM_DISP_W * PM_DISP_H * sizeof(uint16_t)));
+        if (frameBuf_) {
+            memset(frameBuf_, 0, PM_DISP_W * PM_DISP_H * sizeof(uint16_t));
+            LOG_INFO("[MonsterMesh] Framebuffer allocated in PSRAM (%u bytes)\n",
+                     (unsigned)(PM_DISP_W * PM_DISP_H * sizeof(uint16_t)));
+        } else {
+            LOG_WARN("[MonsterMesh] PSRAM framebuffer alloc failed\n");
+        }
+    }
 
     // Create emulator FreeRTOS task on Core 1
     if (!emuTaskHandle_) {

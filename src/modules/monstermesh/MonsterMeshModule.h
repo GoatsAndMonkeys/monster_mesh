@@ -135,9 +135,13 @@ private:
     // lastKeyMs_ declared public above for LVGL callback access
     static constexpr uint32_t KEY_RELEASE_MS = 100;  // release after 100ms
 
-    // Scanline callback (writes to TFT)
+    // Framebuffer rendering — scanline writes to PSRAM buffer, blitFrame pushes to TFT
+    uint16_t *frameBuf_ = nullptr;  // 320x240 RGB565 in PSRAM
+    volatile bool frameDirty_ = false;
+    volatile bool renderFrame_ = false;  // true only on frames that should render
     static void scanlineCallback(uint8_t line, const uint16_t *pixels320,
                                   int16_t screenY0, int16_t screenY1, void *ctx);
+    void blitFrame();
 
     // Send queued packets to mesh
     void drainTxQueue();

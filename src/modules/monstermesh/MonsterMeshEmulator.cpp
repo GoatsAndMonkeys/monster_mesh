@@ -3,7 +3,6 @@
 #include "SPILock.h"
 #include "variant.h"
 #include <SPI.h>
-#include "FSCommon.h"
 #include <SD.h>
 #include <stdio.h>
 #include <sys/stat.h>
@@ -69,7 +68,7 @@ bool MonsterMeshEmulator::begin(const char *romPath) {
 
     gb_init_lcd(gb_, pm_lcdDrawLine);
     gb_init_serial(gb_, pm_serialTx, pm_serialRx);
-    gb_->direct.frame_skip = true;  // render every other frame — keeps audio smooth
+    // gb_->direct.frame_skip = true;  // disabled — didn't help audio
 
     // Initialize audio
     if (!audio_) {
@@ -279,20 +278,33 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
 }
 
 void MonsterMeshEmulator::romPathToSavePath(const char *romPath, char *out, size_t outLen) {
-    // Extract just the filename (strip any /sd/ or directory prefix)
-    const char *fname = strrchr(romPath, '/');
-    fname = fname ? fname + 1 : romPath;
-    // Build save path on internal flash: /monstermesh/<name>.sav
-    snprintf(out, outLen, "/monstermesh/%s", fname);
+    // Save sits next to the ROM on SD card — same path but .sav extension
+    // romPath is SD-relative like "/pokemon.gb" or "/roms/pokemon.gb"
+    // Strip /sd prefix if present
+    const char *p = romPath;
+    if (strncmp(p, "/sd/", 4) == 0) p = p + 3;  // "/sd/foo" → "/foo"
+    else if (strncmp(p, "/sd", 3) == 0 && p[3] == '\0') p = "/";
+    strncpy(out, p, outLen - 1);
+    out[outLen - 1] = '\0';
     char *dot = strrchr(out, '.');
     if (dot) strcpy(dot, ".sav");
     else strncat(out, ".sav", outLen - strlen(out) - 1);
 }
 
 void MonsterMeshEmulator::loadSaveFile(const char *romPath) {
-    char savPath[64];
+    char savPath[128];
     romPathToSavePath(romPath, savPath, sizeof(savPath));
-    File f = FSCom.open(savPath, FILE_O_READ);
+    Serial.printf("[EMU] loading save: %s\n", savPath);
+
+    // SD shares SPI bus — reinit before access
+    SD.end();
+    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+    if (!SD.begin(SDCARD_CS, SPI)) {
+        Serial.println("[EMU] SD reinit failed for save load");
+        return;
+    }
+
+    File f = SD.open(savPath, FILE_READ);
     if (!f) {
         Serial.printf("[EMU] no save file: %s\n", savPath);
         return;
@@ -303,13 +315,22 @@ void MonsterMeshEmulator::loadSaveFile(const char *romPath) {
 }
 
 void MonsterMeshEmulator::writeSaveFile(const char *romPath) {
-    char savPath[64];
+    char savPath[128];
     romPathToSavePath(romPath, savPath, sizeof(savPath));
-    // Ensure directory exists
-    FSCom.mkdir("/monstermesh");
-    File f = FSCom.open(savPath, FILE_O_WRITE);
+    Serial.printf("[EMU] writing save: %s\n", savPath);
+
+    // SD shares SPI bus — reinit before access
+    concurrency::LockGuard g(spiLock);
+    SD.end();
+    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+    if (!SD.begin(SDCARD_CS, SPI)) {
+        Serial.printf("[EMU] SD reinit failed for save write\n");
+        return;
+    }
+
+    File f = SD.open(savPath, FILE_WRITE);
     if (!f) { Serial.printf("[EMU] save write failed: %s\n", savPath); return; }
-    f.write(cartRam_, sizeof(cartRam_));
+    size_t written = f.write(cartRam_, sizeof(cartRam_));
     f.close();
-    Serial.printf("[EMU] save written: %s (%u bytes)\n", savPath, (unsigned)sizeof(cartRam_));
+    Serial.printf("[EMU] save written: %s (%u bytes)\n", savPath, (unsigned)written);
 }
