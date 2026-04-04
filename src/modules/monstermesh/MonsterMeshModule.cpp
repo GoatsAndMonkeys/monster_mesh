@@ -327,6 +327,12 @@ int32_t MonsterMeshModule::runOnce()
         renderBrowser();
     }
 
+    // Deferred save — triggered on emulator exit, done here outside LVGL callback
+    if (pendingSave_) {
+        pendingSave_ = false;
+        emu_.save();
+    }
+
     drainTxQueue();
     return 50;
 }
@@ -911,9 +917,9 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
 
         // ── Toggle emulator on/off ────────────────────────────────────────
         emulatorActive_ = !emulatorActive_;
-        // Save when switching away from emulator
+        // Flag save for runOnce() — don't save here (SD write blocks LVGL callback)
         if (!emulatorActive_ && emu_.isRunning()) {
-            emu_.save();
+            pendingSave_ = true;
         }
 #if HAS_TFT
         lv_display_t *disp = lv_display_get_default();

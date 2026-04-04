@@ -71,6 +71,7 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
 
     bool emulatorActive_     = false;
     uint8_t brightness_      = 255;
+    volatile bool pendingSave_ = false;  // deferred save — done in runOnce() not callback
     bool browserActive_      = false;
     bool setupDone_          = false;
     bool kbObserverRegistered_ = false;
