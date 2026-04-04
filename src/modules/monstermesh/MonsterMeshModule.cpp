@@ -15,6 +15,7 @@
 #include "SPILock.h"
 
 #include "PowerFSM.h"
+#include "MonsterMeshAudio.h"
 #include "PokemonData.h"
 #include "Gen1Species.h"
 
@@ -416,14 +417,14 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
         lv_display_trigger_activity(NULL);
     }
 
-    // ── Mic button toggle ────────────────────────────────────────────────
-    // The mic button is on the keyboard MCU matrix (byte[0] bit 0x40 in RAW mode).
-    // Peek at RAW mode every few cycles to check it, then switch back to KEY mode.
+    // ── ALT + Mic button peek ──────────────────────────────────────────
+    // ALT (byte[0] bit 0x10) = toggle screens, Mic (byte[0] bit 0x40) = toggle sound.
+    // Peek at RAW mode every few cycles to check them, then switch back to KEY mode.
     // Skip when browser is active — the mode switching eats buffered keypresses.
     bool browserUp = monsterMeshModule && monsterMeshModule->isBrowserActive();
     if (!g_rawMode && monsterMeshModule && !browserUp && (++g_micPollCounter >= 3)) {
         g_micPollCounter = 0;
-        // Quick switch to RAW, read mic bit, switch back to KEY
+        // Quick switch to RAW, read button bits, switch back to KEY
         Wire.beginTransmission(0x55);
         Wire.write(0x03);  // RAW mode
         Wire.endTransmission();
@@ -436,14 +437,29 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
         Wire.write(0x04);  // back to KEY mode
         Wire.endTransmission();
 
+        // ALT button → toggle screens
+        bool altPressed = (rb[0] & 0x10) != 0;
+        static bool g_altWasPressed = false;
+        if (altPressed && !g_altWasPressed) {
+            uint32_t now = millis();
+            if (now - g_micLastToggleMs > 600) {
+                g_micLastToggleMs = now;
+                g_altWasPressed = true;
+                monsterMeshModule->handleKeyFromLVGL(0x05);
+                return;
+            }
+        }
+        g_altWasPressed = altPressed;
+
+        // Mic button → toggle sound
         bool micPressed = (rb[0] & 0x40) != 0;
         if (micPressed && !g_micWasPressed) {
             uint32_t now = millis();
             if (now - g_micLastToggleMs > 600) {
                 g_micLastToggleMs = now;
-                g_micWasPressed = true;  // set before toggle so RAW mode sees it as already pressed
-                monsterMeshModule->handleKeyFromLVGL(0x05);
-                return;  // don't process further this cycle
+                g_micWasPressed = true;
+                monsterMeshModule->toggleSound();
+                return;
             }
         }
         g_micWasPressed = micPressed;
@@ -455,9 +471,10 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
         uint8_t b[5] = {};
         for (int i = 0; i < 5 && Wire.available(); i++) b[i] = Wire.read();
 
-        // Mic button in RAW mode — toggle emulator off
-        bool micHeld = (b[0] & 0x40) != 0;
-        if (micHeld && !g_micWasPressed) {
+        // ALT button in RAW mode — toggle screens (exit emulator)
+        bool altHeld = (b[0] & 0x10) != 0;
+        static bool g_altWasHeldRaw = false;
+        if (altHeld && !g_altWasHeldRaw) {
             uint32_t now = millis();
             if (now - g_micLastToggleMs > 600) {
                 g_micLastToggleMs = now;
@@ -465,6 +482,19 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
                     monsterMeshModule->setJoypadDirect(0);
                     monsterMeshModule->handleKeyFromLVGL(0x05);
                     kbSetMode(false);
+                }
+            }
+        }
+        g_altWasHeldRaw = altHeld;
+
+        // Mic button in RAW mode — toggle sound
+        bool micHeld = (b[0] & 0x40) != 0;
+        if (micHeld && !g_micWasPressed) {
+            uint32_t now = millis();
+            if (now - g_micLastToggleMs > 600) {
+                g_micLastToggleMs = now;
+                if (monsterMeshModule) {
+                    monsterMeshModule->toggleSound();
                 }
             }
         }
@@ -576,6 +606,14 @@ void MonsterMeshModule::installKeyboardHook()
 
 void MonsterMeshModule::handleKeyFromLVGL(uint8_t c) { handleKeyPress(c); lastKeyMs_ = millis(); }
 
+void MonsterMeshModule::toggleSound()
+{
+    if (emu_.audio_) {
+        emu_.audio_->setMuted(!emu_.audio_->isMuted());
+        LOG_INFO("[MonsterMesh] Sound %s\n", emu_.audio_->isMuted() ? "OFF" : "ON");
+    }
+}
+
 void MonsterMeshModule::pollKeyboard() {
     // Unused: keyboard flows through LVGL hook (HAS_TFT) or InputBroker (non-TFT).
 }
@@ -604,6 +642,9 @@ void MonsterMeshModule::emuTaskLoop()
             blitFrame();
         }
         renderFrame_ = false;
+
+        // Yield to idle task so it can feed the watchdog timer
+        vTaskDelay(1);
 
         // BattleShim tick (drives state machine + serial batch flush)
         shim_.tick();
@@ -688,9 +729,11 @@ void MonsterMeshModule::emuTaskLoop()
         // ── Push joypad state to emulator ────────────────────────────────
         emu_.setJoypad(joypadState_);
 
-        // ── Auto-save every 30 seconds ───────────────────────────────────
+        // ── Auto-save every 120 seconds ──────────────────────────────────
+        // SD writes hold spiLock for ~100ms+ (32KB write) — less frequent
+        // saves reduce watchdog pressure on Core 1
         uint32_t nowMs = millis();
-        if (nowMs - lastAutoSaveMs > 30000) {
+        if (nowMs - lastAutoSaveMs > 120000) {
             lastAutoSaveMs = nowMs;
             emu_.save();
         }
@@ -728,14 +771,22 @@ void MonsterMeshModule::blitFrame()
     lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
     if (!gfx) return;
 
-    // Single lock acquisition, push line by line from PSRAM
-    // (full-frame pushImage from PSRAM can fail on some ESP32-S3 DMA configs)
-    concurrency::LockGuard g(spiLock);
-    gfx->startWrite();
-    for (int y = 0; y < PM_DISP_H; y++) {
-        gfx->pushImage(0, y, PM_DISP_W, 1, &frameBuf_[y * PM_DISP_W]);
+    // Push in 4 chunks of 60 lines, releasing spiLock between chunks
+    // so the radio task can access SPI (prevents watchdog timeout)
+    for (int chunk = 0; chunk < 4; chunk++) {
+        int yStart = chunk * 60;
+        int yEnd = yStart + 60;
+        if (yEnd > PM_DISP_H) yEnd = PM_DISP_H;
+        {
+            concurrency::LockGuard g(spiLock);
+            gfx->startWrite();
+            for (int y = yStart; y < yEnd; y++) {
+                gfx->pushImage(0, y, PM_DISP_W, 1, &frameBuf_[y * PM_DISP_W]);
+            }
+            gfx->endWrite();
+        }
+        if (chunk < 3) vTaskDelay(1);  // yield between chunks
     }
-    gfx->endWrite();
 }
 
 // ── drawFrame() — Meshtastic OLED/TFT UI frame ─────────────────────────────
@@ -995,7 +1046,7 @@ void MonsterMeshModule::renderBrowser()
     // Footer with status
     gfx->setTextColor(0x528A);
     gfx->setCursor(4, 212);
-    gfx->print("W/S:Nav  K:Open  L:Back  MIC:Exit");
+    gfx->print("W/S:Nav  K:Open  L:Back  ALT:Exit");
     // Show error/status if any
     if (setupStatus_ && strstr(setupStatus_, "FAIL")) {
         gfx->setCursor(4, 222);
