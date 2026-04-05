@@ -33,6 +33,7 @@ public:
     State    state()      const { return state_; }
     bool     isMaster()   const { return isMaster_; }
     uint16_t sessionId()  const { return sessionId_; }
+    uint32_t remoteId()   const { return remoteId_; }
 
     void cancel();
     void pairWith(uint32_t remoteNodeId);

@@ -30,13 +30,17 @@ void MonsterMeshBattleShim::onSerialTx(uint8_t byte) {
         lastRequestMs_ = 0;
         Serial.println("[SHIM] game wants link -> ADVERTISING");
     }
+    if (state_ == State::CONNECTED) {
+        state_ = State::IN_BATTLE;
+        Serial.println("[SHIM] serial tx while CONNECTED -> IN_BATTLE");
+    }
     if (state_ == State::IN_BATTLE) {
         xQueueSend(txQ_, &byte, 0);
     }
 }
 
 bool MonsterMeshBattleShim::onSerialRx(uint8_t &out) {
-    if (state_ != State::IN_BATTLE) return false;
+    if (state_ != State::IN_BATTLE && state_ != State::CONNECTED) return false;
     return xQueueReceive(rxQ_, &out, 0) == pdTRUE;
 }
 

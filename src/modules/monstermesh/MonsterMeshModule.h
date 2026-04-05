@@ -154,6 +154,7 @@ private:
     void blitFrame();
 
     // Send queued packets to mesh
+    void sendTextDM(uint32_t to, const char *text);
     void drainTxQueue();
 
     // Ensure channel 1 is configured as "MonsterMesh Center"

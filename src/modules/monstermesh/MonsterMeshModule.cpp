@@ -155,10 +155,24 @@ void MonsterMeshModule::ensureMonsterMeshChannel()
 
 bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
 {
-    // Accept PRIVATE_APP packets on our channel
-    if (p->decoded.portnum == meshtastic_PortNum_PRIVATE_APP &&
-        p->channel == MONSTERMESH_CHANNEL) {
-        return true;
+    // Accept PRIVATE_APP packets (binary serial data) — on any channel if DM to us
+    if (p->decoded.portnum == meshtastic_PortNum_PRIVATE_APP) {
+        if (p->channel == MONSTERMESH_CHANNEL || p->to == nodeDB->getNodeNum()) {
+            return true;
+        }
+    }
+    // Accept TEXT_MESSAGE DMs to us (for "MM cable on/off" commands)
+    if (p->decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
+        p->to == nodeDB->getNodeNum() &&
+        p->decoded.payload.size > 0) {
+        // Peek at payload — only claim packets starting with "MM "
+        const char *txt = (const char *)p->decoded.payload.bytes;
+        if (p->decoded.payload.size >= 3 &&
+            (txt[0] == 'M' || txt[0] == 'm') &&
+            (txt[1] == 'M' || txt[1] == 'm') &&
+            txt[2] == ' ') {
+            return true;
+        }
     }
     return false;
 }
@@ -167,7 +181,53 @@ bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
 
 ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp)
 {
-    // Push the raw payload into transport for BattleShim/Lobby to process
+    // ── Text DM commands: "MM cable on" / "MM cable off" ─────────────────
+    if (mp.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP) {
+        char txt[64] = {};
+        size_t len = mp.decoded.payload.size;
+        if (len >= sizeof(txt)) len = sizeof(txt) - 1;
+        memcpy(txt, mp.decoded.payload.bytes, len);
+        txt[len] = '\0';
+
+        // Lowercase for comparison
+        for (size_t i = 0; i < len; i++) {
+            if (txt[i] >= 'A' && txt[i] <= 'Z') txt[i] += 32;
+        }
+
+        if (strstr(txt, "mm cable on")) {
+            uint32_t from = mp.from;
+            LOG_INFO("[MonsterMesh] DM 'cable on' from 0x%08X\n", (unsigned)from);
+
+            bool alreadyPaired = (shim_.state() == MonsterMeshBattleShim::State::CONNECTED ||
+                                  shim_.state() == MonsterMeshBattleShim::State::IN_BATTLE);
+
+            shim_.pairWith(from);
+
+            if (!alreadyPaired) {
+                // Ack first, then reply with cable on so the other side auto-pairs
+                sendTextDM(from, "MM: Received cable on request.");
+                sendTextDM(from, "MM cable on");
+                sendTextDM(from, "MM: Cable connected! Enter Cable Club in-game.");
+            } else {
+                sendTextDM(from, "MM: Already connected.");
+            }
+            return ProcessMessage::STOP;
+        }
+
+        if (strstr(txt, "mm cable off")) {
+            LOG_INFO("[MonsterMesh] DM 'cable off' from 0x%08X\n", (unsigned)mp.from);
+            shim_.cancel();
+
+            sendTextDM(mp.from, "MM: Received cable off request.");
+            sendTextDM(mp.from, "MM: Cable disconnected.");
+            return ProcessMessage::STOP;
+        }
+
+        // Unknown MM command — let it pass through to normal chat
+        return ProcessMessage::CONTINUE;
+    }
+
+    // ── Binary PRIVATE_APP packets (serial data for battle shim) ─────────
     if (mp.decoded.payload.size > 0) {
         transport_.pushReceivedPacket(
             mp.decoded.payload.bytes,
@@ -175,7 +235,7 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             mp.rx_rssi
         );
     }
-    return ProcessMessage::STOP;  // consumed — don't pass to other modules
+    return ProcessMessage::STOP;
 }
 
 // ── runOnce() — OSThread periodic drain of tx queue ─────────────────────────
@@ -337,17 +397,35 @@ int32_t MonsterMeshModule::runOnce()
     return 50;
 }
 
+// ── sendTextDM() — send a text DM to a specific node ─────────────────────────
+
+void MonsterMeshModule::sendTextDM(uint32_t to, const char *text)
+{
+    meshtastic_MeshPacket *p = router->allocForSending();
+    p->to = to;
+    p->channel = channels.getPrimaryIndex();
+    p->decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
+    size_t len = strlen(text);
+    if (len > sizeof(p->decoded.payload.bytes)) len = sizeof(p->decoded.payload.bytes);
+    memcpy(p->decoded.payload.bytes, text, len);
+    p->decoded.payload.size = len;
+    service->sendToMesh(p);
+    LOG_INFO("[MonsterMesh] sent DM to 0x%08X: %s\n", (unsigned)to, text);
+}
+
 void MonsterMeshModule::drainTxQueue()
 {
     uint8_t buf[237];
     size_t len = 0;
 
+    // Send binary serial data to the paired node (DM, not broadcast)
+    uint32_t remoteId = shim_.remoteId();
     while (transport_.hasPendingSend()) {
         if (!transport_.dequeueSend(buf, len, sizeof(buf))) break;
 
         meshtastic_MeshPacket *p = router->allocForSending();
-        p->to = NODENUM_BROADCAST;
-        p->channel = MONSTERMESH_CHANNEL;
+        p->to = (remoteId != 0) ? remoteId : NODENUM_BROADCAST;
+        p->channel = (remoteId != 0) ? channels.getPrimaryIndex() : MONSTERMESH_CHANNEL;
         p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
         p->decoded.payload.size = len;
         memcpy(p->decoded.payload.bytes, buf, len);
