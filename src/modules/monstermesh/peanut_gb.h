@@ -492,6 +492,7 @@ struct count_s
 	uint_fast16_t div_count;	/* Divider Register Counter */
 	uint_fast16_t tima_count;	/* Timer Counter */
 	uint_fast16_t serial_count;	/* Serial Counter */
+	uint_fast32_t serial_stall;	/* LoRa stall counter */
 	uint_fast32_t rtc_count;	/* RTC Counter */
 	uint_fast32_t lcd_off_count;	/* Cycles LCD has been disabled */
 };
@@ -3343,8 +3344,8 @@ void __gb_step_cpu(struct gb_s *gb)
 			if(gb->counter.serial_count >= SERIAL_CYCLES)
 			{
 				/* If RX can be done, do it. */
-				/* If RX failed, do not change SB if using external
-				 * clock, or set to 0xFF if using internal clock. */
+				/* If RX failed, stall the serial counter to wait
+				 * for a response over LoRa (mesh link cable). */
 				uint8_t rx;
 
 				if(gb->gb_serial_rx != NULL &&
@@ -3356,6 +3357,33 @@ void __gb_step_cpu(struct gb_s *gb)
 					/* Inform game of serial TX/RX completion. */
 					gb->hram_io[IO_SC] &= 0x01;
 					gb->hram_io[IO_IF] |= SERIAL_INTR;
+					gb->counter.serial_stall = 0;
+				}
+				else if(gb->gb_serial_rx != NULL)
+				{
+					/* LoRa stall: keep waiting for remote
+					 * response. Hold serial_count at
+					 * SERIAL_CYCLES so we retry each frame.
+					 * Give up after ~5 seconds (5000ms). */
+					gb->counter.serial_stall++;
+					if(gb->counter.serial_stall >
+						(5000 * DMG_CLOCK_FREQ / 1000 / SERIAL_CYCLES))
+					{
+						/* Timeout — treat as no connection */
+						if(gb->hram_io[IO_SC] & SERIAL_SC_CLOCK_SRC)
+						{
+							gb->hram_io[IO_SB] = 0xFF;
+						}
+						gb->hram_io[IO_SC] &= 0x01;
+						gb->hram_io[IO_IF] |= SERIAL_INTR;
+						gb->counter.serial_stall = 0;
+					}
+					else
+					{
+						/* Stall — keep counter at threshold
+						 * so we retry next cycle */
+						gb->counter.serial_count = SERIAL_CYCLES;
+					}
 				}
 				else if(gb->hram_io[IO_SC] & SERIAL_SC_CLOCK_SRC)
 				{
@@ -3665,6 +3693,7 @@ void gb_reset(struct gb_s *gb)
 	gb->counter.div_count = 0;
 	gb->counter.tima_count = 0;
 	gb->counter.serial_count = 0;
+	gb->counter.serial_stall = 0;
 	gb->counter.rtc_count = 0;
 	gb->counter.lcd_off_count = 0;
 

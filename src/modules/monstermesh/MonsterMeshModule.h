@@ -121,6 +121,9 @@ private:
     uint8_t prevBattle_ = 0;
     uint16_t opponentElo_ = 0;
 
+    // Cable disconnect cooldown — ignore stale "cable on" for 10s after disconnect
+    uint32_t cableOffMs_ = 0;
+
     // Viewport
     volatile int8_t viewportDelta_ = 0;
     volatile bool   viewportRecenter_ = false;

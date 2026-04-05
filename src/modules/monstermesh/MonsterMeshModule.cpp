@@ -165,12 +165,11 @@ bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
     if (p->decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
         p->to == nodeDB->getNodeNum() &&
         p->decoded.payload.size > 0) {
-        // Peek at payload — only claim packets starting with "MM "
+        // Peek at payload — claim packets starting with "MM" (with or without space)
         const char *txt = (const char *)p->decoded.payload.bytes;
-        if (p->decoded.payload.size >= 3 &&
+        if (p->decoded.payload.size >= 2 &&
             (txt[0] == 'M' || txt[0] == 'm') &&
-            (txt[1] == 'M' || txt[1] == 'm') &&
-            txt[2] == ' ') {
+            (txt[1] == 'M' || txt[1] == 'm')) {
             return true;
         }
     }
@@ -181,7 +180,16 @@ bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
 
 ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp)
 {
-    // ── Text DM commands: "MM cable on" / "MM cable off" ─────────────────
+    // ── Text DM commands ──────────────────────────────────────────────────
+    //
+    // User commands (trigger action + send ack to other side):
+    //   "MM cable on"  → pair locally, send "MM link on" ack
+    //   "MM cable off" → disconnect locally, send "MM link off" ack
+    //
+    // Internal acks (trigger action, NO echo — stops the loop):
+    //   "MM link on"   → pair locally, no reply
+    //   "MM link off"  → disconnect locally, no reply
+    //
     if (mp.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP) {
         char txt[64] = {};
         size_t len = mp.decoded.payload.size;
@@ -194,33 +202,54 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             if (txt[i] >= 'A' && txt[i] <= 'Z') txt[i] += 32;
         }
 
-        if (strstr(txt, "mm cable on")) {
+        // ── Internal ack: "MM link off" — disconnect, no reply ──────────
+        if (strstr(txt, "link off")) {
+            LOG_INFO("[MonsterMesh] ack 'link off' from 0x%08X\n", (unsigned)mp.from);
+            shim_.cancel();
+            cableOffMs_ = millis();
+            return ProcessMessage::CONTINUE;
+        }
+
+        // ── Internal ack: "MM link on" — pair, no reply ─────────────────
+        if (strstr(txt, "link on")) {
+            uint32_t from = mp.from;
+            LOG_INFO("[MonsterMesh] ack 'link on' from 0x%08X\n", (unsigned)from);
+
+            if (cableOffMs_ && (millis() - cableOffMs_ < 10000)) {
+                LOG_INFO("[MonsterMesh] ignoring stale 'link on' (cooldown)\n");
+                return ProcessMessage::CONTINUE;
+            }
+
+            shim_.pairWith(from);
+            return ProcessMessage::CONTINUE;
+        }
+
+        // ── User command: "MM cable off" — disconnect + send ack ────────
+        if (strstr(txt, "cable off")) {
+            LOG_INFO("[MonsterMesh] DM 'cable off' from 0x%08X\n", (unsigned)mp.from);
+            shim_.cancel();
+            cableOffMs_ = millis();
+
+            sendTextDM(mp.from, "MM link off");
+            sendTextDM(mp.from, "[MonsterMesh] Cable disconnected.");
+            return ProcessMessage::CONTINUE;
+        }
+
+        // ── User command: "MM cable on" — pair + send ack ───────────────
+        if (strstr(txt, "cable on")) {
             uint32_t from = mp.from;
             LOG_INFO("[MonsterMesh] DM 'cable on' from 0x%08X\n", (unsigned)from);
 
-            bool alreadyPaired = (shim_.state() == MonsterMeshBattleShim::State::CONNECTED ||
-                                  shim_.state() == MonsterMeshBattleShim::State::IN_BATTLE);
+            if (cableOffMs_ && (millis() - cableOffMs_ < 10000)) {
+                LOG_INFO("[MonsterMesh] ignoring stale 'cable on' (cooldown)\n");
+                return ProcessMessage::CONTINUE;
+            }
 
             shim_.pairWith(from);
 
-            if (!alreadyPaired) {
-                // Ack first, then reply with cable on so the other side auto-pairs
-                sendTextDM(from, "MM: Received cable on request.");
-                sendTextDM(from, "MM cable on");
-                sendTextDM(from, "MM: Cable connected! Enter Cable Club in-game.");
-            } else {
-                sendTextDM(from, "MM: Already connected.");
-            }
-            return ProcessMessage::STOP;
-        }
-
-        if (strstr(txt, "mm cable off")) {
-            LOG_INFO("[MonsterMesh] DM 'cable off' from 0x%08X\n", (unsigned)mp.from);
-            shim_.cancel();
-
-            sendTextDM(mp.from, "MM: Received cable off request.");
-            sendTextDM(mp.from, "MM: Cable disconnected.");
-            return ProcessMessage::STOP;
+            sendTextDM(from, "MM link on");
+            sendTextDM(from, "[MonsterMesh] Cable connected! Enter Cable Club in-game.");
+            return ProcessMessage::CONTINUE;
         }
 
         // Unknown MM command — let it pass through to normal chat
