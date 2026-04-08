@@ -1,40 +1,87 @@
-<div align="center" markdown="1">
+# MonsterMesh Pre-Alpha
 
-<img src=".github/meshtastic_logo.png" alt="Meshtastic Logo" width="80"/>
-<h1>Meshtastic Firmware</h1>
+A Game Boy emulator and Pokemon multiplayer system running as a Meshtastic module on the LilyGo T-Deck.
 
-![GitHub release downloads](https://img.shields.io/github/downloads/meshtastic/firmware/total)
-[![CI](https://img.shields.io/github/actions/workflow/status/meshtastic/firmware/main_matrix.yml?branch=master&label=actions&logo=github&color=yellow)](https://github.com/meshtastic/firmware/actions/workflows/ci.yml)
-[![CLA assistant](https://cla-assistant.io/readme/badge/meshtastic/firmware)](https://cla-assistant.io/meshtastic/firmware)
-[![Fiscal Contributors](https://opencollective.com/meshtastic/tiers/badge.svg?label=Fiscal%20Contributors&color=deeppink)](https://opencollective.com/meshtastic/)
-[![Vercel](https://img.shields.io/static/v1?label=Powered%20by&message=Vercel&style=flat&logo=vercel&color=000000)](https://vercel.com?utm_source=meshtastic&utm_campaign=oss)
+**Status: Pre-Alpha** -- active development, expect bugs and breaking changes.
 
-<a href="https://trendshift.io/repositories/5524" target="_blank"><img src="https://trendshift.io/api/badge/repositories/5524" alt="meshtastic%2Ffirmware | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+## What Is This?
 
-</div>
+MonsterMesh turns a T-Deck (ESP32-S3 with keyboard, TFT display, LoRa radio, and SD card) into a portable Game Boy that can battle and trade Pokemon with other T-Deck users over the Meshtastic mesh network -- no internet, no servers, just LoRa radio.
 
-</div>
+This repo is a fork of Meshtastic firmware with the MonsterMesh module added. All standard Meshtastic functionality (messaging, GPS, telemetry) still works alongside the emulator.
 
-<div align="center">
-	<a href="https://meshtastic.org">Website</a>
-	-
-	<a href="https://meshtastic.org/docs/">Documentation</a>
-</div>
+## Features
 
-## Overview
+### Game Boy Emulator
+- Runs Pokemon Red/Blue/Yellow at full speed on ESP32-S3
+- T-Deck keyboard mapped to Game Boy controls
+- Game ROMs and save files load from SD card
+- Audio output via I2S
 
-This repository contains the official device firmware for Meshtastic, an open-source LoRa mesh networking project designed for long-range, low-power communication without relying on internet or cellular infrastructure. The firmware supports various hardware platforms, including ESP32, nRF52, RP2040/RP2350, and Linux-based devices.
+### Pokemon Link Cable Over LoRa
+- Trade and battle Pokemon with nearby T-Deck users over mesh
+- Protocol-aware proxy translates Game Boy serial link cable protocol to LoRa packets
+- DM-based activation: send "MM cable on" to connect
 
-Meshtastic enables text messaging, location sharing, and telemetry over a decentralized mesh network, making it ideal for outdoor adventures, emergency preparedness, and remote operations.
+### Pokemon Daycare Over Mesh
+- When the emulator is idle, your party Pokemon check into a mesh-wide daycare
+- Reads species, levels, nicknames, and XP directly from the Game Boy save file
+- Hourly events: your Pokemon explore, spar, make friends with Pokemon on other nodes
+- Type affinity system: same-type Pokemon bond faster, Eevee evolutions have mutual affinity
+- Friendship and rivalry build across 5 tiers through social interactions
+- Real XP: daycare experience writes back to the Game Boy save file on checkout using Gen 1 EXP curves, stat recalculation, and checksum fix
+- Sunrise/sunset night detection from GPS for dream events
+- 35 achievements, rare ones broadcast to the mesh
+- Weather integration affects event types and XP multipliers
 
-### Get Started
+### Matchmaking (Planned)
+- Queue for casual or rated battles
+- ELO ranking system
+- Automatic pairing by skill level
 
-- 🔧 **[Building Instructions](https://meshtastic.org/docs/development/firmware/build)** – Learn how to compile the firmware from source.
-- ⚡ **[Flashing Instructions](https://meshtastic.org/docs/getting-started/flashing-firmware/)** – Install or update the firmware on your device.
+## Hardware
 
-Join our community and help improve Meshtastic! 🚀
+- **LilyGo T-Deck** (ESP32-S3, 16MB flash, 8MB PSRAM, 320x240 TFT, QWERTY keyboard, SX1262 LoRa)
+- SD card for game ROMs and saves
 
-## Stats
+## Building
 
-![Alt](https://repobeats.axiom.co/api/embed/8025e56c482ec63541593cc5bd322c19d5c0bdcf.svg "Repobeats analytics image")
+```bash
+# Activate PlatformIO environment
+source /path/to/venv/bin/activate
 
+# Build for T-Deck
+pio run -e t-deck-tft
+
+# Flash
+pio run -e t-deck-tft -t upload
+```
+
+## Project Structure
+
+```
+src/modules/monstermesh/
+  MonsterMeshModule.cpp/h    -- Main Meshtastic module (emulator + UI + LoRa)
+  MonsterMeshEmulator.cpp/h  -- Game Boy emulator wrapper
+  MonsterMeshAudio.cpp/h     -- I2S audio output
+  MonsterMeshBattleShim.cpp/h -- Link cable over LoRa
+  PokemonLinkProxy.cpp/h     -- Protocol-aware serial proxy
+  PokemonDaycare.cpp/h       -- Daycare orchestrator
+  DaycareEventGen.cpp/h      -- Dual-layer event generator
+  DaycareTypes.h              -- Data structures and persistence
+  DaycareAchievements.h       -- 35 achievement definitions
+  DaycareSavPatcher.h         -- Gen 1 SRAM read/write/patch
+  DaycareData.h               -- 151 species profiles (auto-generated from PokeAPI)
+  peanut_gb.h                 -- Game Boy CPU/PPU emulator core
+```
+
+## Credits
+
+- [Meshtastic](https://meshtastic.org) -- the mesh networking firmware this builds on
+- [Peanut-GB](https://github.com/deltabeard/Peanut-GB) -- Game Boy emulator core
+- [LovyanGFX](https://github.com/lovyan03/LovyanGFX) -- display driver
+- [PokeAPI](https://pokeapi.co) -- species data for daycare system
+
+## License
+
+This project is based on Meshtastic firmware (GPL-3.0). MonsterMesh module code follows the same license.
