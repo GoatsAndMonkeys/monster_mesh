@@ -18,6 +18,7 @@ public:
     struct Entry {
         char name[FB_MAX_NAME];
         bool isDir;
+        bool hasSave;  // true if a .sav file exists alongside this ROM
     };
 
     void open(const char *dir = "/") {
@@ -84,6 +85,23 @@ private:
         return false;
     }
 
+    // Build the .sav path for a ROM file in dir_
+    bool checkSaveExists(const char *fname) {
+        if (!isGBFile(fname)) return false;
+        char savPath[FB_MAX_PATH];
+        // Strip extension, append .sav
+        char base[FB_MAX_NAME];
+        strncpy(base, fname, FB_MAX_NAME - 1);
+        base[FB_MAX_NAME - 1] = '\0';
+        char *dot = strrchr(base, '.');
+        if (dot) *dot = '\0';
+        if (strcmp(dir_, "/") == 0)
+            snprintf(savPath, sizeof(savPath), "/%s.sav", base);
+        else
+            snprintf(savPath, sizeof(savPath), "%s/%s.sav", dir_, base);
+        return SD.exists(savPath);
+    }
+
     void scan() {
         count_ = 0;
 
@@ -91,6 +109,7 @@ private:
         if (strcmp(dir_, "/") != 0) {
             strncpy(entries_[count_].name, "..", sizeof(entries_[0].name) - 1);
             entries_[count_].isDir = true;
+            entries_[count_].hasSave = false;
             count_++;
         }
 
@@ -124,6 +143,7 @@ private:
                 strncpy(entries_[count_].name, fname, FB_MAX_NAME - 1);
                 entries_[count_].name[FB_MAX_NAME - 1] = '\0';
                 entries_[count_].isDir = true;
+                entries_[count_].hasSave = false;
                 count_++;
             }
             entry.close();
@@ -143,6 +163,7 @@ private:
                 strncpy(entries_[count_].name, fname, FB_MAX_NAME - 1);
                 entries_[count_].name[FB_MAX_NAME - 1] = '\0';
                 entries_[count_].isDir = false;
+                entries_[count_].hasSave = checkSaveExists(fname);
                 count_++;
             }
             entry.close();

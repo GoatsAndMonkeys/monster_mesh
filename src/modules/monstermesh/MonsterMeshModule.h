@@ -42,6 +42,7 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     // Is the emulator view currently active (vs Meshtastic UI)?
     bool isEmulatorActive() const { return emulatorActive_; }
     bool isBrowserActive()  const { return browserActive_; }
+    volatile bool pendingToggle_ = false;  // GPIO long-press (Core 1) → consumed in LVGL hook (Core 0)
 
   protected:
     // ── SinglePortModule overrides ──────────────────────────────────────────
@@ -71,7 +72,7 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
 
     bool emulatorActive_     = false;
     uint8_t brightness_      = 255;
-    volatile bool pendingSave_ = false;  // deferred save — done in runOnce() not callback
+    volatile bool pendingSave_   = false;  // deferred save — done in runOnce() not callback
     bool browserActive_      = false;
     bool setupDone_          = false;
     bool kbObserverRegistered_ = false;
@@ -116,6 +117,8 @@ private:
 
     // Buffered browser key (set by LVGL callback, consumed by runOnce)
     volatile uint8_t pendingBrowserKey_ = 0;
+    // Deferred browser open (set by LVGL callback, executed in runOnce to avoid SD on LVGL task)
+    volatile bool pendingBrowserOpen_ = false;
 
     // Auto-save tracking
     uint8_t prevBattle_ = 0;
@@ -123,6 +126,13 @@ private:
 
     // Cable disconnect cooldown — ignore stale "cable on" for 10s after disconnect
     uint32_t cableOffMs_ = 0;
+
+    // Pending challenge — waiting for Y/N reply from receiver
+    uint32_t pendingChallengerFrom_ = 0;  // RECEIVER: node that sent us "mmc on" (waiting for our Y/N)
+    uint32_t pendingChallengeMs_    = 0;  // RECEIVER: time challenge arrived (60s timeout)
+    uint32_t waitingForAcceptFrom_  = 0;  // INITIATOR: node we sent "mmc on" to (waiting for Y/N back)
+
+    const char *getShortName(uint32_t nodeId);
 
     // Viewport
     volatile int8_t viewportDelta_ = 0;

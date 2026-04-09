@@ -2,6 +2,7 @@
 # trunk-ignore-all(ruff/F821)
 # trunk-ignore-all(flake8/F821): For SConstruct imports
 import sys
+import os
 from os.path import join
 import subprocess
 import json
@@ -181,3 +182,58 @@ def load_boot_logo(source, target, env):
 # Load the boot logo on TFT builds
 if ("HAS_TFT", 1) in env.get("CPPDEFINES", []):
     env.AddPreAction('$BUILD_DIR/littlefs.bin', load_boot_logo)
+
+
+# Exclude the LovyanGFX CJK efont files: they are huge (~95 MB of .c source)
+# and not referenced anywhere in the firmware. Excluding them cuts compile
+# time significantly on clean builds.
+def _exclude_lgfx_efont(node):
+    path = node.srcnode().get_path() if hasattr(node, "srcnode") else str(node)
+    if "Fonts/efont" in path:
+        return None  # exclude
+    return node
+
+for _lb in env.GetLibBuilders():
+    if _lb.name == "LovyanGFX":
+        _lb.env.AddBuildMiddleware(_exclude_lgfx_efont, "*.c")
+        break
+
+
+# Fix for xtensa-esp32s3-elf-gcc + macOS: when GCC processes very large C files
+# (e.g., font data arrays) via SCons TEMPFILE (@args_file), the assembler
+# sub-process fails to write to relative output paths.  Forcing absolute paths
+# for $TARGET (the output .o file) in every compiler command string avoids this.
+def _use_abs_target(env_obj):
+    """
+    xtensa-esp32s3-elf-gcc on macOS with SCons TEMPFILE (@args_file) fails to
+    write the output .o file when:
+      - the C source is very large (large array initializers, e.g. font files), AND
+      - the output path is relative.
+    Root cause: the GCC assembler subprocess changes CWD when processing large
+    files, making relative paths resolve incorrectly.
+    Fix: strip the TEMPFILE() wrapper (it is not needed on macOS where the
+    ARG_MAX is 262 KB) and use ${TARGET.abspath} for the output.
+    """
+    for key in ('CCCOM', 'CXXCOM'):
+        val = env_obj.get(key)
+        if not val:
+            continue
+        s = str(val)
+        # Extract the inner command string from ${TEMPFILE('CMD','STRFN')}
+        m = re.search(r"\$\{TEMPFILE\('(.+?)'\s*,\s*'[^']*'\)\}", s, re.DOTALL)
+        if m:
+            inner = m.group(1)
+        else:
+            inner = s
+        # Replace bare $TARGET with ${TARGET.abspath}
+        new_cmd = re.sub(r'\$TARGET(?![.\w{])', r'${TARGET.abspath}', inner)
+        if new_cmd != s:
+            env_obj[key] = new_cmd
+
+# Apply to main env, projenv, and all library builder envs
+# (projenv was already imported earlier in this script)
+_use_abs_target(env)
+_use_abs_target(projenv)
+for _lb in env.GetLibBuilders():
+    _use_abs_target(_lb.env)
+print("[custom] Applied absolute TARGET paths to compiler commands (TEMPFILE stripped)")

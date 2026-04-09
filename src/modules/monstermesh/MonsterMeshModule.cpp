@@ -24,6 +24,7 @@
 #if HAS_TFT
 #include <lvgl.h>
 #include "display/lv_display_private.h"
+#include "indev/lv_indev_private.h"
 #endif
 
 MonsterMeshModule *monsterMeshModule = nullptr;
@@ -31,11 +32,21 @@ MonsterMeshModule *monsterMeshModule = nullptr;
 // Weak default — device-ui provides the real implementation when present
 extern "C" __attribute__((weak)) void monstermesh_set_toggle_cb(void (*cb)(void)) { (void)cb; }
 
-// Global LGFX pointer set by device-ui LGFXDriver::init_lgfx()
+// Global LGFX pointer — set by device-ui if present, otherwise falls back to getLovyanGfx()
 static lgfx::LGFX_Device *g_deviceUiLgfx = nullptr;
 extern "C" void monstermesh_set_lgfx(void *ptr)
 {
     g_deviceUiLgfx = static_cast<lgfx::LGFX_Device *>(ptr);
+}
+
+// getLovyanGfx() is defined in TFTDisplay.cpp — returns the board's LGFX instance
+extern lgfx::LGFX_Device *getLovyanGfx();
+
+// Use device-ui LGFX if set, otherwise fall back to the firmware's own TFT driver
+static lgfx::LGFX_Device *getGfx()
+{
+    if (g_deviceUiLgfx) return g_deviceUiLgfx;
+    return getLovyanGfx();
 }
 
 // Called from device-ui tools menu button via function pointer
@@ -102,13 +113,14 @@ int MonsterMeshModule::handleInputEvent(const InputEvent *event)
 {
     if (!event) return 0;
 
-    // Always process Ctrl+E regardless of emulator state
+    // Always process Ctrl+E (ALT+E on T-Deck) regardless of emulator state
     if (event->kbchar == 0x05) {  // Ctrl+E
         handleKeyPress(0x05);
         return 0;
     }
 
-    // Trackball press toggle is handled by GPIO 0 polling in monsterMeshKeyboardRead()
+    // Note: trackball long-press toggle is polled via GPIO 0 in runOnce() — not via InputBroker.
+    // The device-ui encoder driver consumes the trackball press through LVGL directly.
 
     if (!emulatorActive_ && !browserActive_) return 0;  // let Meshtastic handle keys
 
@@ -143,9 +155,9 @@ void MonsterMeshModule::ensureMonsterMeshChannel()
         // Set up channel 1 as "MonsterMesh Center"
         ch.role = meshtastic_Channel_Role_SECONDARY;
         snprintf(ch.settings.name, sizeof(ch.settings.name), "MonsterMesh");
-        // Use default PSK (no encryption for easy joining)
+        // Use default PSK (bytes[0]=1 = well-known "AQ==" default key)
         ch.settings.psk.size = 1;
-        ch.settings.psk.bytes[0] = 0; // no encryption
+        ch.settings.psk.bytes[0] = 1;
         channels.setChannel(ch);
         Serial.println("[MonsterMesh] channel 1 configured as 'MonsterMesh Center'");
     }
@@ -161,15 +173,31 @@ bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
             return true;
         }
     }
-    // Accept TEXT_MESSAGE DMs to us (for "MM cable on/off" commands)
+    // Accept TEXT_MESSAGE DMs TO us
     if (p->decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
         p->to == nodeDB->getNodeNum() &&
         p->decoded.payload.size > 0) {
-        // Peek at payload — claim packets starting with "MM" (with or without space)
         const char *txt = (const char *)p->decoded.payload.bytes;
-        if (p->decoded.payload.size >= 2 &&
+        size_t sz = p->decoded.payload.size;
+        // "MM..." or "mm..." prefix — internal protocol messages
+        if (sz >= 2 &&
             (txt[0] == 'M' || txt[0] == 'm') &&
             (txt[1] == 'M' || txt[1] == 'm')) {
+            return true;
+        }
+        // "MonsterMesh..." prefix
+        if (sz >= 11 &&
+            (txt[0] == 'M' || txt[0] == 'm') &&
+            (txt[1] == 'o' || txt[1] == 'O')) {
+            return true;
+        }
+        // Single Y/N reply when we are the initiator waiting for a response
+        if (sz == 1 && waitingForAcceptFrom_ != 0 &&
+            (txt[0] == 'Y' || txt[0] == 'y' || txt[0] == 'N' || txt[0] == 'n')) {
+            return true;
+        }
+        // "fled!" from partner
+        if (sz >= 5 && txt[0] == 'f' && txt[1] == 'l' && txt[2] == 'e') {
             return true;
         }
     }
@@ -197,62 +225,138 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
         memcpy(txt, mp.decoded.payload.bytes, len);
         txt[len] = '\0';
 
-        // Lowercase for comparison
-        for (size_t i = 0; i < len; i++) {
-            if (txt[i] >= 'A' && txt[i] <= 'Z') txt[i] += 32;
+        // Lowercase for all comparisons
+        char low[64] = {};
+        memcpy(low, txt, len);
+        for (size_t i = 0; i < len; i++)
+            if (low[i] >= 'A' && low[i] <= 'Z') low[i] += 32;
+
+        // ── PERSON 2: receives "mmc on" from Person 1 ────────────────────
+        // Store pending challenge, send "MM waiting" ack so Person 1 knows
+        // we received it and can then send us the formatted challenge message.
+        if (strstr(low, "mmc on") || strstr(low, "cable on")) {
+            if (cableOffMs_ && (millis() - cableOffMs_ < 10000))
+                return ProcessMessage::CONTINUE;
+            pendingChallengerFrom_ = mp.from;
+            pendingChallengeMs_    = millis();
+            sendTextDM(mp.from, "MM waiting");
+            snprintf(setupStatusBuf_, sizeof(setupStatusBuf_),
+                     "[%s] wants to link! Reply Y or N", getShortName(mp.from));
+            setupStatus_ = setupStatusBuf_;
+            LOG_INFO("[MonsterMesh] 'mmc on' from 0x%08X — sent MM waiting\n", (unsigned)mp.from);
+            return ProcessMessage::CONTINUE;
         }
 
-        // ── Internal ack: "MM link off" — disconnect, no reply ──────────
-        if (strstr(txt, "link off")) {
-            LOG_INFO("[MonsterMesh] ack 'link off' from 0x%08X\n", (unsigned)mp.from);
+        // ── PERSON 1: receives "MM waiting" from Person 2 ────────────────
+        // Person 2 got our "mmc on". Now send the human-readable challenge
+        // to Person 2 so it appears in their chat.
+        if (strstr(low, "mm waiting")) {
+            if (cableOffMs_ && (millis() - cableOffMs_ < 10000))
+                return ProcessMessage::CONTINUE;
+            waitingForAcceptFrom_ = mp.from;
+            char msg[64];
+            snprintf(msg, sizeof(msg), "[%s] wants to link! Reply Y or N",
+                     getShortName(nodeDB->getNodeNum()));
+            sendTextDM(mp.from, msg);
+            snprintf(setupStatusBuf_, sizeof(setupStatusBuf_),
+                     "MM: Waiting for [%s]...", getShortName(mp.from));
+            setupStatus_ = setupStatusBuf_;
+            LOG_INFO("[MonsterMesh] MM waiting from 0x%08X — challenge sent\n", (unsigned)mp.from);
+            return ProcessMessage::CONTINUE;
+        }
+
+        // ── PERSON 2: receives "mmc off" — show fled, send disconnected ack ──
+        if (strstr(low, "mmc off") || strstr(low, "cable off")) {
             shim_.cancel();
             cableOffMs_ = millis();
+            waitingForAcceptFrom_ = 0;
+            pendingChallengerFrom_ = 0;
+            snprintf(setupStatusBuf_, sizeof(setupStatusBuf_),
+                     "[%s] fled!", getShortName(mp.from));
+            setupStatus_ = setupStatusBuf_;
+            sendTextDM(mp.from, "MM disconnected");
+            LOG_INFO("[MonsterMesh] 'mmc off' from 0x%08X — sent MM disconnected\n", (unsigned)mp.from);
             return ProcessMessage::CONTINUE;
         }
 
-        // ── Internal ack: "MM link on" — pair, no reply ─────────────────
-        if (strstr(txt, "link on")) {
-            uint32_t from = mp.from;
-            LOG_INFO("[MonsterMesh] ack 'link on' from 0x%08X\n", (unsigned)from);
-
-            if (cableOffMs_ && (millis() - cableOffMs_ < 10000)) {
-                LOG_INFO("[MonsterMesh] ignoring stale 'link on' (cooldown)\n");
-                return ProcessMessage::CONTINUE;
-            }
-
-            shim_.pairWith(from);
-            return ProcessMessage::CONTINUE;
-        }
-
-        // ── User command: "MM cable off" — disconnect + send ack ────────
-        if (strstr(txt, "cable off")) {
-            LOG_INFO("[MonsterMesh] DM 'cable off' from 0x%08X\n", (unsigned)mp.from);
+        // ── "MM disconnected" — Person 1 gets confirmation, sends fled to Person 2 ──
+        if (strstr(low, "mm disconnected")) {
+            LOG_INFO("[MonsterMesh] MM disconnected from 0x%08X\n", (unsigned)mp.from);
             shim_.cancel();
             cableOffMs_ = millis();
-
-            sendTextDM(mp.from, "MM link off");
-            sendTextDM(mp.from, "[MonsterMesh] Cable disconnected.");
+            waitingForAcceptFrom_ = 0;
+            pendingChallengerFrom_ = 0;
+            setupStatus_ = "MM disconnected";
+            // Send "[Name] fled!" to Person 2 so they see it in chat
+            char msg[32];
+            snprintf(msg, sizeof(msg), "[%s] fled!", getShortName(nodeDB->getNodeNum()));
+            sendTextDM(mp.from, msg);
             return ProcessMessage::CONTINUE;
         }
 
-        // ── User command: "MM cable on" — pair + send ack ───────────────
-        if (strstr(txt, "cable on")) {
-            uint32_t from = mp.from;
-            LOG_INFO("[MonsterMesh] DM 'cable on' from 0x%08X\n", (unsigned)from);
-
-            if (cableOffMs_ && (millis() - cableOffMs_ < 10000)) {
-                LOG_INFO("[MonsterMesh] ignoring stale 'cable on' (cooldown)\n");
-                return ProcessMessage::CONTINUE;
+        // ── Y/N reply: Person 2 sent Y or N DM to Person 1 ───────────────
+        if (len == 1 && (txt[0] == 'Y' || txt[0] == 'y' || txt[0] == 'N' || txt[0] == 'n')) {
+            bool accepted = (txt[0] == 'Y' || txt[0] == 'y');
+            if (waitingForAcceptFrom_ != 0 && mp.from == waitingForAcceptFrom_) {
+                uint32_t partner = waitingForAcceptFrom_;
+                waitingForAcceptFrom_ = 0;
+                if (accepted) {
+                    LOG_INFO("[MonsterMesh] Y from 0x%08X — pairing\n", (unsigned)partner);
+                    shim_.pairWith(partner);
+                    snprintf(setupStatusBuf_, sizeof(setupStatusBuf_),
+                             "MonsterMesh linked!");
+                    setupStatus_ = setupStatusBuf_;
+                    sendTextDM(partner, "MonsterMesh linked!");
+                } else {
+                    LOG_INFO("[MonsterMesh] N from 0x%08X — declined\n", (unsigned)partner);
+                    snprintf(setupStatusBuf_, sizeof(setupStatusBuf_),
+                             "[%s] fled!", getShortName(partner));
+                    setupStatus_ = setupStatusBuf_;
+                    // Ask Person 2 to send "[Name] fled!" so it appears in Person 1's chat
+                    sendTextDM(partner, "MM rejected");
+                }
             }
-
-            shim_.pairWith(from);
-
-            sendTextDM(from, "MM link on");
-            sendTextDM(from, "[MonsterMesh] Cable connected! Enter Cable Club in-game.");
             return ProcessMessage::CONTINUE;
         }
 
-        // Unknown MM command — let it pass through to normal chat
+        // ── "MM rejected" — Person 2 sends "[Name] fled!" to Person 1's chat ──
+        if (strstr(low, "mm rejected")) {
+            LOG_INFO("[MonsterMesh] MM rejected from 0x%08X — sending fled\n", (unsigned)mp.from);
+            pendingChallengerFrom_ = 0;
+            pendingChallengeMs_    = 0;
+            char msg[32];
+            snprintf(msg, sizeof(msg), "[%s] fled!", getShortName(nodeDB->getNodeNum()));
+            sendTextDM(mp.from, msg);
+            return ProcessMessage::CONTINUE;
+        }
+
+        // ── "MonsterMesh linked!" — Person 2 pairs; if already paired, just ack ──
+        if (strstr(low, "monstermesh linked")) {
+            LOG_INFO("[MonsterMesh] MonsterMesh linked from 0x%08X\n", (unsigned)mp.from);
+            if (pendingChallengerFrom_ == mp.from) {
+                // We are Person 2 — pair and send back confirmation
+                pendingChallengerFrom_ = 0;
+                pendingChallengeMs_    = 0;
+                shim_.pairWith(mp.from);
+                sendTextDM(mp.from, "MonsterMesh linked!");
+            }
+            setupStatus_ = "MonsterMesh linked!";
+            return ProcessMessage::CONTINUE;
+        }
+
+        // ── "fled!" — partner disconnected ───────────────────────────────
+        if (strstr(low, "fled!")) {
+            LOG_INFO("[MonsterMesh] partner disconnected\n");
+            shim_.cancel();
+            cableOffMs_ = millis();
+            waitingForAcceptFrom_ = 0;
+            pendingChallengerFrom_ = 0;
+            snprintf(setupStatusBuf_, sizeof(setupStatusBuf_),
+                     "[%s] fled!", getShortName(mp.from));
+            setupStatus_ = setupStatusBuf_;
+            return ProcessMessage::CONTINUE;
+        }
+
         return ProcessMessage::CONTINUE;
     }
 
@@ -271,8 +375,9 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
 
 int32_t MonsterMeshModule::runOnce()
 {
-    // Register keyboard observer as early as possible (after 1s) so SYM+E works
-    // even before the emulator finishes loading.
+    // Register InputBroker observer and install keyboard hook early (after 1s).
+    // The hook passes through to the original Meshtastic driver when MM is inactive,
+    // so keyboard/touch work normally. ALT button detection runs from both states.
     if (!kbObserverRegistered_ && millis() > 1000 && inputBroker) {
         kbObserverRegistered_ = true;
         installKeyboardHook();
@@ -345,31 +450,34 @@ int32_t MonsterMeshModule::runOnce()
             installKeyboardHook(); // re-run hook install in case LVGL indev wasn't ready yet
         }
 
-        // Auto-open file browser now that SD is ready
-        setupStatus_ = "Opening browser...";
-        LOG_INFO("[MonsterMesh] SD ready — opening file browser\n");
-        browserActive_ = true;
-        {
-            concurrency::LockGuard g(spiLock);
-            browser_.open("/");
-        }
-#if HAS_TFT
-        {
-            lv_display_t *disp = lv_display_get_default();
-            if (disp && !savedFlushCb_) {
-                savedFlushCb_ = (void *)disp->flush_cb;
-                lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
-                    lv_display_flush_ready(d);
-                });
-            }
-        }
-#endif
+        // SD ready — stay in Meshtastic UI. User opens MonsterMesh via Tools or mic button.
+        setupStatus_ = "MonsterMesh ready";
+        LOG_INFO("[MonsterMesh] SD ready — waiting for user to open MonsterMesh\n");
     }
-    // Trackball press toggle is handled in handleInputEvent() via INPUT_BROKER_SELECT
+    // Trackball long-press toggle: poll GPIO 0 (TB_PRESS) directly.
+    // The device-ui encoder driver consumes trackball press via LVGL and never reaches InputBroker,
+    // so we must poll the GPIO ourselves. Hold for 800ms to toggle MonsterMesh.
+#if HAS_TFT
+    {
+        static uint32_t btnDownAt = 0;
+        static bool btnWas = false;
+        static bool firedThisPress = false;
+        bool btnNow = !digitalRead(0);  // GPIO 0, active-low
+        if (btnNow && !btnWas) {
+            btnDownAt = millis();
+            firedThisPress = false;
+        }
+        if (btnNow && !firedThisPress && millis() - btnDownAt >= 800) {
+            firedThisPress = true;
+            LOG_INFO("[MonsterMesh] trackball long-press detected — setting pendingToggle\n");
+            pendingToggle_ = true;  // processed in LVGL hook (Core 0) to avoid cross-core LVGL calls
+        }
+        btnWas = btnNow;
+    }
+#endif
 
-    // Keep keyboard hook installed at all times — needed to detect mic button
-    // even when emulator/browser is inactive (to toggle back on)
-    if (emuInitialized_ || browserActive_ || emulatorActive_) {
+    // Keep keyboard hook installed while MonsterMesh is active
+    if (emulatorActive_ || browserActive_) {
         installKeyboardHook();
     }
 
@@ -378,22 +486,32 @@ int32_t MonsterMeshModule::runOnce()
         powerFSM.trigger(EVENT_INPUT);
     }
 
-    // Re-suppress LVGL flush if emulator or browser is active — screen sleep/wake
-    // may restore the real flush callback behind our back
+    // Re-suppress LVGL flush if emulator is active — screen sleep/wake
+    // may restore the real flush callback behind our back.
+    // Browser uses LVGL directly so no flush suppression needed for it.
 #if HAS_TFT
-    if ((emulatorActive_ || browserActive_) && savedFlushCb_) {
+    if (emulatorActive_ && savedFlushCb_) {
         lv_display_t *disp = lv_display_get_default();
         if (disp && disp->flush_cb != nullptr) {
             lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
                 lv_display_flush_ready(d);
             });
         }
-        // NOTE: Do NOT call clearClipRect() or any LGFX method here — runOnce runs
-        // on Core 0 and would race with scanline callback on Core 1, causing palette corruption
     }
 #endif
 
     // blitFrame() moved to emulator task on Core 1 — runOnce() is too slow for screen updates
+
+    // Deferred browser open — SD ops must not run on the LVGL task
+    if (pendingBrowserOpen_) {
+        pendingBrowserOpen_ = false;
+        LOG_INFO("[MonsterMesh] browser open (runOnce)\n");
+        {
+            concurrency::LockGuard g(spiLock);
+            browser_.open("/");
+        }
+        LOG_INFO("[MonsterMesh] browser.open done count=%d\n", browser_.count());
+    }
 
     // Process buffered browser keys and render
     if (browserActive_) {
@@ -423,7 +541,50 @@ int32_t MonsterMeshModule::runOnce()
     }
 
     drainTxQueue();
+
+    // Expire pending challenge after 60s — send "fled" to initiator
+    if (pendingChallengerFrom_ != 0 &&
+        (millis() - pendingChallengeMs_ > 60000)) {
+        char msg[32];
+        snprintf(msg, sizeof(msg), "[%s] fled!", getShortName(nodeDB->getNodeNum()));
+        sendTextDM(pendingChallengerFrom_, msg);
+        pendingChallengerFrom_ = 0;
+        pendingChallengeMs_    = 0;
+        LOG_INFO("[MonsterMesh] challenge timed out\n");
+    }
+
+    // Update status overlay to reflect LoRa cable link state while emulator is running
+    if (setupDone_ && emu_.isRunning()) {
+        auto shimState = shim_.state();
+        if (shimState == MonsterMeshBattleShim::State::ADVERTISING) {
+            setupStatus_ = "MM: Seeking link...";
+        } else if (shimState == MonsterMeshBattleShim::State::CONNECTED ||
+                   shimState == MonsterMeshBattleShim::State::IN_BATTLE) {
+            snprintf(setupStatusBuf_, sizeof(setupStatusBuf_),
+                     "MM: Linked! %08X", (unsigned)shim_.remoteId());
+            setupStatus_ = setupStatusBuf_;
+        } else if (shimState == MonsterMeshBattleShim::State::DONE) {
+            setupStatus_ = "MM: Link closed";
+        } else {
+            setupStatus_ = "Playing!";
+        }
+    }
+
     return 50;
+}
+
+// ── getShortName() — return 4-char short name for a node, or hex fallback ────
+
+const char *MonsterMeshModule::getShortName(uint32_t nodeId)
+{
+    auto *node = nodeDB->getMeshNode(nodeId);
+    if (node && node->has_user && node->user.short_name[0] != '\0')
+        return node->user.short_name;
+    if (node && node->has_user && node->user.long_name[0] != '\0')
+        return node->user.long_name;
+    static char buf[10];
+    snprintf(buf, sizeof(buf), "%08X", (unsigned)nodeId);
+    return buf;
 }
 
 // ── sendTextDM() — send a text DM to a specific node ─────────────────────────
@@ -447,20 +608,25 @@ void MonsterMeshModule::drainTxQueue()
     uint8_t buf[237];
     size_t len = 0;
 
-    // Send binary serial data to the paired node (DM, not broadcast)
+    // Send ONE packet per call — don't flood the router TX queue.
+    // The while-loop was sending all queued packets at once, overflowing the 16-slot TX queue.
+    if (!transport_.hasPendingSend()) return;
+    if (!transport_.dequeueSend(buf, len, sizeof(buf))) return;
+
     uint32_t remoteId = shim_.remoteId();
-    while (transport_.hasPendingSend()) {
-        if (!transport_.dequeueSend(buf, len, sizeof(buf))) break;
-
-        meshtastic_MeshPacket *p = router->allocForSending();
-        p->to = (remoteId != 0) ? remoteId : NODENUM_BROADCAST;
-        p->channel = (remoteId != 0) ? channels.getPrimaryIndex() : MONSTERMESH_CHANNEL;
-        p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
-        p->decoded.payload.size = len;
-        memcpy(p->decoded.payload.bytes, buf, len);
-
-        service->sendToMesh(p);
+    meshtastic_MeshPacket *p = router->allocForSending();
+    if (!p) {
+        LOG_WARN("[MonsterMesh] drainTxQueue: packet pool exhausted, dropping\n");
+        return;
     }
+    p->to = (remoteId != 0) ? remoteId : NODENUM_BROADCAST;
+    // Battle serial data: use primary channel (0) for DM. PRIVATE_APP portnum means it
+    // won't appear in the Meshtastic app UI. ch=255 was invalid and caused decryption failures.
+    p->channel = (remoteId != 0) ? 0 : MONSTERMESH_CHANNEL;
+    p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
+    p->decoded.payload.size = len;
+    memcpy(p->decoded.payload.bytes, buf, len);
+    service->sendToMesh(p);
 }
 
 // ── Keyboard ─────────────────────────────────────────────────────────────────
@@ -475,7 +641,67 @@ void MonsterMeshModule::drainTxQueue()
 //   - Meshtastic UI   → call original callback so the MUI keeps working.
 
 #if HAS_TFT
-static lv_indev_t *g_kbIndev      = nullptr;
+// ── LVGL browser screen ───────────────────────────────────────────────────────
+static lv_obj_t *g_browserLvScr   = nullptr;
+static lv_obj_t *g_browserLvLabel = nullptr;
+static lv_obj_t *g_prevLvScr      = nullptr;
+
+static void lvgl_show_browser(MonsterMeshFileBrowser &b)
+{
+    if (!g_browserLvScr) {
+        g_browserLvScr = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(g_browserLvScr, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(g_browserLvScr, LV_OPA_COVER, 0);
+        g_browserLvLabel = lv_label_create(g_browserLvScr);
+        lv_obj_set_pos(g_browserLvLabel, 4, 4);
+        lv_obj_set_size(g_browserLvLabel, 312, 232);
+        lv_label_set_long_mode(g_browserLvLabel, LV_LABEL_LONG_CLIP);
+        lv_obj_set_style_text_color(g_browserLvLabel, lv_color_white(), 0);
+        lv_label_set_recolor(g_browserLvLabel, true);
+    }
+    static char buf[1024];
+    int pos = snprintf(buf, sizeof(buf), "MonsterMesh\n%s\n", b.currentDir());
+    if (b.count() == 0) {
+        pos += snprintf(buf+pos, sizeof(buf)-pos, " [No ROMs on SD]\n");
+    } else {
+        for (int i = 0; i < b.count() && pos < (int)sizeof(buf)-120; i++) {
+            const auto &e = b.entries()[i];
+            const char *cursor = (i == b.cursor()) ? ">" : " ";
+            if (e.isDir) {
+                // Directories: white
+                pos += snprintf(buf+pos, sizeof(buf)-pos, "%s #FFFFFF[%s]#\n", cursor, e.name);
+            } else if (e.hasSave) {
+                // ROM with save file: green
+                pos += snprintf(buf+pos, sizeof(buf)-pos, "%s #00FF00%s#\n", cursor, e.name);
+            } else {
+                // ROM without save file: yellow
+                pos += snprintf(buf+pos, sizeof(buf)-pos, "%s #FFFF00%s#\n", cursor, e.name);
+            }
+        }
+    }
+    snprintf(buf+pos, sizeof(buf)-pos, "\nW/S:Nav  K:Select  L:Back");
+    lv_label_set_text(g_browserLvLabel, buf);
+    if (lv_screen_active() != g_browserLvScr) {
+        g_prevLvScr = lv_screen_active();
+        lv_screen_load(g_browserLvScr);
+    }
+}
+
+static void lvgl_hide_browser()
+{
+    if (g_prevLvScr && lv_screen_active() == g_browserLvScr) {
+        lv_screen_load(g_prevLvScr);
+        g_prevLvScr = nullptr;
+    }
+    if (g_browserLvScr) {
+        lv_obj_delete(g_browserLvScr);
+        g_browserLvScr  = nullptr;
+        g_browserLvLabel = nullptr;
+    }
+}
+
+static lv_indev_t          *g_kbIndev      = nullptr;
+static lv_indev_read_cb_t   g_savedKbReadCb = nullptr;  // original LVGL keypad read cb
 static bool        g_symActive    = false;  // KEY mode: SYM modifier latch
 static bool        g_rawMode      = false;  // true when MCU is in RAW (5-byte) mode
 static bool        g_symEConsumed = false;  // RAW mode: debounce SYM+E toggle
@@ -523,59 +749,28 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
 {
     data->state = LV_INDEV_STATE_RELEASED;
 
+    bool mmActive = monsterMeshModule &&
+                    (monsterMeshModule->isEmulatorActive() || monsterMeshModule->isBrowserActive());
+
     // Keep device-ui backlight alive while emulator or browser is active.
-    bool keepAlive = (monsterMeshModule &&
-                      (monsterMeshModule->isEmulatorActive() || monsterMeshModule->isBrowserActive()));
-    if (keepAlive) {
+    if (mmActive) {
         lv_display_trigger_activity(NULL);
     }
 
-    // ── ALT + Mic button peek ──────────────────────────────────────────
-    // ALT (byte[0] bit 0x10) = toggle screens, Mic (byte[0] bit 0x40) = toggle sound.
-    // Peek at RAW mode every few cycles to check them, then switch back to KEY mode.
-    // Skip when browser is active — the mode switching eats buffered keypresses.
-    bool browserUp = monsterMeshModule && monsterMeshModule->isBrowserActive();
-    if (!g_rawMode && monsterMeshModule && !browserUp && (++g_micPollCounter >= 3)) {
-        g_micPollCounter = 0;
-        // Quick switch to RAW, read button bits, switch back to KEY
-        Wire.beginTransmission(0x55);
-        Wire.write(0x03);  // RAW mode
-        Wire.endTransmission();
+    // Process pending toggle from GPIO long-press (set on Core 1, consumed here on Core 0).
+    // This is the safe place to call LVGL APIs for the toggle.
+    if (monsterMeshModule && monsterMeshModule->pendingToggle_) {
+        monsterMeshModule->pendingToggle_ = false;
+        monsterMeshModule->handleKeyFromLVGL(0x05);
+        return;
+    }
 
-        Wire.requestFrom((uint8_t)0x55, (uint8_t)5);
-        uint8_t rb[5] = {};
-        for (int i = 0; i < 5 && Wire.available(); i++) rb[i] = Wire.read();
-
-        Wire.beginTransmission(0x55);
-        Wire.write(0x04);  // back to KEY mode
-        Wire.endTransmission();
-
-        // ALT button → toggle screens
-        bool altPressed = (rb[0] & 0x10) != 0;
-        static bool g_altWasPressed = false;
-        if (altPressed && !g_altWasPressed) {
-            uint32_t now = millis();
-            if (now - g_micLastToggleMs > 600) {
-                g_micLastToggleMs = now;
-                g_altWasPressed = true;
-                monsterMeshModule->handleKeyFromLVGL(0x05);
-                return;
-            }
-        }
-        g_altWasPressed = altPressed;
-
-        // Mic button → toggle sound
-        bool micPressed = (rb[0] & 0x40) != 0;
-        if (micPressed && !g_micWasPressed) {
-            uint32_t now = millis();
-            if (now - g_micLastToggleMs > 600) {
-                g_micLastToggleMs = now;
-                g_micWasPressed = true;
-                monsterMeshModule->toggleSound();
-                return;
-            }
-        }
-        g_micWasPressed = micPressed;
+    // ── Pass-through when MonsterMesh is not active ───────────────────────
+    // Let Meshtastic's original keyboard driver handle all input so touch
+    // and keyboard work normally in the Meshtastic UI.
+    if (!mmActive) {
+        if (g_savedKbReadCb) g_savedKbReadCb(indev, data);
+        return;
     }
 
     if (g_rawMode) {
@@ -728,6 +923,7 @@ void MonsterMeshModule::installKeyboardHook()
     while ((indev = lv_indev_get_next(indev)) != nullptr) {
         if (lv_indev_get_type(indev) == LV_INDEV_TYPE_KEYPAD) {
             g_kbIndev = indev;
+            g_savedKbReadCb = indev->read_cb;  // save original so we can restore on exit
             lv_indev_set_read_cb(indev, monsterMeshKeyboardRead);
             LOG_INFO("[MonsterMesh] LVGL kb hook installed (indev=%p)\n", indev);
             return;
@@ -759,7 +955,7 @@ void MonsterMeshModule::adjustVolume(int8_t delta)
 
 void MonsterMeshModule::adjustBrightness(int8_t delta)
 {
-    lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
+    lgfx::LGFX_Device *gfx = getGfx();
     if (!gfx) return;
     int16_t b = brightness_ + delta * 32;
     if (b < 16) b = 16;
@@ -931,7 +1127,7 @@ void MonsterMeshModule::blitFrame()
     if (!frameDirty_ || !frameBuf_) return;
     frameDirty_ = false;
 
-    lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
+    lgfx::LGFX_Device *gfx = getGfx();
     if (!gfx) return;
 
     // Push in 4 chunks of 60 lines, releasing spiLock between chunks
@@ -987,12 +1183,8 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
             // ── Exit browser → Meshtastic UI ──────────────────────────────
             browserActive_ = false;
 #if HAS_TFT
-            lv_display_t *disp = lv_display_get_default();
-            if (disp && savedFlushCb_) {
-                lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
-                savedFlushCb_ = nullptr;
-                lv_obj_invalidate(lv_screen_active());
-            }
+            lvgl_hide_browser();
+            kbSetMode(false);
 #endif
             return;
         }
@@ -1005,20 +1197,11 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
 
         if (!emuInitialized_) {
             // ── No ROM loaded → open file browser ─────────────────────────
+            // Set flag only — SD ops (browser_.open) run in runOnce() to avoid
+            // blocking the LVGL task (scan() calls SD.end()/SPI.begin()/SD.begin()).
+            LOG_INFO("[MonsterMesh] queuing browser open\n");
             browserActive_ = true;
-            {
-                concurrency::LockGuard g(spiLock);
-                browser_.open("/");
-            }
-#if HAS_TFT
-            lv_display_t *disp = lv_display_get_default();
-            if (disp && !savedFlushCb_) {
-                savedFlushCb_ = (void *)disp->flush_cb;
-                lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
-                    lv_display_flush_ready(d);
-                });
-            }
-#endif
+            pendingBrowserOpen_ = true;
             return;
         }
 
@@ -1036,12 +1219,12 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
                 lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
                     lv_display_flush_ready(d);
                 });
-                lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
+                lgfx::LGFX_Device *gfx = getGfx();
                 if (gfx) {
                     gfx->clearClipRect();
                 }
             } else {
-                lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
+                lgfx::LGFX_Device *gfx = getGfx();
                 if (gfx) {
                     gfx->clearClipRect();
                 }
@@ -1050,6 +1233,7 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
                     savedFlushCb_ = nullptr;
                 }
                 lv_obj_invalidate(lv_screen_active());
+                // Pass-through hook stays installed — mode switch handled by kbSetMode below
             }
         }
 #endif
@@ -1063,17 +1247,12 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
 
     // ── File browser key handling ──────────────────────────────────────
     if (browserActive_) {
-        // Backspace exits browser → Meshtastic UI (since mic button is
-        // disabled in browser mode to avoid eating keypresses)
-        if (ascii == 0x08) {
+        // L or Backspace exits browser → Meshtastic UI
+        if (ascii == 'l' || ascii == 'L' || ascii == 0x08) {
             browserActive_ = false;
 #if HAS_TFT
-            lv_display_t *disp2 = lv_display_get_default();
-            if (disp2 && savedFlushCb_) {
-                lv_display_set_flush_cb(disp2, (lv_display_flush_cb_t)savedFlushCb_);
-                savedFlushCb_ = nullptr;
-                lv_obj_invalidate(lv_screen_active());
-            }
+            lvgl_hide_browser();
+            kbSetMode(false);
 #endif
             return;
         }
@@ -1136,114 +1315,8 @@ void MonsterMeshModule::renderBrowser()
 #if HAS_TFT
     if (!browser_.isDirty()) return;
     browser_.clearDirty();
-
-    lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
-    if (!gfx) return;
-
-    // At textSize(1): 6x8px per char → 53 chars/line, 30 rows
-    // Row layout: 14px per row, max ~26 chars with textSize(1) scaled x2 would wrap
-    // Use textSize(1) for entries — fits more, no wrapping
-    static constexpr int ROW_H = 14;
-    static constexpr int LIST_Y = 28;
-    static constexpr int MAX_ROWS = 14;
-    static constexpr int MAX_CHARS = 52;  // 320px / 6px per char
-
-    concurrency::LockGuard g(spiLock);
-    gfx->startWrite();
-    gfx->setClipRect(0, 0, 320, 240);
-    gfx->fillScreen(0x0000);
-    gfx->setTextWrap(false);  // prevent wrapping into next row
-
-    // Title
-    gfx->setTextSize(2);
-    gfx->setTextColor(0x07E0);  // green
-    gfx->setCursor(4, 2);
-    gfx->print("Select ROM");
-
-    // Current directory (right-aligned, small)
-    gfx->setTextSize(1);
-    gfx->setTextColor(0x7BEF);  // grey
-    gfx->setCursor(200, 8);
-    gfx->print(browser_.currentDir());
-
-    gfx->setTextSize(1);
-
-    if (browser_.count() == 0) {
-        gfx->setTextSize(2);
-        gfx->setTextColor(0xF800);  // red
-        gfx->setCursor(4, LIST_Y + 20);
-        gfx->print("No files found");
-        gfx->setTextSize(1);
-        gfx->setTextColor(0xFFFF);
-        gfx->setCursor(4, LIST_Y + 44);
-        gfx->print("Path: ");
-        gfx->print(browser_.currentDir());
-    } else {
-        int scroll = browser_.scroll();
-        int cursor = browser_.cursor();
-        for (int i = 0; i < MAX_ROWS && (scroll + i) < browser_.count(); i++) {
-            int idx = scroll + i;
-            int y = LIST_Y + i * ROW_H;
-
-            if (idx == cursor) {
-                gfx->fillRect(0, y, 320, ROW_H, 0x000F);  // dark blue highlight
-            }
-
-            gfx->setCursor(4, y + 3);
-
-            const auto &entry = browser_.entries()[idx];
-            // Truncate name to fit screen
-            char dispName[MAX_CHARS + 1];
-
-            if (entry.isDir) {
-                gfx->setTextColor(0xFFE0);  // yellow
-                snprintf(dispName, sizeof(dispName), "[%s]", entry.name);
-            } else {
-                size_t nlen = strlen(entry.name);
-                bool isRom = (nlen >= 3 && strcasecmp(entry.name + nlen - 3, ".gb") == 0) ||
-                             (nlen >= 4 && strcasecmp(entry.name + nlen - 4, ".gbc") == 0);
-                gfx->setTextColor(isRom ? 0x07E0 : 0x7BEF);  // green for ROMs, grey otherwise
-                strncpy(dispName, entry.name, MAX_CHARS);
-                dispName[MAX_CHARS] = '\0';
-            }
-            gfx->print(dispName);
-        }
-    }
-
-    // Footer with status
-    gfx->setTextColor(0x528A);
-    gfx->setCursor(4, 212);
-    gfx->print("W/S:Nav  K:Open  L:Back  ALT:Exit");
-    // Show error/status if any
-    if (setupStatus_ && strstr(setupStatus_, "FAIL")) {
-        gfx->setCursor(4, 222);
-        gfx->setTextColor(0xF800);  // red
-        gfx->print(setupStatus_);
-    }
-
-    // Debug: show indev info
-    gfx->setCursor(4, 232);
-    gfx->setTextColor(0xF800);  // red
-    {
-        int nIndev = 0;
-        char types[32] = {};
-        lv_indev_t *ind = nullptr;
-        while ((ind = lv_indev_get_next(ind)) != nullptr) {
-            if (nIndev < 8) {
-                char t[4];
-                snprintf(t, sizeof(t), "%d ", (int)lv_indev_get_type(ind));
-                strcat(types, t);
-            }
-            nIndev++;
-        }
-        char dbg[64];
-        snprintf(dbg, sizeof(dbg), "indevs:%d types:[%s] hook:%s", nIndev, types,
-                 g_kbIndev ? "YES" : "NO");
-        gfx->print(dbg);
-    }
-
-    gfx->clearClipRect();
-    gfx->endWrite();
+    // Update the LVGL label with current file list
+    lvgl_show_browser(browser_);
 #endif
 }
 
@@ -1302,7 +1375,7 @@ void MonsterMeshModule::launchROM(const char *path)
 
     // Set up LGFX for emulator rendering (LVGL flush already suppressed)
 #if HAS_TFT
-    lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
+    lgfx::LGFX_Device *gfx = getGfx();
     if (gfx) {
         gfx->clearClipRect();
     }
