@@ -49,6 +49,9 @@ static lgfx::LGFX_Device *getGfx()
     return getLovyanGfx();
 }
 
+// Forward declarations for static helpers defined later in this file
+static void kbSetMode(bool raw);
+
 // Called from device-ui tools menu button via function pointer
 static void mmToggle()
 {
@@ -467,19 +470,49 @@ int32_t MonsterMeshModule::runOnce()
 
     // Re-suppress LVGL flush if emulator is active — screen sleep/wake
     // may restore the real flush callback behind our back.
-    // Browser uses LVGL directly so no flush suppression needed for it.
+    // Also keep the LVGL refresh timer paused so cursor blink doesn't bleed through.
+    // Browser uses LVGL directly so no suppression needed for it.
 #if HAS_TFT
     if (emulatorActive_ && savedFlushCb_) {
         lv_display_t *disp = lv_display_get_default();
-        if (disp && disp->flush_cb != nullptr) {
-            lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
-                lv_display_flush_ready(d);
-            });
+        if (disp) {
+            if (disp->flush_cb != nullptr) {
+                lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
+                    lv_display_flush_ready(d);
+                });
+            }
+            if (disp->refr_timer) lv_timer_pause(disp->refr_timer);
         }
     }
 #endif
 
     // blitFrame() moved to emulator task on Core 1 — runOnce() is too slow for screen updates
+
+    // Sym+Alt: eject ROM and open file browser
+    if (pendingEjectROM_) {
+        pendingEjectROM_ = false;
+        LOG_INFO("[MonsterMesh] ROM eject requested\n");
+        if (emulatorActive_) {
+            emulatorActive_ = false;
+#if HAS_TFT
+            lv_display_t *disp = lv_display_get_default();
+            if (disp) {
+                if (savedFlushCb_) {
+                    lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
+                    savedFlushCb_ = nullptr;
+                }
+                if (disp->refr_timer) lv_timer_resume(disp->refr_timer);
+                lv_obj_invalidate(lv_screen_active());
+            }
+#endif
+            kbSetMode(false);
+        }
+        // Mark ROM as unloaded — next ALT press will open browser instead of resuming
+        emuInitialized_ = false;
+        // Queue browser open
+        browserActive_ = true;
+        pendingBrowserOpen_ = true;
+    }
 
     // Deferred browser open — SD ops must not run on the LVGL task
     if (pendingBrowserOpen_) {
@@ -838,6 +871,20 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
             return;
         }
         g_symEConsumed = false;
+
+        // SYM+ALT → eject current ROM and re-open file browser
+        static bool g_symAltConsumed = false;
+        if (symHeld && altHeld) {
+            if (!g_symAltConsumed) {
+                g_symAltConsumed = true;
+                if (monsterMeshModule) {
+                    monsterMeshModule->setJoypadDirect(0);
+                    monsterMeshModule->pendingEjectROM_ = true;
+                }
+            }
+            return;
+        }
+        g_symAltConsumed = false;
 
         // Map current key state directly to joypad (RAW = live state, no press/release)
         if (monsterMeshModule) {
@@ -1214,6 +1261,9 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
                 lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
                     lv_display_flush_ready(d);
                 });
+                // Pause the LVGL refresh timer so cursor blink / animations don't
+                // fire and bleed through onto the emulator framebuffer.
+                if (disp->refr_timer) lv_timer_pause(disp->refr_timer);
                 lgfx::LGFX_Device *gfx = getGfx();
                 if (gfx) {
                     gfx->clearClipRect();
@@ -1227,6 +1277,8 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
                     lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
                     savedFlushCb_ = nullptr;
                 }
+                // Resume LVGL refresh timer and force full redraw.
+                if (disp->refr_timer) lv_timer_resume(disp->refr_timer);
                 lv_obj_invalidate(lv_screen_active());
                 // Pass-through hook stays installed — mode switch handled by kbSetMode below
             }
