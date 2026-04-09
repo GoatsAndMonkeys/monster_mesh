@@ -159,7 +159,7 @@ static void pm_lcdDrawLine(struct gb_s *gb, const uint8_t *pixels,
     // 2x horizontal: 160 → 320
     uint16_t *buf = self->lineBuf_;
     for (int x = 0; x < GB_SCREEN_W; x++) {
-        uint16_t c = DMG_PALETTE[pixels[x] & 0x03];
+        uint16_t c = EMU_PALETTES[g_emuPaletteIdx][pixels[x] & 0x03];
         buf[x * 2]     = c;
         buf[x * 2 + 1] = c;
     }

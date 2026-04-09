@@ -96,7 +96,6 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     void installKeyboardHook();
 public:
     uint32_t lastKeyMs_ = 0;
-    volatile bool pendingEjectROM_ = false;  // set by LVGL callback (Sym+Alt), handled in runOnce
     void handleKeyFromLVGL(uint8_t c);
     void handleKeyPress(uint8_t ascii);
     void toggleSound();

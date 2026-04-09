@@ -21,35 +21,42 @@ public:
         bool hasSave;  // true if a .sav file exists alongside this ROM
     };
 
-    void open(const char *dir = "/") {
+    void open(const char *dir = "/", bool showEject = false) {
         strncpy(dir_, dir, sizeof(dir_) - 1);
         dir_[sizeof(dir_) - 1] = '\0';
+        showEject_ = showEject;
         cursor_ = 0;
         scroll_ = 0;
         selected_ = false;
+        ejected_ = false;
+        confirmEject_ = false;
         selectedPath_[0] = '\0';
         scan();
         dirty_ = true;
     }
 
-    // Returns true when a ROM file has been selected
+    // Returns true when a ROM file has been selected OR eject confirmed
     bool handleKey(uint8_t key) {
         switch (key) {
             case 'w': case 'W':
+                confirmEject_ = false;
                 if (cursor_ > 0) { cursor_--; dirty_ = true; }
                 if (cursor_ < scroll_) scroll_ = cursor_;
                 break;
             case 's': case 'S':
+                confirmEject_ = false;
                 if (cursor_ < count_ - 1) { cursor_++; dirty_ = true; }
                 if (cursor_ >= scroll_ + FB_VISIBLE_ROWS)
                     scroll_ = cursor_ - FB_VISIBLE_ROWS + 1;
                 break;
             case 'k': case 'K': case '\r': case '\n':
                 return selectCurrent();
-            case 'l': case 'L': case 'a': case 'A':
+            case 'l': case 'L': case 'a': case 'A': case 0x08:
+                confirmEject_ = false;
                 goUp();
                 break;
             case 'd': case 'D':
+                confirmEject_ = false;
                 if (count_ > 0 && entries_[cursor_].isDir) selectCurrent();
                 break;
         }
@@ -57,6 +64,8 @@ public:
     }
 
     bool isSelected()  const { return selected_; }
+    bool isEjected()   const { return ejected_; }
+    bool isConfirmingEject() const { return confirmEject_; }
     const char *selectedPath() const { return selectedPath_; }
     bool isDirty()     const { return dirty_; }
     void clearDirty()        { dirty_ = false; }
@@ -77,6 +86,11 @@ private:
     int scroll_ = 0;
     bool selected_ = false;
     bool dirty_    = true;
+    bool showEject_    = false;
+    bool ejected_      = false;
+    bool confirmEject_ = false;
+
+    static constexpr const char *EJECT_NAME = "[Eject Cart]";
 
     static bool isGBFile(const char *name) {
         size_t len = strlen(name);
@@ -109,6 +123,15 @@ private:
         if (strcmp(dir_, "/") != 0) {
             strncpy(entries_[count_].name, "..", sizeof(entries_[0].name) - 1);
             entries_[count_].isDir = true;
+            entries_[count_].hasSave = false;
+            count_++;
+        }
+
+        // "[Eject Cart]" entry if a ROM is currently loaded
+        if (showEject_) {
+            strncpy(entries_[count_].name, EJECT_NAME, sizeof(entries_[0].name) - 1);
+            entries_[count_].name[sizeof(entries_[0].name) - 1] = '\0';
+            entries_[count_].isDir = false;
             entries_[count_].hasSave = false;
             count_++;
         }
@@ -199,6 +222,18 @@ private:
             goUp();
             return false;
         }
+        // [Eject Cart]: requires double-K confirmation
+        if (strcmp(entries_[cursor_].name, EJECT_NAME) == 0) {
+            if (!confirmEject_) {
+                confirmEject_ = true;
+                dirty_ = true;
+                return false;  // first K — show confirmation prompt
+            }
+            // Second K — confirmed
+            ejected_ = true;
+            return true;
+        }
+        confirmEject_ = false;
         if (entries_[cursor_].isDir) {
             char newDir[FB_MAX_PATH];
             // Avoid double slash when at root "/"

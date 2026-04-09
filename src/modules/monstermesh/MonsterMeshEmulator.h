@@ -18,10 +18,13 @@ class MonsterMeshAudio;
 #define VIEWPORT_CENTER      24
 #define VIEWPORT_SCROLL_STEP 4
 
-// DMG palette (RGB565)
-static const uint16_t DMG_PALETTE[4] = {
-    0xFFFF, 0xAD55, 0x52AA, 0x0000,
+// Emulator palettes (RGB565) — cycle with scroll wheel
+static const uint16_t EMU_PALETTES[][4] = {
+    { 0xE7DA, 0x8E0E, 0x334A, 0x00E4 },  // 0: DMG green  (#E0F8D0, #88C070, #346856, #081820)
+    { 0xFFFF, 0xAD55, 0x52AA, 0x0000 },  // 1: Grayscale
 };
+static constexpr int EMU_PALETTE_COUNT = sizeof(EMU_PALETTES) / sizeof(EMU_PALETTES[0]);
+extern volatile int g_emuPaletteIdx;
 
 // ── MonsterMesh Emulator ────────────────────────────────────────────────────────
 // Adapted from EmulatorApp. No longer owns TFT_eSPI directly — rendering goes

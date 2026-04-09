@@ -1117,8 +1117,16 @@ DaycareEvent DaycareEventGen::generate(
         return ev;
     }
 
-    // Priority 4: weather event (only with WiFi, 30% chance when weather active)
-    if (weather != WEATHER_NONE && rngChance(30)) {
+    // Priority 4: weather event — dramatic weather triggers events often,
+    // calm/clear weather rarely (10%) since nothing notable is happening
+    uint8_t weatherChance = 10;  // default for clear, hot
+    if (weather == WEATHER_WINDY) weatherChance = 20;
+    else if (weather == WEATHER_THUNDERSTORM) weatherChance = 50;
+    else if (weather == WEATHER_SNOW) weatherChance = 40;
+    else if (weather == WEATHER_FOG) weatherChance = 30;
+    else if (weather == WEATHER_COLD) weatherChance = 20;
+    else if (weather == WEATHER_RAIN) weatherChance = 25;
+    if (weather != WEATHER_NONE && rngChance(weatherChance)) {
         generateWeatherEvent(ev, localParty, localPartyCount, weather);
         state.totalEvents++;
         return ev;

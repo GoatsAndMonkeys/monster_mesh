@@ -86,7 +86,9 @@ void MonsterMeshBattleShim::tick() {
 
     switch (state_) {
         case State::ADVERTISING:
-            if (now - lastRequestMs_ >= BATTLE_REQUEST_INTERVAL_MS) {
+            // Don't queue a new request if one is already waiting — prevents TX queue flooding
+            if (!transport_.hasPendingSend() &&
+                (now - lastRequestMs_ >= BATTLE_REQUEST_INTERVAL_MS)) {
                 sendRequest();
                 lastRequestMs_ = now;
             }
@@ -105,7 +107,10 @@ void MonsterMeshBattleShim::tick() {
                 lastBatchMs_ = now;
             }
             if (lastPacketMs_ && (now - lastPacketMs_ > BATTLE_TIMEOUT_MS)) {
-                Serial.println("[SHIM] timeout");
+                Serial.printf("[SHIM] timeout: now=%u lastPkt=%u diff=%u limit=%u\n",
+                              (unsigned)now, (unsigned)lastPacketMs_,
+                              (unsigned)(now - lastPacketMs_),
+                              (unsigned)BATTLE_TIMEOUT_MS);
                 cancel();
             }
             break;
@@ -185,6 +190,17 @@ void MonsterMeshBattleShim::sendPong() {
 }
 
 void MonsterMeshBattleShim::flushTxBatch() {
+    // Drop excess bytes if txQ is backing up — LoRa is too slow to drain it
+    // Keep only the most recent SERIAL_DATA_MAX bytes; discard older ones
+    static constexpr uint16_t MAX_QUEUED = SERIAL_DATA_MAX * 2;
+    while (uxQueueMessagesWaiting(txQ_) > MAX_QUEUED) {
+        uint8_t discard;
+        xQueueReceive(txQ_, &discard, 0);
+    }
+
+    // Skip send if transport already has a packet waiting — LoRa can only handle ~1 pkt/s
+    if (transport_.hasPendingSend()) return;
+
     uint8_t data[SERIAL_DATA_MAX];
     uint8_t count = 0;
     uint8_t b;
@@ -204,6 +220,9 @@ void MonsterMeshBattleShim::flushTxBatch() {
     memcpy(pkt.payload + 1, data, count);
 
     transport_.send((uint8_t *)&pkt, BATTLELINK_HDR_SIZE + 1 + count);
+    // Keep timeout alive while we're actively sending — prevents MASTER from timing out
+    // when the SLAVE's responses are delayed or lost.
+    lastPacketMs_ = millis();
 }
 
 // ── handlePacket() ──────────────────────────────────────────────────────────

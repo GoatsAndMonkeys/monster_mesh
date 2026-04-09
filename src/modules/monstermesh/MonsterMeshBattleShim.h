@@ -47,15 +47,17 @@ private:
     QueueHandle_t rxQ_ = nullptr;
     static constexpr uint16_t QUEUE_DEPTH = 512;
 
-    volatile State   state_     = State::IDLE;
-    bool             isMaster_  = false;
-    uint16_t         sessionId_ = 0;
-    uint32_t         remoteId_  = 0;
-    uint8_t          seq_       = 0;
-    uint32_t         lastPacketMs_ = 0;
-    uint32_t         lastRequestMs_ = 0;
-    uint32_t         lastBatchMs_ = 0;
-    uint32_t         doneAtMs_ = 0;
+    volatile State    state_          = State::IDLE;
+    volatile bool     isMaster_       = false;
+    volatile uint16_t sessionId_      = 0;
+    volatile uint32_t remoteId_       = 0;
+    uint8_t           seq_            = 0;
+    // These are written by Core 0 (handleReceived/pairWith) and read by Core 1 (tick).
+    // Must be volatile to prevent the Core 1 compiler from caching stale values.
+    volatile uint32_t lastPacketMs_   = 0;
+    volatile uint32_t lastRequestMs_  = 0;
+    volatile uint32_t lastBatchMs_    = 0;
+    volatile uint32_t doneAtMs_       = 0;
     static constexpr uint32_t DONE_LINGER_MS = 5000;
 
     void sendRequest();
