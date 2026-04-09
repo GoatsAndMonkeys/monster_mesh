@@ -669,13 +669,13 @@ static void lvgl_show_browser(MonsterMeshFileBrowser &b)
             const char *cursor = (i == b.cursor()) ? ">" : " ";
             if (e.isDir) {
                 // Directories: white
-                pos += snprintf(buf+pos, sizeof(buf)-pos, "%s #FFFFFF[%s]#\n", cursor, e.name);
+                pos += snprintf(buf+pos, sizeof(buf)-pos, "%s #FFFFFF [%s]#\n", cursor, e.name);
             } else if (e.hasSave) {
                 // ROM with save file: green
-                pos += snprintf(buf+pos, sizeof(buf)-pos, "%s #00FF00%s#\n", cursor, e.name);
+                pos += snprintf(buf+pos, sizeof(buf)-pos, "%s #00FF00 %s#\n", cursor, e.name);
             } else {
                 // ROM without save file: yellow
-                pos += snprintf(buf+pos, sizeof(buf)-pos, "%s #FFFF00%s#\n", cursor, e.name);
+                pos += snprintf(buf+pos, sizeof(buf)-pos, "%s #FFFF00 %s#\n", cursor, e.name);
             }
         }
     }
@@ -705,6 +705,7 @@ static lv_indev_read_cb_t   g_savedKbReadCb = nullptr;  // original LVGL keypad 
 static bool        g_symActive    = false;  // KEY mode: SYM modifier latch
 static bool        g_rawMode      = false;  // true when MCU is in RAW (5-byte) mode
 static bool        g_symEConsumed = false;  // RAW mode: debounce SYM+E toggle
+static bool        g_altWasHeldKey = false; // KEY mode: ALT debounce for screen toggle
 
 // Switch keyboard MCU between KEY mode (0x04, 1 byte) and RAW mode (0x03, 5 bytes).
 // T-Deck keyboard MCU (ESP32-C3 at 0x55) supports this via PR #87.
@@ -766,9 +767,32 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
     }
 
     // ── Pass-through when MonsterMesh is not active ───────────────────────
-    // Let Meshtastic's original keyboard driver handle all input so touch
-    // and keyboard work normally in the Meshtastic UI.
+    // Peek at RAW bytes to detect bare ALT press (toggle to MonsterMesh).
+    // Switch MCU to RAW, read 5 bytes, switch back to KEY — then pass through.
     if (!mmActive) {
+        Wire.beginTransmission(0x55);
+        Wire.write(0x03);  // RAW mode
+        Wire.endTransmission();
+        Wire.requestFrom((uint8_t)0x55, (uint8_t)5);
+        uint8_t rb[5] = {};
+        for (int i = 0; i < 5 && Wire.available(); i++) rb[i] = Wire.read();
+        Wire.beginTransmission(0x55);
+        Wire.write(0x04);  // back to KEY mode
+        Wire.endTransmission();
+        g_rawMode = false;
+
+        bool altNow = (rb[0] & 0x10) != 0;
+        if (altNow && !g_altWasHeldKey) {
+            g_altWasHeldKey = true;
+            uint32_t now = millis();
+            if (now - g_micLastToggleMs > 600 && monsterMeshModule) {
+                g_micLastToggleMs = now;
+                monsterMeshModule->handleKeyFromLVGL(0x05);
+                return;  // consumed — don't pass KEY event through
+            }
+        }
+        if (!altNow) g_altWasHeldKey = false;
+
         if (g_savedKbReadCb) g_savedKbReadCb(indev, data);
         return;
     }
@@ -1342,6 +1366,9 @@ void MonsterMeshModule::launchROM(const char *path)
 
     emuInitialized_ = true;
     browserActive_ = false;
+#if HAS_TFT
+    lvgl_hide_browser();  // restore Meshtastic LVGL screen before emulator takes over
+#endif
     emulatorActive_ = true;
 
     // Allocate PSRAM framebuffer for rendering (320x240 RGB565 = 153,600 bytes)
