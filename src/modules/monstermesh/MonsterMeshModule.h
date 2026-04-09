@@ -42,7 +42,6 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     // Is the emulator view currently active (vs Meshtastic UI)?
     bool isEmulatorActive() const { return emulatorActive_; }
     bool isBrowserActive()  const { return browserActive_; }
-    volatile bool pendingToggle_ = false;  // GPIO long-press (Core 1) → consumed in LVGL hook (Core 0)
 
   protected:
     // ── SinglePortModule overrides ──────────────────────────────────────────

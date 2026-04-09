@@ -454,27 +454,6 @@ int32_t MonsterMeshModule::runOnce()
         setupStatus_ = "MonsterMesh ready";
         LOG_INFO("[MonsterMesh] SD ready — waiting for user to open MonsterMesh\n");
     }
-    // Trackball long-press toggle: poll GPIO 0 (TB_PRESS) directly.
-    // The device-ui encoder driver consumes trackball press via LVGL and never reaches InputBroker,
-    // so we must poll the GPIO ourselves. Hold for 800ms to toggle MonsterMesh.
-#if HAS_TFT
-    {
-        static uint32_t btnDownAt = 0;
-        static bool btnWas = false;
-        static bool firedThisPress = false;
-        bool btnNow = !digitalRead(0);  // GPIO 0, active-low
-        if (btnNow && !btnWas) {
-            btnDownAt = millis();
-            firedThisPress = false;
-        }
-        if (btnNow && !firedThisPress && millis() - btnDownAt >= 800) {
-            firedThisPress = true;
-            LOG_INFO("[MonsterMesh] trackball long-press detected — setting pendingToggle\n");
-            pendingToggle_ = true;  // processed in LVGL hook (Core 0) to avoid cross-core LVGL calls
-        }
-        btnWas = btnNow;
-    }
-#endif
 
     // Keep keyboard hook installed while MonsterMesh is active
     if (emulatorActive_ || browserActive_) {
@@ -756,14 +735,6 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
     // Keep device-ui backlight alive while emulator or browser is active.
     if (mmActive) {
         lv_display_trigger_activity(NULL);
-    }
-
-    // Process pending toggle from GPIO long-press (set on Core 1, consumed here on Core 0).
-    // This is the safe place to call LVGL APIs for the toggle.
-    if (monsterMeshModule && monsterMeshModule->pendingToggle_) {
-        monsterMeshModule->pendingToggle_ = false;
-        monsterMeshModule->handleKeyFromLVGL(0x05);
-        return;
     }
 
     // ── Pass-through when MonsterMesh is not active ───────────────────────
