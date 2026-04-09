@@ -759,12 +759,7 @@ void DaycareEventGen::generateCompositional(
         case EVCAT_REST: {
             const char *action = actionsRest[rngRange(ACTIONS_REST_COUNT)];
             snprintf(msgBuf, sizeof(msgBuf), "Your %s %s %s", name, action, loc);
-            // Rest events: 30% give small XP (recovery nap)
-            if (rngChance(30)) {
-                baseXp = 5 + rngRange(6);  // 5-10
-            } else {
-                giveXp = false;
-            }
+            giveXp = false;  // rest = no XP, just flavor
             break;
         }
 
@@ -780,12 +775,7 @@ void DaycareEventGen::generateCompositional(
             };
             static constexpr uint8_t MISCHIEF_COUNT = sizeof(mischiefTemplates) / sizeof(mischiefTemplates[0]);
             snprintf(msgBuf, sizeof(msgBuf), mischiefTemplates[rngRange(MISCHIEF_COUNT)], name);
-            // Mischief: 40% give small XP (learned something from the chaos)
-            if (rngChance(40)) {
-                baseXp = 5 + rngRange(8);  // 5-12
-            } else {
-                giveXp = false;
-            }
+            giveXp = false;  // mischief = no XP, just flavor
             break;
         }
 
@@ -1144,4 +1134,180 @@ DaycareEvent DaycareEventGen::generate(
                           neighbors, neighborCount, state, weather, isNight);
     state.totalEvents++;
     return ev;
+}
+
+// ── Type names for arrival messages ─────────────────────────────────────────
+
+static const char *typeNameStr[] = {
+    "Normal", "Fighting", "Flying", "Poison", "Ground",
+    "Rock", "Bug", "Ghost", "Fire", "Water",
+    "Grass", "Electric", "Psychic", "Ice", "Dragon"
+};
+
+// ── Arrival "dog park" templates ────────────────────────────────────────────
+// %s1 = local pokemon name, %s2 = neighbor pokemon (with trainer tag), %s3 = shared type
+
+static const char *arrivalAffinityTemplates[] = {
+    "Your %s ran over to greet %s — kindred %s spirits!",
+    "Your %s and %s hit it off immediately! Fellow %s types.",
+    "Your %s spotted %s and got excited — a fellow %s type!",
+    "Your %s bounded up to %s. %s types stick together!",
+    "Your %s sniffed the air and dashed toward %s. %s pals!",
+};
+static constexpr uint8_t ARRIVAL_AFFINITY_COUNT = sizeof(arrivalAffinityTemplates) / sizeof(arrivalAffinityTemplates[0]);
+
+static const char *arrivalRivalryTemplates[] = {
+    "Your %s locked eyes with %s — an instant rivalry!",
+    "Your %s sized up %s. Sparks are already flying!",
+    "Your %s and %s circled each other warily. This could get interesting!",
+    "Your %s puffed up as %s approached. A challenge!",
+};
+static constexpr uint8_t ARRIVAL_RIVALRY_COUNT = sizeof(arrivalRivalryTemplates) / sizeof(arrivalRivalryTemplates[0]);
+
+static const char *arrivalCuriousTemplates[] = {
+    "Your %s wandered over to check out %s.",
+    "Your %s curiously approached %s.",
+    "Your %s noticed %s and went to investigate.",
+};
+static constexpr uint8_t ARRIVAL_CURIOUS_COUNT = sizeof(arrivalCuriousTemplates) / sizeof(arrivalCuriousTemplates[0]);
+
+// ── Super-effective type matchups (attacker type → weak defender type) ───────
+
+static bool isSuperEffective(uint8_t atkType, uint8_t defType) {
+    switch (atkType) {
+        case 8:  return defType == 10 || defType == 13 || defType == 6;   // Fire > Grass,Ice,Bug
+        case 9:  return defType == 8  || defType == 4  || defType == 5;   // Water > Fire,Ground,Rock
+        case 10: return defType == 9  || defType == 4  || defType == 5;   // Grass > Water,Ground,Rock
+        case 11: return defType == 9  || defType == 2;                     // Electric > Water,Flying
+        case 13: return defType == 10 || defType == 4  || defType == 2  || defType == 14; // Ice > Grass,Ground,Flying,Dragon
+        case 1:  return defType == 0  || defType == 5  || defType == 13;  // Fighting > Normal,Rock,Ice
+        case 3:  return defType == 10;                                     // Poison > Grass
+        case 4:  return defType == 8  || defType == 11 || defType == 5  || defType == 3; // Ground > Fire,Electric,Rock,Poison
+        case 2:  return defType == 1  || defType == 10 || defType == 6;   // Flying > Fighting,Grass,Bug
+        case 12: return defType == 1  || defType == 3;                     // Psychic > Fighting,Poison
+        case 5:  return defType == 8  || defType == 13 || defType == 2  || defType == 6; // Rock > Fire,Ice,Flying,Bug
+        case 6:  return defType == 10 || defType == 12;                    // Bug > Grass,Psychic
+        case 7:  return defType == 7  || defType == 12;                    // Ghost > Ghost,Psychic
+        case 14: return defType == 14;                                     // Dragon > Dragon
+        default: return false;
+    }
+}
+
+// ── Arrival event generator ─────────────────────────────────────────────────
+
+void DaycareEventGen::generateArrivalEvent(
+    DaycareEvent &out,
+    const DaycarePokemonState *localParty, uint8_t localPartyCount,
+    const DaycareBeacon &newcomer,
+    DaycareState &state)
+{
+    rngSeed(millis() ^ newcomer.nodeId);
+
+    // Find the best local Pokemon to interact with the newcomer's party
+    // Priority: type affinity > type rivalry > random
+    int8_t bestLocal = -1;
+    int8_t bestRemote = -1;
+    uint8_t sharedType = 0;
+    bool isRivalry = false;
+
+    // First pass: look for type affinity (same type = friends at the dog park)
+    for (uint8_t li = 0; li < localPartyCount && bestLocal < 0; li++) {
+        const DaycareSpecies *localSp = daycareGetSpecies(localParty[li].speciesDex);
+        if (!localSp) continue;
+
+        for (uint8_t ri = 0; ri < newcomer.partyCount && bestLocal < 0; ri++) {
+            const DaycareSpecies *remoteSp = daycareGetSpecies(newcomer.pokemon[ri].species);
+            if (!remoteSp) continue;
+
+            if (localSp->type1 == remoteSp->type1 || localSp->type1 == remoteSp->type2) {
+                bestLocal = li; bestRemote = ri; sharedType = localSp->type1;
+            } else if (localSp->type2 == remoteSp->type1 || localSp->type2 == remoteSp->type2) {
+                bestLocal = li; bestRemote = ri; sharedType = localSp->type2;
+            }
+        }
+    }
+
+    // Second pass: look for type rivalry (super-effective matchup)
+    if (bestLocal < 0) {
+        for (uint8_t li = 0; li < localPartyCount && bestLocal < 0; li++) {
+            const DaycareSpecies *localSp = daycareGetSpecies(localParty[li].speciesDex);
+            if (!localSp) continue;
+
+            for (uint8_t ri = 0; ri < newcomer.partyCount && bestLocal < 0; ri++) {
+                const DaycareSpecies *remoteSp = daycareGetSpecies(newcomer.pokemon[ri].species);
+                if (!remoteSp) continue;
+
+                if (isSuperEffective(localSp->type1, remoteSp->type1) ||
+                    isSuperEffective(localSp->type1, remoteSp->type2) ||
+                    isSuperEffective(remoteSp->type1, localSp->type1) ||
+                    isSuperEffective(remoteSp->type1, localSp->type2)) {
+                    bestLocal = li; bestRemote = ri; isRivalry = true;
+                }
+            }
+        }
+    }
+
+    // Fallback: random local, first remote
+    if (bestLocal < 0) {
+        bestLocal = pickPokemon(localPartyCount);
+        bestRemote = 0;
+    }
+
+    const char *localName = getDisplayName(localParty[bestLocal]);
+
+    // Format remote Pokemon name with trainer tag
+    char remoteName[60];
+    const char *remoteSpecies = (newcomer.pokemon[bestRemote].species >= 1 &&
+                                  newcomer.pokemon[bestRemote].species <= DAYCARE_SPECIES_COUNT)
+                                 ? daycareSpeciesNames[newcomer.pokemon[bestRemote].species] : "Pokemon";
+    char trainerTag[14];
+    if (newcomer.gameName[0])
+        snprintf(trainerTag, sizeof(trainerTag), "%s-%s", newcomer.shortName, newcomer.gameName);
+    else
+        snprintf(trainerTag, sizeof(trainerTag), "%s", newcomer.shortName);
+
+    if (newcomer.pokemon[bestRemote].nickname[0])
+        snprintf(remoteName, sizeof(remoteName), "%s's %s (%s)",
+                 trainerTag, remoteSpecies, newcomer.pokemon[bestRemote].nickname);
+    else
+        snprintf(remoteName, sizeof(remoteName), "%s's %s", trainerTag, remoteSpecies);
+
+    // Generate message
+    if (!isRivalry && sharedType > 0 && sharedType < TYPE_COUNT) {
+        const char *tName = typeNameStr[sharedType];
+        const char *tmpl = arrivalAffinityTemplates[rngRange(ARRIVAL_AFFINITY_COUNT)];
+        // Template takes local, remote, type — but snprintf can't reorder, so build manually
+        char tmpBuf[200];
+        // All templates are "Your %s ... %s ... %s ..."
+        snprintf(tmpBuf, sizeof(tmpBuf), tmpl, localName, remoteName, tName);
+        strncpy(out.message, tmpBuf, sizeof(out.message) - 1);
+    } else if (isRivalry) {
+        const char *tmpl = arrivalRivalryTemplates[rngRange(ARRIVAL_RIVALRY_COUNT)];
+        snprintf(out.message, sizeof(out.message), tmpl, localName, remoteName);
+    } else {
+        const char *tmpl = arrivalCuriousTemplates[rngRange(ARRIVAL_CURIOUS_COUNT)];
+        snprintf(out.message, sizeof(out.message), tmpl, localName, remoteName);
+    }
+
+    out.xp = 10 + rngRange(11);  // 10-20 XP for the meetup
+    out.targetSpeciesIdx = bestLocal;
+    out.targetNodeId = newcomer.nodeId;
+    out.isBroadcast = false;
+    out.rarity = RARITY_UNCOMMON;
+
+    // Build relationship — affinity starts friendship, rivalry starts rivalry
+    DaycareRelationship *rel = getOrCreateRelationship(
+        state, newcomer.nodeId, bestLocal, newcomer.pokemon[bestRemote].species);
+    if (rel) {
+        if (!isRivalry && sharedType > 0) {
+            uint8_t gain = 10;  // big first-meeting bonus for type affinity
+            if (rel->friendship <= 255 - gain) rel->friendship += gain;
+            else rel->friendship = 255;
+        } else if (isRivalry) {
+            uint8_t gain = 8;
+            if (rel->rivalry <= 255 - gain) rel->rivalry += gain;
+            else rel->rivalry = 255;
+        }
+        rel->lastSeenMs = millis();
+    }
 }

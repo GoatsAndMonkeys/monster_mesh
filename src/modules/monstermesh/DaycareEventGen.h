@@ -64,6 +64,17 @@ private:
         const DaycarePokemonState *localParty, uint8_t localPartyCount);
     static void generateVisitor(DaycareEvent &out, uint32_t newNodeId,
         const DaycarePokemonState *localParty, uint8_t localPartyCount);
+
+public:
+    // Generate a "dog park" arrival event when a new trainer comes online
+    // Matches local Pokemon with newcomer's Pokemon by type affinity or rivalry
+    static void generateArrivalEvent(
+        DaycareEvent &out,
+        const DaycarePokemonState *localParty, uint8_t localPartyCount,
+        const DaycareBeacon &newcomer,
+        DaycareState &state);
+
+private:
     static bool tryEscape(DaycareEvent &out,
         const DaycarePokemonState *localParty, uint8_t localPartyCount);
     static void generateWeatherEvent(DaycareEvent &out,

@@ -18,6 +18,7 @@
 #include "MonsterMeshAudio.h"
 #include "PokemonData.h"
 #include "Gen1Species.h"
+// DaycareSavPatcher.h included via PokemonDaycare.h (in MonsterMeshModule.h)
 
 // LovyanGFX is available on T-Deck in both t-deck and t-deck-tft builds
 #include <LovyanGFX.hpp>
@@ -167,14 +168,20 @@ void MonsterMeshModule::ensureMonsterMeshChannel()
     auto &ch = channels.getByIndex(MONSTERMESH_CHANNEL);
     if (ch.role == meshtastic_Channel_Role_DISABLED ||
         strlen(ch.settings.name) == 0) {
-        // Set up channel 1 as "MonsterMesh Center"
+        // Set up channel 1 as "MonsterMesh"
         ch.role = meshtastic_Channel_Role_SECONDARY;
         snprintf(ch.settings.name, sizeof(ch.settings.name), "MonsterMesh");
-        // Use default PSK (bytes[0]=1 = well-known "AQ==" default key)
-        ch.settings.psk.size = 1;
-        ch.settings.psk.bytes[0] = 1;
+        // 16-byte PSK — shared across all MonsterMesh nodes
+        // "MonsterMesh!2024" as a simple deterministic key
+        static const uint8_t psk[] = {
+            'M','o','n','s','t','e','r','M',
+            'e','s','h','!','2','0','2','4'
+        };
+        ch.settings.psk.size = 16;
+        memcpy(ch.settings.psk.bytes, psk, 16);
         channels.setChannel(ch);
-        Serial.println("[MonsterMesh] channel 1 configured as 'MonsterMesh Center'");
+        nodeDB->saveToDisk();
+        LOG_INFO("[MonsterMesh] channel 1 configured as 'MonsterMesh'\n");
     }
 }
 
@@ -182,9 +189,12 @@ void MonsterMeshModule::ensureMonsterMeshChannel()
 
 bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
 {
-    // Accept PRIVATE_APP packets (binary serial data) — on any channel if DM to us
+    // Accept PRIVATE_APP packets (binary serial data) — on MonsterMesh channel,
+    // primary channel (daycare beacons), or DMs addressed to us
     if (p->decoded.portnum == meshtastic_PortNum_PRIVATE_APP) {
-        if (p->channel == MONSTERMESH_CHANNEL || p->to == nodeDB->getNodeNum()) {
+        if (p->channel == MONSTERMESH_CHANNEL ||
+            p->channel == channels.getPrimaryIndex() ||
+            p->to == nodeDB->getNodeNum()) {
             return true;
         }
     }
@@ -245,6 +255,41 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
         memcpy(low, txt, len);
         for (size_t i = 0; i < len; i++)
             if (low[i] >= 'A' && low[i] <= 'Z') low[i] += 32;
+
+        // ── Daycare commands ─────────────────────────────────────────────
+        // Self-DMs (from our own node) are treated as local commands — response
+        // goes to self without extra mesh traffic.
+        uint32_t replyTo = (mp.from == nodeDB->getNodeNum()) ? nodeDB->getNodeNum() : mp.from;
+
+        if (strstr(low, "mmd on") || strstr(low, "mmd checkin") || strstr(low, "mmd in")) {
+            daycareCheckIn();
+            sendTextDM(replyTo, daycare_.isActive() ? "Daycare: Pokemon checked in!" : "Daycare: No ROM loaded");
+            return ProcessMessage::CONTINUE;
+        }
+        if (strstr(low, "mmd off") || strstr(low, "mmd checkout") || strstr(low, "mmd out")) {
+            daycareCheckOut();
+            sendTextDM(replyTo, "Daycare: Pokemon checked out! XP applied.");
+            return ProcessMessage::CONTINUE;
+        }
+        if (strstr(low, "mmd status") || strstr(low, "mmd info") ||
+            strstr(low, "mmds") || strstr(low, "mmd s")) {
+            daycareStatus(replyTo);
+            return ProcessMessage::CONTINUE;
+        }
+        if (strstr(low, "mmd test")) {
+            if (!daycare_.isActive()) {
+                // Auto check-in if not active
+                daycareCheckIn();
+            }
+            if (daycare_.isActive()) {
+                daycare_.forceEvent();
+                const auto &evt = daycare_.getLastEvent();
+                sendTextDM(mp.from, evt.message);
+            } else {
+                sendTextDM(mp.from, "Daycare: No ROM loaded");
+            }
+            return ProcessMessage::CONTINUE;
+        }
 
         // ── PERSON 2: receives "mmc on" from Person 1 ────────────────────
         // Store pending challenge, send "MM waiting" ack so Person 1 knows
@@ -375,8 +420,35 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
         return ProcessMessage::CONTINUE;
     }
 
-    // ── Binary PRIVATE_APP packets (serial data for battle shim) ─────────
+    // ── Binary PRIVATE_APP packets ─────────────────────────────────────
     if (mp.decoded.payload.size > 0) {
+        // Check if it's a daycare beacon (first byte matches beacon type)
+        if (mp.decoded.payload.size >= sizeof(DaycareBeacon)) {
+            const auto *beacon = reinterpret_cast<const DaycareBeacon *>(mp.decoded.payload.bytes);
+            // Daycare beacons have type field = 0x60
+            if (beacon->type == 0x60) {
+                uint8_t prevNeighbors = daycare_.getNeighborCount();
+                daycare_.handleBeacon(*beacon);
+                // Notify user when a new neighbor appears
+                if (daycare_.getNeighborCount() > prevNeighbors) {
+                    char msg[80];
+                    snprintf(msg, sizeof(msg), "Daycare: %s (%s) is nearby!",
+                             beacon->shortName, beacon->gameName);
+                    sendTextDM(nodeDB->getNodeNum(), msg);
+                    LOG_INFO("[MonsterMesh] new neighbor: %s (%s)\n",
+                             beacon->shortName, beacon->gameName);
+
+                    // Dog park arrival — Pokemon interact based on type affinity
+                    if (daycare_.triggerArrivalEvent(*beacon)) {
+                        const auto &evt = daycare_.getLastEvent();
+                        sendTextDM(nodeDB->getNodeNum(), evt.message);
+                        LOG_INFO("[MonsterMesh] arrival event: %s\n", evt.message);
+                    }
+                }
+                return ProcessMessage::STOP;
+            }
+        }
+        // Otherwise it's battle shim serial data
         transport_.pushReceivedPacket(
             mp.decoded.payload.bytes,
             mp.decoded.payload.size,
@@ -421,6 +493,36 @@ int32_t MonsterMeshModule::runOnce()
 
             // ── Wire serial link ─────────────────────────────────────────────
             emu_.setSerialLink(&shim_);
+
+            // ── Ensure MonsterMesh channel exists ────────────────────────────
+            ensureMonsterMeshChannel();
+
+            // ── Daycare ─────────────────────────────────────────────────────
+            daycare_.init();
+            daycare_.setSendDm([](uint32_t dest, const char *msg, void *ctx) {
+                auto *self = static_cast<MonsterMeshModule *>(ctx);
+                self->sendTextDM(dest, msg);
+            }, this);
+            daycare_.setBroadcast([](const char *msg, void *ctx) {
+                auto *self = static_cast<MonsterMeshModule *>(ctx);
+                // Broadcast on primary channel
+                self->sendTextDM(NODENUM_BROADCAST, msg);
+            }, this);
+            daycare_.setSendBeacon([](const DaycareBeacon &beaconIn, void *ctx) {
+                auto *self = static_cast<MonsterMeshModule *>(ctx);
+                // Fill nodeId and send as binary PRIVATE_APP packet
+                DaycareBeacon beacon = beaconIn;
+                beacon.nodeId = nodeDB->getNodeNum();
+                meshtastic_MeshPacket *p = router->allocForSending();
+                p->to = NODENUM_BROADCAST;
+                p->channel = channels.getPrimaryIndex();
+                p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
+                size_t sz = sizeof(DaycareBeacon);
+                if (sz > sizeof(p->decoded.payload.bytes)) sz = sizeof(p->decoded.payload.bytes);
+                memcpy(p->decoded.payload.bytes, &beacon, sz);
+                p->decoded.payload.size = sz;
+                service->sendToMesh(p);
+            }, this);
         }
 
 
@@ -468,6 +570,17 @@ int32_t MonsterMeshModule::runOnce()
         // SD ready — stay in Meshtastic UI. User opens MonsterMesh via Tools or mic button.
         setupStatus_ = "MonsterMesh ready";
         LOG_INFO("[MonsterMesh] SD ready — waiting for user to open MonsterMesh\n");
+
+        // Defer auto-daycare to next runOnce() tick — doing 32KB SD read
+        // inline here blocks spiLock too long and starves the radio task.
+        pendingAutoCheckin_ = true;
+    }
+
+    // Deferred auto-daycare check-in — wait 30s after setup so SPI bus
+    // is settled (TFT, radio, LVGL all initialized and not contending).
+    if (pendingAutoCheckin_ && millis() > 38000) {
+        pendingAutoCheckin_ = false;
+        daycareAutoCheckIn();
     }
 
     // Keep keyboard hook installed while MonsterMesh is active
@@ -547,10 +660,22 @@ int32_t MonsterMeshModule::runOnce()
                     // Eject cart confirmed — stop emulator, go to Meshtastic
                     LOG_INFO("[MonsterMesh] cart ejected by user\n");
                     if (emu_.audio_) emu_.audio_->setMuted(true);
+                    if (emu_.isRunning()) pendingSave_ = true;
                     emuInitialized_ = false;  // emu task loop will idle
+                    emulatorActive_ = false;
                     browserActive_ = false;
 #if HAS_TFT
                     lvgl_hide_browser();
+                    // Restore LVGL display — flush cb + refresh timer
+                    lv_display_t *ejDisp = lv_display_get_default();
+                    if (ejDisp) {
+                        if (savedFlushCb_) {
+                            lv_display_set_flush_cb(ejDisp, (lv_display_flush_cb_t)savedFlushCb_);
+                            savedFlushCb_ = nullptr;
+                        }
+                        if (ejDisp->refr_timer) lv_timer_resume(ejDisp->refr_timer);
+                        lv_obj_invalidate(lv_screen_active());
+                    }
 #endif
                     kbSetMode(false);
                     setupStatus_ = "Cart ejected";
@@ -567,6 +692,29 @@ int32_t MonsterMeshModule::runOnce()
     if (pendingSave_) {
         pendingSave_ = false;
         emu_.save();
+    }
+
+    // Daycare tick — generates events every 5 min, sends beacons, autosaves
+    // Wake from light sleep briefly before beacon/event fires (prevents freeze on wake)
+    if (daycare_.isActive()) {
+        uint32_t sinceLastEvt = millis() - daycare_.getState().lastEventMs;
+        uint32_t sinceLastBeacon = millis() - daycare_.getState().lastBeaconMs;
+        // Wake 5s before the 5-min interval so radio is ready
+        if (sinceLastEvt >= 295000 || sinceLastBeacon >= 295000) {
+            powerFSM.trigger(EVENT_INPUT);
+        }
+
+        uint32_t prevEventTime = daycare_.getLastEventTime();
+        daycare_.tick(millis());
+        // DM every new event to the local user
+        if (daycare_.getLastEventTime() != prevEventTime && daycare_.getLastEventTime() != 0) {
+            const auto &evt = daycare_.getLastEvent();
+            if (evt.message[0]) {
+                powerFSM.trigger(EVENT_INPUT);  // wake for DM send
+                sendTextDM(nodeDB->getNodeNum(), evt.message);
+                LOG_INFO("[MonsterMesh] event DM: %s\n", evt.message);
+            }
+        }
     }
 
     drainTxQueue();
@@ -822,7 +970,7 @@ static void lvgl_hide_browser()
     }
 }
 
-volatile int g_emuPaletteIdx = 0;  // index into EMU_PALETTES[]
+volatile uint8_t g_emuPaletteIdx = 0;  // index into EMU_PALETTES[]
 
 static lv_indev_t          *g_kbIndev      = nullptr;
 static lv_indev_read_cb_t   g_savedKbReadCb = nullptr;  // original LVGL keypad read cb
@@ -1609,6 +1757,216 @@ void MonsterMeshModule::launchROM(const char *path)
     kbSetMode(true);  // RAW mode for held-key d-pad input
     setupStatus_ = "Playing!";
     LOG_INFO("[MonsterMesh] ROM loaded, emulator started\n");
+
+    // Remember this ROM path for auto-daycare on next boot
+    {
+        concurrency::LockGuard g(spiLock);
+        File lrf = SD.open("/last_rom.txt", FILE_WRITE);
+        if (lrf) {
+            lrf.print(path);  // SD-relative path like "/pokemon.gb"
+            lrf.close();
+            LOG_INFO("[MonsterMesh] saved last ROM path: %s\n", path);
+        }
+    }
+
+    // Auto check-in to daycare — SRAM is already loaded from the .sav file,
+    // so we can read party data directly without calling emu_.save() (which
+    // would do SD I/O and deadlock with the emulator task we just started).
+    {
+        char gameName[8] = {};
+        const uint8_t *sram = emu_.cartRam_;
+        for (int i = 0; i < 7; i++) {
+            uint8_t c = sram[0x2598 + i];  // Gen 1 player name offset
+            if (c == 0x50) break;
+            gameName[i] = gen1CharToAscii(c);
+        }
+        const char *shortName = getShortName(nodeDB->getNodeNum());
+        daycare_.checkIn(sram, shortName, gameName);
+        daycare_.forceBeacon();
+        LOG_INFO("[MonsterMesh] daycare auto-checked in: trainer='%s' party=%d, beacon sent\n",
+                 gameName, daycare_.getState().partyCount);
+    }
+}
+
+// ── Daycare ─────────────────────────────────────────────────────────────────
+
+// Gen 1 player name is at offset 0x2598 in the SRAM save file
+static constexpr uint16_t SAV_PLAYER_NAME = 0x2598;
+
+void MonsterMeshModule::daycareCheckIn()
+{
+    if (!emuInitialized_ || !emu_.isRunning()) {
+        LOG_WARN("[MonsterMesh] daycare checkin: no ROM loaded\n");
+        return;
+    }
+
+    // Read trainer name from SRAM (Gen 1 offset 0x2598, encoded in Gen 1 charset)
+    char gameName[8] = {};
+    const uint8_t *sram = emu_.cartRam_;
+    for (int i = 0; i < 7; i++) {
+        uint8_t c = sram[SAV_PLAYER_NAME + i];
+        if (c == 0x50) break;  // Gen 1 string terminator
+        gameName[i] = gen1CharToAscii(c);
+    }
+
+    // Get Meshtastic short name
+    const char *shortName = getShortName(nodeDB->getNodeNum());
+
+    LOG_INFO("[MonsterMesh] daycare checkin: trainer='%s' node='%s'\n", gameName, shortName);
+
+    // Save emulator state first so SRAM is up to date
+    emu_.save();
+
+    daycare_.checkIn(sram, shortName, gameName);
+
+    const auto &state = daycare_.getState();
+    LOG_INFO("[MonsterMesh] daycare active: %d pokemon checked in\n", state.partyCount);
+}
+
+void MonsterMeshModule::daycareCheckOut()
+{
+    if (!daycare_.isActive()) {
+        LOG_WARN("[MonsterMesh] daycare checkout: not active\n");
+        return;
+    }
+
+    // Write XP back to SRAM if emulator is running
+    if (emuInitialized_ && emu_.isRunning()) {
+        daycare_.checkOut(emu_.cartRam_);
+        emu_.save();  // persist patched SRAM to SD
+        LOG_INFO("[MonsterMesh] daycare checkout: XP written back to SRAM + saved\n");
+    } else {
+        daycare_.checkOut(nullptr);  // just stop daycare, no SRAM patch
+        LOG_INFO("[MonsterMesh] daycare checkout: no emulator, state saved\n");
+    }
+}
+
+void MonsterMeshModule::daycareStatus(uint32_t replyTo)
+{
+    if (!daycare_.isActive()) {
+        sendTextDM(replyTo, "Daycare: Not active. DM 'mmd in' to check in.");
+        return;
+    }
+
+    const auto &state = daycare_.getState();
+    char buf[200];
+    int pos = 0;
+
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "Daycare: %d Pokemon\n", state.partyCount);
+
+    for (uint8_t i = 0; i < state.partyCount && i < 6; i++) {
+        const auto &p = state.pokemon[i];
+        const char *name = p.nickname[0] ? p.nickname : "???";
+        uint8_t level = p.savLevel + p.totalLevelsGained;
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        "%s Lv%d +%luXP\n", name, level, (unsigned long)p.totalXpGained);
+        if (pos >= (int)sizeof(buf) - 40) break;
+    }
+
+    pos += snprintf(buf + pos, sizeof(buf) - pos,
+                    "Neighbors: %d", daycare_.getNeighborCount());
+
+    sendTextDM(replyTo, buf);
+}
+
+// ── Auto check-in: load last .sav from SD without starting emulator ────────
+
+void MonsterMeshModule::daycareAutoCheckIn()
+{
+    char romPath[256] = {};
+    char savPath[256];
+    size_t len = 0;
+
+    // Step 1: read last ROM path (small file, quick SPI lock)
+    // Re-init SD — LovyanGFX TFT driver may have clobbered SPI bus state
+    // between setup and this deferred tick.
+    {
+        concurrency::LockGuard g(spiLock);
+        SD.end();
+        SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+        if (!SD.begin(SDCARD_CS, SPI, 4000000U)) {
+            LOG_WARN("[MonsterMesh] auto-daycare: SD re-init failed\n");
+            return;
+        }
+        File lrf = SD.open("/last_rom.txt", FILE_READ);
+        if (!lrf) {
+            LOG_INFO("[MonsterMesh] no /last_rom.txt — skipping auto-daycare\n");
+            return;
+        }
+        len = lrf.readBytes(romPath, sizeof(romPath) - 1);
+        lrf.close();
+    }
+    if (len == 0) return;
+    romPath[len] = '\0';
+    while (len > 0 && (romPath[len-1] == '\n' || romPath[len-1] == '\r' || romPath[len-1] == ' '))
+        romPath[--len] = '\0';
+
+    LOG_INFO("[MonsterMesh] auto-daycare: last ROM = '%s'\n", romPath);
+    MonsterMeshEmulator::romPathToSavePath(romPath, savPath, sizeof(savPath));
+
+    // Step 2: allocate PSRAM buffer (no SPI needed)
+    uint8_t *sram = static_cast<uint8_t *>(ps_malloc(0x8000));
+    if (!sram) {
+        LOG_WARN("[MonsterMesh] auto-daycare: PSRAM alloc failed\n");
+        return;
+    }
+    memset(sram, 0, 0x8000);
+
+    // Step 3: read .sav file (32KB, separate SPI lock + SD re-init)
+    size_t n = 0;
+    {
+        concurrency::LockGuard g(spiLock);
+        SD.end();
+        SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+        if (!SD.begin(SDCARD_CS, SPI, 4000000U)) {
+            LOG_WARN("[MonsterMesh] auto-daycare: SD re-init failed for .sav\n");
+            free(sram);
+            return;
+        }
+        File sf = SD.open(savPath, FILE_READ);
+        if (!sf) {
+            LOG_INFO("[MonsterMesh] no save file '%s' — skipping auto-daycare\n", savPath);
+            free(sram);
+            return;
+        }
+        n = sf.read(sram, 0x8000);
+        sf.close();
+    }
+    LOG_INFO("[MonsterMesh] auto-daycare: loaded %u bytes from %s\n", (unsigned)n, savPath);
+
+    if (n == 0) {
+        free(sram);
+        return;
+    }
+
+    // Read trainer name from SRAM (Gen 1 offset 0x2598)
+    char gameName[8] = {};
+    for (int i = 0; i < 7; i++) {
+        uint8_t c = sram[SAV_PLAYER_NAME + i];
+        if (c == 0x50) break;  // Gen 1 string terminator
+        gameName[i] = gen1CharToAscii(c);
+    }
+
+    const char *shortName = getShortName(nodeDB->getNodeNum());
+    LOG_INFO("[MonsterMesh] auto-daycare: trainer='%s' node='%s'\n", gameName, shortName);
+
+    daycare_.checkIn(sram, shortName, gameName);
+    free(sram);
+
+    if (daycare_.isActive()) {
+        const auto &state = daycare_.getState();
+        LOG_INFO("[MonsterMesh] auto-daycare: %d pokemon checked in\n", state.partyCount);
+        daycare_.forceBeacon();
+        daycare_.forceEvent();
+        // DM the first event to the user
+        const auto &evt = daycare_.getLastEvent();
+        if (evt.message[0]) {
+            sendTextDM(nodeDB->getNodeNum(), evt.message);
+            LOG_INFO("[MonsterMesh] first event: %s\n", evt.message);
+        }
+        LOG_INFO("[MonsterMesh] auto-daycare: beacon + event sent\n");
+        setupStatus_ = "Daycare active";
+    }
 }
 
 #endif // T_DECK && !MESHTASTIC_EXCLUDE_MONSTERMESH

@@ -9,8 +9,8 @@
 
 // ── Timing constants ────────────────────────────────────────────────────────
 
-static constexpr uint32_t EVENT_INTERVAL_MS     = 3600000;   // 1 hour
-static constexpr uint32_t BEACON_INTERVAL_MS    = 3600000;   // 1 hour (same as events — don't flood mesh)
+static constexpr uint32_t EVENT_INTERVAL_MS     = 300000;    // 5 min (testing)
+static constexpr uint32_t BEACON_INTERVAL_MS    = 300000;    // 5 min (testing)
 static constexpr uint32_t NEIGHBOR_TIMEOUT_MS   = 7200000;   // 2 hours = neighbor gone (generous for LoRa)
 static constexpr uint32_t DECAY_INTERVAL_MS     = 86400000;  // 1 day
 static constexpr uint32_t SAVE_INTERVAL_MS      = 300000;    // 5 min autosave
@@ -232,10 +232,8 @@ void PokemonDaycare::runEventCycle(uint32_t nowMs) {
     lastEvent_ = evt;
     lastEventTimeMs_ = nowMs;
 
-    // Send DM if event involves a remote node
-    if (evt.targetNodeId != 0 && sendDm_) {
-        sendDm_(evt.targetNodeId, evt.message, sendDmCtx_);
-    }
+    // Note: DM sending for events is handled by MonsterMeshModule after tick()
+    // to avoid double-sends and packet allocation issues
 
     // Broadcast achievement announcements
     for (uint8_t i = 0; i < newCount; i++) {
@@ -423,7 +421,7 @@ void PokemonDaycare::broadcastBeacon(uint32_t nowMs) {
     if (!sendBeacon_) return;
 
     DaycareBeacon beacon = {};
-    beacon.type = 0x10;  // DAYCARE_BEACON packet type
+    beacon.type = 0x60;  // DAYCARE_BEACON packet type (0x10 conflicts with BATTLE_REQUEST)
     beacon.nodeId = 0;   // filled by send callback (from nodeDB)
     strncpy(beacon.shortName, shortName_, 4);
     strncpy(beacon.gameName, gameName_, 7);
@@ -435,6 +433,38 @@ void PokemonDaycare::broadcastBeacon(uint32_t nowMs) {
     }
 
     sendBeacon_(beacon, sendBeaconCtx_);
+}
+
+// ── Dog park arrival event ──────────────────────────────────────────────────
+
+bool PokemonDaycare::triggerArrivalEvent(const DaycareBeacon &newcomer) {
+    if (!active_ || state_.partyCount == 0) return false;
+    if (newcomer.partyCount == 0) return false;
+
+    DaycareEvent evt = {};
+    DaycareEventGen::generateArrivalEvent(
+        evt, state_.pokemon, state_.partyCount, newcomer, state_);
+
+    // Apply XP
+    if (evt.xp > 0 && evt.targetSpeciesIdx < state_.partyCount) {
+        auto &pkmn = state_.pokemon[evt.targetSpeciesIdx];
+        uint16_t xpToAdd = evt.xp;
+        if (xpToAdd > 200) xpToAdd = 200;
+        pkmn.totalXpGained += xpToAdd;
+
+        uint8_t newLevel = levelForExp(pkmn.speciesDex, pkmn.savExp + pkmn.totalXpGained);
+        if (newLevel > 100) newLevel = 100;
+        if (newLevel > pkmn.savLevel + pkmn.totalLevelsGained) {
+            pkmn.totalLevelsGained = newLevel - pkmn.savLevel;
+        }
+    }
+
+    // Store as last event
+    lastEvent_ = evt;
+    lastEventTimeMs_ = millis();
+    state_.totalEvents++;
+
+    return true;
 }
 
 // ── Weather ─────────────────────────────────────────────────────────────────

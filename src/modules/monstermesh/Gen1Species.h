@@ -60,6 +60,8 @@ inline const char *gen1SpeciesName(uint8_t id) {
 }
 
 // Gen1 charset → ASCII conversion
+#ifndef GEN1_CHAR_TO_ASCII_DEFINED
+#define GEN1_CHAR_TO_ASCII_DEFINED
 inline char gen1CharToAscii(uint8_t c) {
     if (c >= 0x80 && c <= 0x99) return 'A' + (c - 0x80);
     if (c >= 0xA0 && c <= 0xB9) return 'a' + (c - 0xA0);
@@ -67,8 +69,13 @@ inline char gen1CharToAscii(uint8_t c) {
     if (c == 0x7F) return ' ';
     if (c == 0x50) return '\0';
     if (c == 0xE8) return '.';
+    if (c == 0xE3) return '-';
+    if (c == 0xEF) return '\'';
+    if (c == 0xF4) return ',';
+    if (c == 0xF3) return '/';
     return '?';
 }
+#endif
 
 inline void gen1NameToAscii(const uint8_t *src, uint8_t srcLen,
                             char *dst, uint8_t dstLen) {

@@ -24,7 +24,7 @@ static const uint16_t EMU_PALETTES[][4] = {
     { 0xFFFF, 0xAD55, 0x52AA, 0x0000 },  // 1: Grayscale
 };
 static constexpr int EMU_PALETTE_COUNT = sizeof(EMU_PALETTES) / sizeof(EMU_PALETTES[0]);
-extern volatile int g_emuPaletteIdx;
+extern volatile uint8_t g_emuPaletteIdx;
 
 // ── MonsterMesh Emulator ────────────────────────────────────────────────────────
 // Adapted from EmulatorApp. No longer owns TFT_eSPI directly — rendering goes

@@ -15,6 +15,7 @@
 #include "MonsterMeshBattleShim.h"
 #include "MonsterMeshLobby.h"
 #include "MonsterMeshFileBrowser.h"
+#include "PokemonDaycare.h"
 
 // ── MonsterMeshModule ──────────────────────────────────────────────────────────
 // Meshtastic module that runs a Game Boy Pokemon emulator with LoRa-based
@@ -68,6 +69,7 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     MonsterMeshBattleShim    shim_;
     MonsterMeshLobby         lobby_;
     MonsterMeshFileBrowser   browser_;
+    PokemonDaycare           daycare_;
 
     bool emulatorActive_     = false;
     uint8_t brightness_      = 255;
@@ -182,6 +184,13 @@ private:
     // File browser
     void renderBrowser();
     void launchROM(const char *path);
+
+    // Daycare
+    void daycareCheckIn();
+    void daycareCheckOut();
+    void daycareStatus(uint32_t replyTo);
+    void daycareAutoCheckIn();  // load last .sav from SD, auto check-in without emulator
+    bool pendingAutoCheckin_ = false;
 };
 
 extern MonsterMeshModule *monsterMeshModule;

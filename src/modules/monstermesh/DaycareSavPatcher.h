@@ -441,8 +441,12 @@ static const uint8_t dexToInternal[152] = {
 };
 
 // ── Gen 1 text encoding ↔ ASCII ────────────────────────────────────────────
+// gen1CharToAscii is defined in Gen1Species.h — use that version.
+// This extended version adds punctuation the base version doesn't cover.
 
-static char gen1CharToAscii(uint8_t c) {
+#ifndef GEN1_CHAR_TO_ASCII_DEFINED
+#define GEN1_CHAR_TO_ASCII_DEFINED
+inline char gen1CharToAscii(uint8_t c) {
     if (c >= 0x80 && c <= 0x99) return 'A' + (c - 0x80);  // A-Z
     if (c >= 0xA0 && c <= 0xB9) return 'a' + (c - 0xA0);  // a-z
     if (c >= 0xF6 && c <= 0xFF) return '0' + (c - 0xF6);  // 0-9
@@ -455,6 +459,7 @@ static char gen1CharToAscii(uint8_t c) {
     if (c == 0x50) return '\0';  // string terminator
     return '?';
 }
+#endif
 
 static uint8_t asciiToGen1Char(char c) {
     if (c >= 'A' && c <= 'Z') return 0x80 + (c - 'A');

@@ -53,6 +53,16 @@ public:
     const DaycareEvent &getLastEvent() const { return lastEvent_; }
     uint32_t getLastEventTime() const { return lastEventTimeMs_; }
 
+    // Force an immediate event cycle (for testing)
+    void forceEvent() { if (active_) { runEventCycle(millis()); state_.lastEventMs = millis(); } }
+
+    // Force an immediate beacon broadcast (call after auto-checkin)
+    void forceBeacon() { if (active_) { broadcastBeacon(millis()); state_.lastBeaconMs = millis(); } }
+
+    // Trigger a "dog park" arrival event when a new trainer comes online
+    // Returns true if an event was generated (and DM sent)
+    bool triggerArrivalEvent(const DaycareBeacon &newcomer);
+
     // Set weather (called from WiFi fetch or from another node's report)
     void setWeather(DaycareWeatherType type, int8_t tempC, uint8_t windMps);
 
