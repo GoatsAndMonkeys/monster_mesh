@@ -1139,6 +1139,12 @@ static LGFX *tft = nullptr;
 
 #endif
 
+// Expose the LGFX instance for MonsterMesh emulator rendering
+#if !defined(EXCLUDE_TFT)
+#include <LovyanGFX.hpp>
+lgfx::LGFX_Device *getLovyanGfx() { return tft; }
+#endif
+
 #include "SPILock.h"
 #include "TFTDisplay.h"
 #include <SPI.h>

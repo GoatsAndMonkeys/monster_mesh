@@ -39,6 +39,9 @@
 #endif
 #include "modules/RoutingModule.h"
 #include "modules/TextMessageModule.h"
+#if !defined(MESHTASTIC_EXCLUDE_MONSTERMESH)
+#include "modules/monstermesh/MonsterMeshModule.h"
+#endif
 #if !MESHTASTIC_EXCLUDE_TRACEROUTE
 #include "modules/TraceRouteModule.h"
 #endif
@@ -113,6 +116,9 @@ void setupModules()
     }
 #endif
     statusLEDModule = new StatusLEDModule();
+#if !defined(MESHTASTIC_EXCLUDE_MONSTERMESH)
+    monsterMeshModule = new MonsterMeshModule();
+#endif
 #if !MESHTASTIC_EXCLUDE_REPLYBOT
     new ReplyBotModule();
 #endif
