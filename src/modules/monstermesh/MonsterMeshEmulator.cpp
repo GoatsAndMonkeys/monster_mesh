@@ -202,16 +202,21 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
     if (strncmp(path, "/sd", 3) == 0 && path[3] == '\0') sdPath = "/";
 
     Serial.printf("[EMU] loadROM: path='%s' sdPath='%s'\n", path, sdPath);
+    Serial.flush();
 
     // Free previous ROM if reloading
     if (romData_) { free(romData_); romData_ = nullptr; romSize_ = 0; }
 
+    Serial.printf("[EMU] step 1: acquiring spiLock...\n"); Serial.flush();
     // SD shares SPI bus with radio and TFT — must hold spiLock
     concurrency::LockGuard g(spiLock);
+    Serial.printf("[EMU] step 2: spiLock acquired, calling SD.end()...\n"); Serial.flush();
 
     // Full re-init of SD — end first, then begin fresh
     SD.end();
+    Serial.printf("[EMU] step 3: SD.end() done, SPI.begin()...\n"); Serial.flush();
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+    Serial.printf("[EMU] step 4: SPI.begin() done, SD.begin()...\n"); Serial.flush();
     bool sdOk = SD.begin(SDCARD_CS, SPI);
     Serial.printf("[EMU] SD re-init: %d cardType=%d\n", (int)sdOk, (int)SD.cardType());
     if (!sdOk) {

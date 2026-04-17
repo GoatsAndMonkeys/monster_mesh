@@ -7,8 +7,8 @@
 #include <cstdio>
 #include <cstdlib>
 
-// UNSCII 8px pixel font — declared manually because lv_conf.h may disable it
-LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_unscii_8;
+// Cozette 13px pixel font
+LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_13;
 
 // ── Wild encounter pool ────────────────────────────────────────────────────
 namespace {
@@ -50,7 +50,9 @@ void MonsterMeshTerminal::loadParty(const Gen1Party &party)
         char buf[48];
         snprintf(buf, sizeof(buf), "%u Pokemon loaded.", (unsigned)savParty_.count);
         print(buf);
-        print("Type 'party' to view, 'pick N' to choose.");
+        printSep();
+        showParty();
+        print("Type 'pick N' to choose.");
         printSep();
     }
 }
@@ -90,7 +92,7 @@ void MonsterMeshTerminal::print(const char *text)
 
     lv_obj_t *label = lv_label_create(outputPanel_);
     lv_obj_set_width(label, LV_PCT(100));
-    lv_obj_set_style_text_font(label, &lv_font_unscii_8, LV_PART_MAIN);
+    lv_obj_set_style_text_font(label, &lv_font_cozette_13, LV_PART_MAIN);
     lv_obj_set_style_text_color(label, lv_color_hex(0xff0f380f), LV_PART_MAIN);
     lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     lv_label_set_text(label, text);

@@ -2959,6 +2959,18 @@ void TFTView_320x240::ui_event_mm_terminal(lv_event_t *e)
         THIS->ui_set_active(objects.settings_button, objects.mm_terminal_panel, objects.top_mm_terminal_panel);
         // Focus the input textarea so physical keyboard goes there
         lv_obj_add_state(objects.mm_terminal_input, LV_STATE_FOCUSED);
+        // Set group focus so physical keyboard input goes to the textarea
+        lv_group_t *grp = (lv_group_t *)lv_obj_get_group(objects.mm_terminal_input);
+        if (grp) {
+            lv_group_focus_obj(objects.mm_terminal_input);
+        } else {
+            // If not in a group, try the default indev group
+            lv_group_t *defGrp = lv_group_get_default();
+            if (defGrp) {
+                lv_group_add_obj(defGrp, objects.mm_terminal_input);
+                lv_group_focus_obj(objects.mm_terminal_input);
+            }
+        }
         // Also associate with the on-screen keyboard if present
         if (objects.keyboard) {
             lv_keyboard_set_textarea(objects.keyboard, objects.mm_terminal_input);

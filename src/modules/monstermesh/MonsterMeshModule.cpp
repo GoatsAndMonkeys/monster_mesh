@@ -1303,6 +1303,7 @@ void MonsterMeshModule::emuTaskEntry(void *pv)
 
 void MonsterMeshModule::emuTaskLoop()
 {
+    Serial.printf("[EMU-TASK] entered emuTaskLoop on core %d\n", xPortGetCoreID()); Serial.flush();
     const TickType_t framePeriod = pdMS_TO_TICKS(16);  // ~60fps
     TickType_t lastWake = xTaskGetTickCount();
     uint8_t frameCount = 0;
@@ -1424,6 +1425,7 @@ void MonsterMeshModule::renderTaskEntry(void *pv)
 
 void MonsterMeshModule::renderTaskLoop()
 {
+    Serial.printf("[RENDER-TASK] entered renderTaskLoop on core %d\n", xPortGetCoreID()); Serial.flush();
     while (true) {
         if (emulatorActive_ && frameDirty_) {
             blitFrame();
@@ -1724,12 +1726,15 @@ void MonsterMeshModule::launchROM(const char *path)
         return;
     }
 
+    Serial.printf("[LAUNCH] step A: begin() OK, setting flags\n"); Serial.flush();
     emuInitialized_ = true;
     browserActive_ = false;
 #if HAS_TFT
+    Serial.printf("[LAUNCH] step B: hiding browser\n"); Serial.flush();
     lvgl_hide_browser();  // restore Meshtastic LVGL screen before emulator takes over
     // Suppress LVGL flush + pause refresh timer so nothing bleeds through
     lv_display_t *disp = lv_display_get_default();
+    Serial.printf("[LAUNCH] step C: suppressing LVGL flush disp=%p\n", disp); Serial.flush();
     if (disp) {
         savedFlushCb_ = (void *)disp->flush_cb;
         lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
@@ -1739,27 +1744,30 @@ void MonsterMeshModule::launchROM(const char *path)
     }
 #endif
     emulatorActive_ = true;
+    Serial.printf("[LAUNCH] step D: kb RAW mode\n"); Serial.flush();
     kbSetMode(true);  // switch keyboard to RAW mode for emulator input
 
     // Allocate PSRAM framebuffer for rendering (320x240 RGB565 = 153,600 bytes)
+    Serial.printf("[LAUNCH] step E: frameBuf=%p freePSRAM=%u\n", frameBuf_, (unsigned)ESP.getFreePsram()); Serial.flush();
     if (!frameBuf_) {
         frameBuf_ = static_cast<uint16_t *>(ps_malloc(PM_DISP_W * PM_DISP_H * sizeof(uint16_t)));
         if (frameBuf_) {
             memset(frameBuf_, 0, PM_DISP_W * PM_DISP_H * sizeof(uint16_t));
-            LOG_INFO("[MonsterMesh] Framebuffer allocated in PSRAM (%u bytes)\n",
-                     (unsigned)(PM_DISP_W * PM_DISP_H * sizeof(uint16_t)));
+            Serial.printf("[LAUNCH] Framebuffer allocated OK\n"); Serial.flush();
         } else {
-            LOG_WARN("[MonsterMesh] PSRAM framebuffer alloc failed\n");
+            Serial.printf("[LAUNCH] PSRAM framebuffer alloc FAILED\n"); Serial.flush();
         }
     }
 
     // Create emulator FreeRTOS task on Core 1 (high priority — never stalls)
+    Serial.printf("[LAUNCH] step F: creating emu task\n"); Serial.flush();
     if (!emuTaskHandle_) {
         xTaskCreatePinnedToCore(
             emuTaskEntry, "monstermesh_emu",
             16384, this, 5, &emuTaskHandle_, 1
         );
     }
+    Serial.printf("[LAUNCH] step G: creating render task\n"); Serial.flush();
 
     // Create render task on Core 0 (lower priority — blits framebuffer to TFT
     // without blocking the emulator task, so audio stays smooth)
@@ -1769,18 +1777,21 @@ void MonsterMeshModule::launchROM(const char *path)
             4096, this, 2, &renderTaskHandle_, 0
         );
     }
+    Serial.printf("[LAUNCH] step H: LGFX setup\n"); Serial.flush();
 
     // Set up LGFX for emulator rendering (LVGL flush already suppressed)
 #if HAS_TFT
     lgfx::LGFX_Device *gfx = getGfx();
+    Serial.printf("[LAUNCH] gfx=%p\n", gfx); Serial.flush();
     if (gfx) {
         gfx->clearClipRect();
     }
 #endif
+    Serial.printf("[LAUNCH] step I: done with LGFX\n"); Serial.flush();
 
     kbSetMode(true);  // RAW mode for held-key d-pad input
     setupStatus_ = "Playing!";
-    LOG_INFO("[MonsterMesh] ROM loaded, emulator started\n");
+    Serial.printf("[LAUNCH] step J: saving last_rom.txt\n"); Serial.flush();
 
     // Remember this ROM path for auto-daycare on next boot
     {
