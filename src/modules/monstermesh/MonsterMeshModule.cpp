@@ -26,12 +26,21 @@
 #include <lvgl.h>
 #include "display/lv_display_private.h"
 #include "indev/lv_indev_private.h"
+#include "generated/ui_320x240/screens.h"
 
 // UNSCII 16px pixel font — declared manually because lv_conf.h disables it
 LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_unscii_8;
 #endif
 
 MonsterMeshModule *monsterMeshModule = nullptr;
+
+// Called from device-ui event handler when Enter is pressed in the terminal input
+extern "C" void monsterMeshTerminalSubmit()
+{
+    if (monsterMeshModule && monsterMeshModule->terminal().ready()) {
+        monsterMeshModule->terminal().submitCommand();
+    }
+}
 
 // Weak default — device-ui provides the real implementation when present
 extern "C" __attribute__((weak)) void monstermesh_set_toggle_cb(void (*cb)(void)) { (void)cb; }
@@ -570,6 +579,14 @@ int32_t MonsterMeshModule::runOnce()
         // SD ready — stay in Meshtastic UI. User opens MonsterMesh via Tools or mic button.
         setupStatus_ = "MonsterMesh ready";
         LOG_INFO("[MonsterMesh] SD ready — waiting for user to open MonsterMesh\n");
+
+        // Initialize the text terminal (LVGL panels created by device-ui screens.c)
+#if HAS_TFT
+        if (objects.mm_terminal_output && objects.mm_terminal_input) {
+            terminal_.init(objects.mm_terminal_output, objects.mm_terminal_input);
+            LOG_INFO("[MonsterMesh] Terminal initialized\n");
+        }
+#endif
 
         // Defer auto-daycare to next runOnce() tick — doing 32KB SD read
         // inline here blocks spiLock too long and starves the radio task.
