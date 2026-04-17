@@ -2,6 +2,7 @@
 // See MonsterMeshTerminal.h.
 
 #include "MonsterMeshTerminal.h"
+#include "graphics/view/TFT/Themes.h"
 #include <lvgl.h>
 #include <cstring>
 #include <cstdio>
@@ -93,7 +94,7 @@ void MonsterMeshTerminal::print(const char *text)
     lv_obj_t *label = lv_label_create(outputPanel_);
     lv_obj_set_width(label, LV_PCT(100));
     lv_obj_set_style_text_font(label, &lv_font_cozette_13, LV_PART_MAIN);
-    lv_obj_set_style_text_color(label, lv_color_hex(0xff88C070), LV_PART_MAIN);
+    lv_obj_set_style_text_color(label, lv_color_hex(Themes::lightest()), LV_PART_MAIN);
     lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     lv_label_set_text(label, text);
     lineCount_++;
@@ -115,7 +116,7 @@ void MonsterMeshTerminal::printSep()
     lv_obj_t *label = lv_label_create(outputPanel_);
     lv_obj_set_width(label, LV_PCT(100));
     lv_obj_set_style_text_font(label, &lv_font_cozette_13, LV_PART_MAIN);
-    lv_obj_set_style_text_color(label, lv_color_hex(0xff306230), LV_PART_MAIN);
+    lv_obj_set_style_text_color(label, lv_color_hex(Themes::mid()), LV_PART_MAIN);
     lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     lv_label_set_text(label, "--------------------------------");
     lineCount_++;

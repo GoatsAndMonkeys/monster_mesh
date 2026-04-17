@@ -24,8 +24,12 @@ typedef enum _meshtastic_Theme {
     meshtastic_Theme_DARK = 0,
     /* Light */
     meshtastic_Theme_LIGHT = 1,
-    /* Red */
-    meshtastic_Theme_RED = 2
+    /* DMG Green */
+    meshtastic_Theme_DMG_GREEN = 2,
+    /* GBC Green */
+    meshtastic_Theme_GBC_GREEN = 3,
+    /* Pocket Green */
+    meshtastic_Theme_POCKET_GREEN = 4
 } meshtastic_Theme;
 
 /* Localization */
@@ -206,8 +210,8 @@ extern "C" {
 #define _meshtastic_CompassMode_ARRAYSIZE ((meshtastic_CompassMode)(meshtastic_CompassMode_FREEZE_HEADING+1))
 
 #define _meshtastic_Theme_MIN meshtastic_Theme_DARK
-#define _meshtastic_Theme_MAX meshtastic_Theme_RED
-#define _meshtastic_Theme_ARRAYSIZE ((meshtastic_Theme)(meshtastic_Theme_RED+1))
+#define _meshtastic_Theme_MAX meshtastic_Theme_POCKET_GREEN
+#define _meshtastic_Theme_ARRAYSIZE ((meshtastic_Theme)(meshtastic_Theme_POCKET_GREEN+1))
 
 #define _meshtastic_Language_MIN meshtastic_Language_ENGLISH
 #define _meshtastic_Language_MAX meshtastic_Language_TRADITIONAL_CHINESE

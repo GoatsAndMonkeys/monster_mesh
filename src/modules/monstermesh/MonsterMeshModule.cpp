@@ -852,14 +852,54 @@ static lv_obj_t *g_browserInner    = nullptr;  // dark inner panel
 static lv_obj_t *g_browserTitle    = nullptr;  // "GAME PAK" title bar
 static lv_obj_t *g_browserFooter   = nullptr;  // bottom hint bar
 
+// Theme-aware GB palette for the ROM browser
+#include "graphics/view/TFT/Themes.h"
+
+struct GBPalette {
+    lv_color_t c[4];         // [0]=darkest, [1]=dark, [2]=light, [3]=lightest
+    char hex[4][7];           // hex strings for LVGL recolor markup (no #)
+};
+
+static GBPalette getBrowserPalette()
+{
+    GBPalette p;
+    // Palette shades: [0]=darkest bg, [1]=dark panel, [2]=light accent, [3]=lightest text
+    struct { uint32_t c[4]; } palettes[] = {
+        // DMG:    darkest,    dark,       light,      lightest
+        {{0x0F380F, 0x306230, 0x8BAC0F, 0x9BBC0F}},
+        // GBC:
+        {{0x081820, 0x346856, 0x88C070, 0xE0F8D0}},
+        // Pocket:
+        {{0x0F380F, 0x306230, 0x88D048, 0xC4E878}},
+    };
+    int idx = 0;
+    auto th = Themes::get();
+    if (th == Themes::eGbcGreen)    idx = 1;
+    else if (th == Themes::ePocketGreen) idx = 2;
+    // Dark/Light themes default to DMG palette for the browser
+    for (int i = 0; i < 4; i++) {
+        p.c[i] = lv_color_hex(0xff000000 | palettes[idx].c[i]);
+        snprintf(p.hex[i], 7, "%06X", (unsigned)palettes[idx].c[i]);
+    }
+    return p;
+}
+
 static void lvgl_show_browser(MonsterMeshFileBrowser &b)
 {
-    // ── Classic Game Boy DMG green palette ─────────────────────────────
-    // 00 lightest #E0F8D0, 01 light #88C070, 10 dark #346856, 11 darkest #081820
-    static constexpr lv_color_t GB_00 = {.blue = 0xD0, .green = 0xF8, .red = 0xE0};  // lightest
-    static constexpr lv_color_t GB_01 = {.blue = 0x70, .green = 0xC0, .red = 0x88};  // light
-    static constexpr lv_color_t GB_10 = {.blue = 0x56, .green = 0x68, .red = 0x34};  // dark
-    static constexpr lv_color_t GB_11 = {.blue = 0x20, .green = 0x18, .red = 0x08};  // darkest
+    GBPalette pal = getBrowserPalette();
+    lv_color_t GB_00 = pal.c[3];  // lightest
+    lv_color_t GB_01 = pal.c[2];  // light
+    lv_color_t GB_10 = pal.c[1];  // dark
+    lv_color_t GB_11 = pal.c[0];  // darkest
+
+    // Recreate browser screen if theme changed (colors are baked into LVGL objects)
+    static int lastTheme = -1;
+    int curTheme = (int)Themes::get();
+    if (g_browserLvScr && curTheme != lastTheme) {
+        lv_obj_del(g_browserLvScr);
+        g_browserLvScr = g_browserLvLabel = g_browserBorder = g_browserInner = g_browserTitle = g_browserFooter = nullptr;
+    }
+    lastTheme = curTheme;
 
     if (!g_browserLvScr) {
         // Screen background — darkest green
@@ -951,18 +991,17 @@ static void lvgl_show_browser(MonsterMeshFileBrowser &b)
             if (isEjectEntry) {
                 if (b.isConfirmingEject() && i == b.cursor()) {
                     pos += snprintf(buf+pos, sizeof(buf)-pos,
-                                    "%s#081820 Eject cart? K to confirm#\n", cursor);  // darkest
+                                    "%s#%s Eject cart? K to confirm#\n", cursor, pal.hex[0]);
                 } else {
                     pos += snprintf(buf+pos, sizeof(buf)-pos,
-                                    "%s#081820 %s#\n", cursor, e.name);  // darkest
+                                    "%s#%s %s#\n", cursor, pal.hex[0], e.name);
                 }
             } else if (e.isDir) {
-                pos += snprintf(buf+pos, sizeof(buf)-pos, "%s#88C070 [%s]#\n", cursor, e.name);  // light green
+                pos += snprintf(buf+pos, sizeof(buf)-pos, "%s#%s [%s]#\n", cursor, pal.hex[2], e.name);
             } else if (e.hasSave) {
-                // Save file — lightest, with star
-                pos += snprintf(buf+pos, sizeof(buf)-pos, "%s#E0F8D0 %s [SAV]#\n", cursor, e.name);
+                pos += snprintf(buf+pos, sizeof(buf)-pos, "%s#%s %s [SAV]#\n", cursor, pal.hex[3], e.name);
             } else {
-                pos += snprintf(buf+pos, sizeof(buf)-pos, "%s#88C070 %s#\n", cursor, e.name);  // light green
+                pos += snprintf(buf+pos, sizeof(buf)-pos, "%s#%s %s#\n", cursor, pal.hex[2], e.name);
             }
         }
     }
