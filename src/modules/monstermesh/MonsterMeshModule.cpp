@@ -580,18 +580,25 @@ int32_t MonsterMeshModule::runOnce()
         setupStatus_ = "MonsterMesh ready";
         LOG_INFO("[MonsterMesh] SD ready — waiting for user to open MonsterMesh\n");
 
-        // Initialize the text terminal (LVGL panels created by device-ui screens.c)
-#if HAS_TFT
-        if (objects.mm_terminal_output && objects.mm_terminal_input) {
-            terminal_.init(objects.mm_terminal_output, objects.mm_terminal_input);
-            LOG_INFO("[MonsterMesh] Terminal initialized\n");
-        }
-#endif
+        // Terminal init is deferred — see below
 
         // Defer auto-daycare to next runOnce() tick — doing 32KB SD read
         // inline here blocks spiLock too long and starves the radio task.
         pendingAutoCheckin_ = true;
     }
+
+    // Deferred terminal init — screens may not be created yet when setupDone_ fires
+#if HAS_TFT
+    if (!terminal_.ready() && objects.mm_terminal_output && objects.mm_terminal_input) {
+        terminal_.init(objects.mm_terminal_output, objects.mm_terminal_input);
+        LOG_INFO("[MonsterMesh] Terminal initialized\n");
+    }
+    // Pass cached SAV party to terminal when it requests it.
+    if (terminal_.ready() && terminal_.needsPartyLoad() && terminalPartyReady_) {
+        terminal_.loadParty(terminalParty_);
+        LOG_INFO("[MonsterMesh] Terminal party loaded from cache\n");
+    }
+#endif
 
     // Deferred auto-daycare check-in — wait 30s after setup so SPI bus
     // is settled (TFT, radio, LVGL all initialized and not contending).
@@ -1968,6 +1975,9 @@ void MonsterMeshModule::daycareAutoCheckIn()
     LOG_INFO("[MonsterMesh] auto-daycare: trainer='%s' node='%s'\n", gameName, shortName);
 
     daycare_.checkIn(sram, shortName, gameName);
+
+    // Build terminal party from SRAM before freeing.
+    buildTerminalPartyFromSram(sram);
     free(sram);
 
     if (daycare_.isActive()) {
@@ -1984,6 +1994,38 @@ void MonsterMeshModule::daycareAutoCheckIn()
         LOG_INFO("[MonsterMesh] auto-daycare: beacon + event sent\n");
         setupStatus_ = "Daycare active";
     }
+}
+
+// ── Build Gen1Party with decoded ASCII nicknames from raw SRAM ──────────────
+
+void MonsterMeshModule::buildTerminalPartyFromSram(const uint8_t *sram)
+{
+    memset(&terminalParty_, 0, sizeof(terminalParty_));
+    uint8_t count = sram[SAV_PARTY_COUNT];
+    if (count > 6) count = 6;
+    terminalParty_.count = count;
+
+    // Copy species list.
+    memcpy(terminalParty_.species, &sram[SAV_SPECIES_LIST], 7);
+
+    // Copy raw Gen1Pokemon structs (binary-compatible).
+    memcpy(terminalParty_.mons, &sram[SAV_POKEMON_DATA], count * sizeof(Gen1Pokemon));
+
+    // Decode nicknames from Gen 1 text encoding to ASCII.
+    for (uint8_t i = 0; i < count; ++i) {
+        const uint8_t *nickRaw = &sram[SAV_NICKNAMES + i * SAV_NAME_SIZE];
+        for (int j = 0; j < 10; ++j) {
+            if (nickRaw[j] == SAV_STRING_TERMINATOR) {
+                terminalParty_.nicknames[i][j] = 0;
+                break;
+            }
+            terminalParty_.nicknames[i][j] = (uint8_t)gen1CharToAscii(nickRaw[j]);
+            if (j == 9) terminalParty_.nicknames[i][10] = 0;
+        }
+    }
+
+    terminalPartyReady_ = true;
+    LOG_INFO("[MonsterMesh] terminal party: %u pokemon cached\n", (unsigned)count);
 }
 
 #endif // T_DECK && !MESHTASTIC_EXCLUDE_MONSTERMESH

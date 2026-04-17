@@ -194,6 +194,11 @@ private:
     void daycareStatus(uint32_t replyTo);
     void daycareAutoCheckIn();  // load last .sav from SD, auto check-in without emulator
     bool pendingAutoCheckin_ = false;
+
+    // Cached party from SAV for terminal use (decoded nicknames).
+    Gen1Party terminalParty_ = {};
+    bool      terminalPartyReady_ = false;
+    void buildTerminalPartyFromSram(const uint8_t *sram);
 };
 
 extern MonsterMeshModule *monsterMeshModule;

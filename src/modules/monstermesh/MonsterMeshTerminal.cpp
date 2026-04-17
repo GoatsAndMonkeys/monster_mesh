@@ -10,7 +10,7 @@
 // UNSCII 8px pixel font — declared manually because lv_conf.h may disable it
 LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_unscii_8;
 
-// ── Wild encounter pool (same as PokeBattleNRF / MonsterMeshRoguelike) ──────
+// ── Wild encounter pool ────────────────────────────────────────────────────
 namespace {
 
 const uint8_t WILD_POOL[] = {
@@ -19,17 +19,6 @@ const uint8_t WILD_POOL[] = {
      96, 98,100,102,104,109,111,114,116,118,120,127,129,133,
 };
 constexpr uint8_t WILD_POOL_LEN = sizeof(WILD_POOL) / sizeof(WILD_POOL[0]);
-
-struct BossDef { uint8_t species; const char *name; };
-const BossDef BOSSES[] = {
-    {  68, "MACHAMP"  },
-    {  76, "GOLEM"    },
-    {  94, "GENGAR"   },
-    { 130, "GYARADOS" },
-    { 142, "AERODACTYL"},
-    { 149, "DRAGONITE"},
-};
-constexpr uint8_t BOSS_COUNT = sizeof(BOSSES) / sizeof(BOSSES[0]);
 
 } // namespace
 
@@ -42,9 +31,28 @@ void MonsterMeshTerminal::init(lv_obj_t *outputPanel, lv_obj_t *inputTextarea)
     lineCount_     = 0;
     rng_           = (uint32_t)millis() ^ 0xA5A5A5A5u;
 
-    print("MonsterMesh Terminal v1.0");
-    print("Type 'help' for commands.");
+    print("MonsterMesh Terminal v2.0");
+    if (savParty_.count > 0) {
+        print("Party loaded. Type 'party' to view.");
+    } else {
+        print("Loading party from SAV...");
+        needsLoad_ = true;
+    }
     printSep();
+}
+
+void MonsterMeshTerminal::loadParty(const Gen1Party &party)
+{
+    memcpy(&savParty_, &party, sizeof(Gen1Party));
+    needsLoad_ = false;
+
+    if (ready()) {
+        char buf[48];
+        snprintf(buf, sizeof(buf), "%u Pokemon loaded.", (unsigned)savParty_.count);
+        print(buf);
+        print("Type 'party' to view, 'pick N' to choose.");
+        printSep();
+    }
 }
 
 void MonsterMeshTerminal::submitCommand()
@@ -83,7 +91,7 @@ void MonsterMeshTerminal::print(const char *text)
     lv_obj_t *label = lv_label_create(outputPanel_);
     lv_obj_set_width(label, LV_PCT(100));
     lv_obj_set_style_text_font(label, &lv_font_unscii_8, LV_PART_MAIN);
-    lv_obj_set_style_text_color(label, lv_color_hex(0xff88C070), LV_PART_MAIN);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xff0f380f), LV_PART_MAIN);
     lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     lv_label_set_text(label, text);
     lineCount_++;
@@ -112,86 +120,71 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
     if (!*cmd) return;
 
     if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
-        print("--- Roguelike ---");
-        print("rogue    start a run");
-        print("ok       next encounter");
-        print("1..4     use move");
-        print("s 1..6   switch pokemon");
-        print("status   show party/battle");
-        print("quit     abandon run");
-        print("--- Battle ---");
-        print("[PvP coming soon]");
+        print("party    show your 6 Pokemon");
+        print("pick N   choose Pokemon N for battle");
+        print("fight    battle a random opponent");
+        print("1..4     use move in battle");
+        print("status   show battle status");
+        print("quit     forfeit battle");
         printSep();
         return;
     }
 
-    if (strcmp(cmd, "rogue") == 0) {
-        if (state_ != State::IDLE) {
-            print("Run already active. Type 'quit' first.");
+    if (strcmp(cmd, "party") == 0) {
+        showParty();
+        return;
+    }
+
+    if (strncmp(cmd, "pick ", 5) == 0 || strncmp(cmd, "pick", 4) == 0) {
+        const char *arg = cmd + 4;
+        while (*arg == ' ') ++arg;
+        int slot = atoi(arg);
+        if (slot < 1 || slot > 6) {
+            print("Usage: pick 1..6");
             return;
         }
-        startRun();
+        pickPokemon((uint8_t)(slot - 1));
+        return;
+    }
+
+    if (strcmp(cmd, "fight") == 0) {
+        if (state_ != State::READY) {
+            if (savParty_.count == 0)
+                print("No party loaded. Waiting for SAV...");
+            else if (chosenSlot_ == 0xFF)
+                print("Pick a Pokemon first: pick 1..6");
+            else
+                print("Already in battle.");
+            return;
+        }
+        startBattle();
         return;
     }
 
     if (strcmp(cmd, "status") == 0) {
         if (state_ == State::IN_BATTLE)
             describeBattleStatus();
-        else if (state_ == State::IDLE)
-            print("No active run. Type 'rogue' to start.");
-        else
-            describePartyStatus();
+        else if (state_ == State::READY) {
+            char buf[64];
+            Gen1Pokemon &p = savParty_.mons[chosenSlot_];
+            snprintf(buf, sizeof(buf), "Ready: %.10s L%u",
+                     (const char *)savParty_.nicknames[chosenSlot_],
+                     (unsigned)p.level);
+            print(buf);
+        } else {
+            print("No Pokemon selected. Type 'party'.");
+        }
         return;
     }
 
     if (strcmp(cmd, "quit") == 0) {
-        if (state_ == State::IDLE) {
-            print("Nothing to quit.");
-            return;
-        }
-        state_ = State::IDLE;
-        floor_ = 0;
-        encIdx_ = 0;
-        memset(&playerParty_, 0, sizeof(playerParty_));
-        print("Run abandoned.");
-        printSep();
-        return;
-    }
-
-    if (strcmp(cmd, "ok") == 0) {
-        if (state_ == State::BETWEEN_BATTLES) {
-            prepareNextEncounter();
-        } else if (state_ == State::RUN_OVER) {
-            state_ = State::IDLE;
-            print("Run cleared. Type 'rogue' to start again.");
+        if (state_ == State::IN_BATTLE) {
+            state_ = State::READY;
+            print("Battle forfeited.");
             printSep();
         } else {
-            print("Nothing to advance.");
-        }
-        return;
-    }
-
-    // Switch: s N
-    if ((cmd[0] == 's' || cmd[0] == 'S') && cmd[1] == ' ') {
-        if (state_ != State::IN_BATTLE) {
             print("Not in battle.");
-            return;
         }
-        int slot = atoi(cmd + 2);
-        if (slot < 1 || slot > playerParty_.count) {
-            print("Bad slot. Use s 1..6.");
-            return;
-        }
-        const auto &mine = engine_.party(0);
-        if (mine.mons[slot - 1].hp == 0) {
-            print("That pokemon fainted.");
-            return;
-        }
-        if (mine.active == slot - 1) {
-            print("Already active.");
-            return;
-        }
-        resolvePlayerAction(1, (uint8_t)(slot - 1));
         return;
     }
 
@@ -199,7 +192,7 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
     if (cmd[0] >= '1' && cmd[0] <= '4' &&
         (cmd[1] == 0 || cmd[1] == ' ')) {
         if (state_ != State::IN_BATTLE) {
-            print("Not in battle. Type 'ok' to start the encounter.");
+            print("Not in battle. Type 'fight'.");
             return;
         }
         uint8_t slot = (uint8_t)(cmd[0] - '1');
@@ -222,49 +215,87 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
 
 // ── Game logic ──────────────────────────────────────────────────────────────
 
-void MonsterMeshTerminal::startRun()
+void MonsterMeshTerminal::showParty()
 {
-    floor_   = 1;
-    encIdx_  = 0;
-    rng_     = (uint32_t)millis() ^ 0xCAFEBABEu;
-    buildDemoParty(playerParty_);
-    healFullParty();
+    if (savParty_.count == 0) {
+        print("No party loaded. Waiting for SAV...");
+        needsLoad_ = true;
+        return;
+    }
 
+    print("Your party:");
+    char buf[64];
+    for (uint8_t i = 0; i < savParty_.count; ++i) {
+        Gen1Pokemon &p = savParty_.mons[i];
+        uint8_t lvl = p.level ? p.level : p.boxLevel;
+        const char *marker = (i == chosenSlot_) ? " *" : "";
+        snprintf(buf, sizeof(buf), " %u) %.10s L%u  %u/%u HP%s",
+                 (unsigned)(i + 1),
+                 (const char *)savParty_.nicknames[i],
+                 (unsigned)lvl,
+                 (unsigned)be16(p.hp),
+                 (unsigned)be16(p.maxHp),
+                 marker);
+        print(buf);
+    }
     printSep();
-    print("Roguelike run started!");
-    print("Party: Bulbasaur, Charmander, Squirtle");
-    char msg[60];
-    snprintf(msg, sizeof(msg), "Floor %u, encounter 1/%u",
-             (unsigned)floor_, (unsigned)ENCOUNTERS_PER_FLOOR);
-    print(msg);
-    print("Type 'ok' to face the first foe.");
-    printSep();
-    state_ = State::BETWEEN_BATTLES;
 }
 
-void MonsterMeshTerminal::prepareNextEncounter()
+void MonsterMeshTerminal::pickPokemon(uint8_t slot)
 {
-    bool isBoss = (encIdx_ == 0) && (floor_ % FLOORS_PER_BOSS == 0);
-
-    uint16_t totalLvl = 0;
-    for (uint8_t i = 0; i < playerParty_.count; ++i) {
-        uint8_t lvl = playerParty_.mons[i].level
-                          ? playerParty_.mons[i].level
-                          : playerParty_.mons[i].boxLevel;
-        totalLvl += lvl;
+    if (savParty_.count == 0) {
+        print("No party loaded.");
+        return;
     }
-    uint8_t avgLvl = playerParty_.count ? (uint8_t)(totalLvl / playerParty_.count) : 5;
+    if (slot >= savParty_.count) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "Only %u Pokemon in party.", (unsigned)savParty_.count);
+        print(buf);
+        return;
+    }
+    if (state_ == State::IN_BATTLE) {
+        print("Can't switch during battle. 'quit' first.");
+        return;
+    }
 
-    Gen1Party opp;
-    if (isBoss) buildBossOpponent(opp, floor_);
-    else        buildWildOpponent(opp, avgLvl);
+    chosenSlot_ = slot;
+    Gen1Pokemon &p = savParty_.mons[slot];
+    uint8_t lvl = p.level ? p.level : p.boxLevel;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "Chose %.10s L%u. Type 'fight'!",
+             (const char *)savParty_.nicknames[slot], (unsigned)lvl);
+    print(buf);
+    state_ = State::READY;
+}
 
-    engine_.start(playerParty_, opp, rand32(), 1);
+void MonsterMeshTerminal::startBattle()
+{
+    // Build single-Pokemon party for the player from the chosen SAV slot.
+    memset(&battleParty_, 0, sizeof(battleParty_));
+    battleParty_.count = 1;
+    battleParty_.mons[0] = savParty_.mons[chosenSlot_];
+    battleParty_.species[0] = savParty_.species[chosenSlot_];
+    memcpy(battleParty_.nicknames[0], savParty_.nicknames[chosenSlot_], 11);
+
+    // Heal the chosen Pokemon for the battle.
+    Gen1Pokemon &p = battleParty_.mons[0];
+    setBe16(p.hp, be16(p.maxHp));
+    p.status = 0;
+    for (int j = 0; j < 4; ++j) {
+        const Gen1MoveData *mv = gen1Move(p.moves[j]);
+        if (mv) p.pp[j] = mv->pp;
+    }
+
+    // Build wild opponent scaled to player level.
+    uint8_t lvl = p.level ? p.level : p.boxLevel;
+    buildWildOpponent(oppParty_, lvl);
+
+    engine_.start(battleParty_, oppParty_, rand32(), 1);
 
     printSep();
-    print(isBoss ? "A boss appears!" : "A wild foe appears!");
+    print("A wild foe appears!");
     describeBattleStatus();
-    print("Use 1..4 (move) or s 1..6 (switch).");
+    print("Use 1..4 to attack.");
     state_ = State::IN_BATTLE;
 }
 
@@ -278,16 +309,6 @@ void MonsterMeshTerminal::resolvePlayerAction(uint8_t actionType, uint8_t index)
     engine_.autoReplaceIfFainted(0, &MonsterMeshTerminal::engineLogCb, this);
     engine_.autoReplaceIfFainted(1, &MonsterMeshTerminal::engineLogCb, this);
 
-    // Sync engine HP/PP back into save layout.
-    const auto &mine = engine_.party(0);
-    for (uint8_t i = 0; i < playerParty_.count && i < mine.count; ++i) {
-        const auto &b = mine.mons[i];
-        Gen1Pokemon &p = playerParty_.mons[i];
-        setBe16(p.hp, b.hp);
-        memcpy(p.pp, b.pp, 4);
-        p.status = b.status;
-    }
-
     auto res = engine_.result();
     if (res == Gen1BattleEngine::Result::ONGOING) {
         describeBattleStatus();
@@ -296,30 +317,13 @@ void MonsterMeshTerminal::resolvePlayerAction(uint8_t actionType, uint8_t index)
 
     printSep();
     if (res == Gen1BattleEngine::Result::P1_WIN) {
-        print("You won the encounter!");
-        encIdx_++;
-        if (encIdx_ >= ENCOUNTERS_PER_FLOOR) {
-            encIdx_ = 0;
-            floor_++;
-            healFullParty();
-            char m[80];
-            snprintf(m, sizeof(m), "Floor cleared! Now on floor %u. Party healed.",
-                     (unsigned)floor_);
-            print(m);
-        } else {
-            char m[80];
-            snprintf(m, sizeof(m), "Floor %u - encounter %u/%u next.",
-                     (unsigned)floor_, (unsigned)(encIdx_ + 1),
-                     (unsigned)ENCOUNTERS_PER_FLOOR);
-            print(m);
-        }
-        print("Type 'ok' to continue.");
-        state_ = State::BETWEEN_BATTLES;
+        print("You won!");
     } else {
-        print("Your party fainted. Run over!");
-        print("Type 'ok' to return, 'rogue' for a new run.");
-        state_ = State::RUN_OVER;
+        print("You lost!");
     }
+    print("Type 'fight' for another battle.");
+    state_ = State::READY;
+    printSep();
 }
 
 void MonsterMeshTerminal::describeBattleStatus()
@@ -348,32 +352,14 @@ void MonsterMeshTerminal::describeBattleStatus()
     }
 }
 
-void MonsterMeshTerminal::describePartyStatus()
-{
-    char buf[80];
-    snprintf(buf, sizeof(buf), "Party (Floor %u, Enc %u/%u):",
-             (unsigned)floor_, (unsigned)(encIdx_ + 1),
-             (unsigned)ENCOUNTERS_PER_FLOOR);
-    print(buf);
-    for (uint8_t i = 0; i < playerParty_.count; ++i) {
-        Gen1Pokemon &p = playerParty_.mons[i];
-        snprintf(buf, sizeof(buf), " %u) %.10s L%u  %u/%u HP",
-                 (unsigned)(i + 1),
-                 (const char *)playerParty_.nicknames[i],
-                 (unsigned)p.level,
-                 (unsigned)be16(p.hp),
-                 (unsigned)be16(p.maxHp));
-        print(buf);
-    }
-}
-
-// ── Party building ──────────────────────────────────────────────────────────
+// ── Wild opponent building ──────────────────────────────────────────────────
 
 void MonsterMeshTerminal::pickMovesForSpecies(uint8_t species, uint8_t outMoves[4])
 {
     const Gen1BaseStats &b = GEN1_BASE_STATS[species < 152 ? species : 0];
     uint8_t picked = 0;
     outMoves[0] = outMoves[1] = outMoves[2] = outMoves[3] = 0;
+    // STAB moves first.
     for (uint8_t i = 0; i < GEN1_MOVE_COUNT && picked < 4; ++i) {
         const Gen1MoveData &m = GEN1_MOVES[i];
         if (m.power == 0) continue;
@@ -381,6 +367,7 @@ void MonsterMeshTerminal::pickMovesForSpecies(uint8_t species, uint8_t outMoves[
         if (m.power < 40 || m.power > 100) continue;
         outMoves[picked++] = m.num;
     }
+    // Fill with Normal moves.
     for (uint8_t i = 0; i < GEN1_MOVE_COUNT && picked < 4; ++i) {
         const Gen1MoveData &m = GEN1_MOVES[i];
         if (m.power == 0 || m.type != 0) continue;
@@ -389,7 +376,7 @@ void MonsterMeshTerminal::pickMovesForSpecies(uint8_t species, uint8_t outMoves[
         for (uint8_t j = 0; j < picked; ++j) if (outMoves[j] == m.num) dup = true;
         if (!dup) outMoves[picked++] = m.num;
     }
-    if (picked == 0) { outMoves[0] = 33; outMoves[1] = 45; }
+    if (picked == 0) { outMoves[0] = 33; outMoves[1] = 45; } // Tackle, Growl
 }
 
 void MonsterMeshTerminal::writeBattlePokeToSave(Gen1Party &out, uint8_t slot,
@@ -419,26 +406,6 @@ void MonsterMeshTerminal::writeBattlePokeToSave(Gen1Party &out, uint8_t slot,
     snprintf((char *)out.nicknames[slot], 11, "%s", nick ? nick : "MON");
 }
 
-void MonsterMeshTerminal::buildDemoParty(Gen1Party &out)
-{
-    memset(&out, 0, sizeof(out));
-    out.count = 3;
-    struct { uint8_t species; uint8_t lvl; const char *nick; } members[3] = {
-        { 1, 5, "BULBASAUR" },
-        { 4, 5, "CHARMANDER" },
-        { 7, 5, "SQUIRTLE" },
-    };
-    for (uint8_t i = 0; i < 3; ++i) {
-        Gen1BattleEngine::BattlePoke tmp;
-        uint8_t moves[4];
-        pickMovesForSpecies(members[i].species, moves);
-        Gen1BattleEngine::initBattlePokeFromBase(
-            tmp, members[i].species, members[i].lvl, moves);
-        writeBattlePokeToSave(out, i, members[i].species, members[i].lvl,
-                              moves, tmp, 0xCC, members[i].nick);
-    }
-}
-
 void MonsterMeshTerminal::buildWildOpponent(Gen1Party &out, uint8_t avgLvl)
 {
     memset(&out, 0, sizeof(out));
@@ -452,34 +419,6 @@ void MonsterMeshTerminal::buildWildOpponent(Gen1Party &out, uint8_t avgLvl)
     pickMovesForSpecies(species, moves);
     Gen1BattleEngine::initBattlePokeFromBase(tmp, species, lvl, moves);
     writeBattlePokeToSave(out, 0, species, lvl, moves, tmp, 0x88, "WILD MON");
-}
-
-void MonsterMeshTerminal::buildBossOpponent(Gen1Party &out, uint8_t floorNum)
-{
-    memset(&out, 0, sizeof(out));
-    const BossDef &boss = BOSSES[(floorNum / FLOORS_PER_BOSS) % BOSS_COUNT];
-    out.count = 1;
-    int lvl = 5 + floorNum;
-    if (lvl > 99) lvl = 99;
-    Gen1BattleEngine::BattlePoke tmp;
-    uint8_t moves[4];
-    pickMovesForSpecies(boss.species, moves);
-    Gen1BattleEngine::initBattlePokeFromBase(tmp, boss.species, lvl, moves);
-    writeBattlePokeToSave(out, 0, boss.species, lvl, moves, tmp, 0xFF, boss.name);
-}
-
-void MonsterMeshTerminal::healFullParty()
-{
-    for (uint8_t i = 0; i < playerParty_.count; ++i) {
-        Gen1Pokemon &p = playerParty_.mons[i];
-        uint16_t maxHp = be16(p.maxHp);
-        setBe16(p.hp, maxHp);
-        p.status = 0;
-        for (int j = 0; j < 4; ++j) {
-            const Gen1MoveData *m = gen1Move(p.moves[j]);
-            if (m) p.pp[j] = m->pp;
-        }
-    }
 }
 
 uint32_t MonsterMeshTerminal::rand32()
