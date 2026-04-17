@@ -212,11 +212,9 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
     concurrency::LockGuard g(spiLock);
     Serial.printf("[EMU] step 2: spiLock acquired, calling SD.end()...\n"); Serial.flush();
 
-    // Full re-init of SD — end first, then begin fresh
     SD.end();
-    Serial.printf("[EMU] step 3: SD.end() done, SPI.begin()...\n"); Serial.flush();
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-    Serial.printf("[EMU] step 4: SPI.begin() done, SD.begin()...\n"); Serial.flush();
+    Serial.printf("[EMU] step 3: SD.end()+SPI.begin() done, SD.begin()...\n"); Serial.flush();
     bool sdOk = SD.begin(SDCARD_CS, SPI);
     Serial.printf("[EMU] SD re-init: %d cardType=%d\n", (int)sdOk, (int)SD.cardType());
     if (!sdOk) {
@@ -303,7 +301,7 @@ void MonsterMeshEmulator::loadSaveFile(const char *romPath) {
     romPathToSavePath(romPath, savPath, sizeof(savPath));
     Serial.printf("[EMU] loading save: %s (ROM: %s)\n", savPath, romPath);
 
-    // SD shares SPI bus — reinit before access
+    concurrency::LockGuard g(spiLock);
     SD.end();
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
     if (!SD.begin(SDCARD_CS, SPI)) {
@@ -326,7 +324,6 @@ void MonsterMeshEmulator::writeSaveFile(const char *romPath) {
     romPathToSavePath(romPath, savPath, sizeof(savPath));
     Serial.printf("[EMU] writing save: %s (ROM: %s)\n", savPath, romPath);
 
-    // SD shares SPI bus — reinit before access
     concurrency::LockGuard g(spiLock);
     SD.end();
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);

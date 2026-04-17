@@ -32,7 +32,6 @@ void MonsterMeshTerminal::init(lv_obj_t *outputPanel, lv_obj_t *inputTextarea)
     lineCount_     = 0;
     rng_           = (uint32_t)millis() ^ 0xA5A5A5A5u;
 
-    print("MonsterMesh Terminal v2.0");
     if (savParty_.count > 0) {
         print("Party loaded. Type 'party' to view.");
     } else {
@@ -142,6 +141,7 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
         print("party    show your 6 Pokemon");
         print("pick N   choose Pokemon N for battle");
         print("fight    battle a random opponent");
+        print("run      roguelike: fight til all faint");
         print("1..4     use move in battle");
         print("status   show battle status");
         print("quit     forfeit battle");
@@ -166,7 +166,20 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
         return;
     }
 
+    if (strcmp(cmd, "run") == 0) {
+        if (savParty_.count == 0) {
+            print("No party loaded. Waiting for SAV...");
+            return;
+        }
+        startRun();
+        return;
+    }
+
     if (strcmp(cmd, "fight") == 0) {
+        if (state_ == State::IN_RUN) {
+            startRunWave();
+            return;
+        }
         if (state_ != State::READY) {
             if (savParty_.count == 0)
                 print("No party loaded. Waiting for SAV...");
@@ -197,9 +210,15 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
     }
 
     if (strcmp(cmd, "quit") == 0) {
-        if (state_ == State::IN_BATTLE) {
+        if (state_ == State::IN_BATTLE || state_ == State::IN_RUN_BATTLE) {
+            runActive_ = false;
             state_ = State::READY;
             print("Battle forfeited.");
+            printSep();
+        } else if (state_ == State::IN_RUN) {
+            runActive_ = false;
+            state_ = State::READY;
+            print("Run abandoned.");
             printSep();
         } else {
             print("Not in battle.");
@@ -210,7 +229,7 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
     // Move: 1..4
     if (cmd[0] >= '1' && cmd[0] <= '4' &&
         (cmd[1] == 0 || cmd[1] == ' ')) {
-        if (state_ != State::IN_BATTLE) {
+        if (state_ != State::IN_BATTLE && state_ != State::IN_RUN_BATTLE) {
             print("Not in battle. Type 'fight'.");
             return;
         }
@@ -242,21 +261,23 @@ void MonsterMeshTerminal::showParty()
         return;
     }
 
-    print("Your party:");
-    char buf[64];
+    // Build entire party as one print so scroll-to-view lands at the header,
+    // not just the last line (which would push the party off screen).
+    char buf[512];
+    int pos = snprintf(buf, sizeof(buf), "Your party:");
     for (uint8_t i = 0; i < savParty_.count; ++i) {
         Gen1Pokemon &p = savParty_.mons[i];
         uint8_t lvl = p.level ? p.level : p.boxLevel;
         const char *marker = (i == chosenSlot_) ? " *" : "";
-        snprintf(buf, sizeof(buf), " %u) %.10s L%u  %u/%u HP%s",
-                 (unsigned)(i + 1),
-                 (const char *)savParty_.nicknames[i],
-                 (unsigned)lvl,
-                 (unsigned)be16(p.hp),
-                 (unsigned)be16(p.maxHp),
-                 marker);
-        print(buf);
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "\n %u) %.10s L%u  %u/%u HP%s",
+                        (unsigned)(i + 1),
+                        (const char *)savParty_.nicknames[i],
+                        (unsigned)lvl,
+                        (unsigned)be16(p.hp),
+                        (unsigned)be16(p.maxHp),
+                        marker);
     }
+    print(buf);
     printSep();
 }
 
@@ -312,7 +333,13 @@ void MonsterMeshTerminal::startBattle()
     engine_.start(battleParty_, oppParty_, rand32(), 1);
 
     printSep();
-    print("A wild foe appears!");
+    if (lastFoeSource_[0] != '\0') {
+        char msg[40];
+        snprintf(msg, sizeof(msg), "%s's Pokemon appears!", lastFoeSource_);
+        print(msg);
+    } else {
+        print("A wild foe appears!");
+    }
     describeBattleStatus();
     print("Use 1..4 to attack.");
     state_ = State::IN_BATTLE;
@@ -335,6 +362,33 @@ void MonsterMeshTerminal::resolvePlayerAction(uint8_t actionType, uint8_t index)
     }
 
     printSep();
+    if (state_ == State::IN_RUN_BATTLE) {
+        if (res == Gen1BattleEngine::Result::P1_WIN) {
+            syncRunPartyHpFromEngine();
+            char msg[48];
+            snprintf(msg, sizeof(msg), "Wave %u cleared!", (unsigned)waveNum_);
+            print(msg);
+            // Show remaining HP so player knows their state
+            uint8_t alive = 0;
+            for (uint8_t i = 0; i < runParty_.count; i++)
+                if (be16(runParty_.mons[i].hp) > 0) alive++;
+            snprintf(msg, sizeof(msg), "%u Pokemon still standing.", (unsigned)alive);
+            print(msg);
+            print("Type 'fight' for next wave.");
+            state_ = State::IN_RUN;
+        } else {
+            char msg[48];
+            snprintf(msg, sizeof(msg), "All Pokemon fainted. Wave %u.", (unsigned)waveNum_);
+            print(msg);
+            snprintf(msg, sizeof(msg), "Run over! You reached wave %u.", (unsigned)waveNum_);
+            print(msg);
+            runActive_ = false;
+            state_ = State::READY;
+        }
+        printSep();
+        return;
+    }
+
     if (res == Gen1BattleEngine::Result::P1_WIN) {
         print("You won!");
     } else {
@@ -429,7 +483,27 @@ void MonsterMeshTerminal::buildWildOpponent(Gen1Party &out, uint8_t avgLvl)
 {
     memset(&out, 0, sizeof(out));
     out.count = 1;
-    uint8_t species = WILD_POOL[rand32() % WILD_POOL_LEN];
+    lastFoeSource_[0] = '\0';
+
+    uint8_t species = 0;
+    const char *nick = "WILD MON";
+
+    if (meshPeerCount_ > 0) {
+        // Pick a random mesh peer's Pokemon as the opponent
+        const DaycareNeighborPokemon &peer = meshPeers_[rand32() % meshPeerCount_];
+        species = peer.speciesDex;
+        // Use Pokemon's nickname if set, otherwise the node's short name
+        nick = (peer.nickname[0] != '\0') ? peer.nickname : peer.shortName;
+        // Store trainer name for fight announcement
+        strncpy(lastFoeSource_, peer.shortName[0] ? peer.shortName : peer.gameName, 11);
+        lastFoeSource_[11] = '\0';
+    }
+
+    if (species == 0 || species > 151) {
+        species = WILD_POOL[rand32() % WILD_POOL_LEN];
+        lastFoeSource_[0] = '\0';
+    }
+
     int lvl = (int)avgLvl + ((int)(rand32() % 5) - 2);
     if (lvl < 2)  lvl = 2;
     if (lvl > 99) lvl = 99;
@@ -437,7 +511,7 @@ void MonsterMeshTerminal::buildWildOpponent(Gen1Party &out, uint8_t avgLvl)
     uint8_t moves[4];
     pickMovesForSpecies(species, moves);
     Gen1BattleEngine::initBattlePokeFromBase(tmp, species, lvl, moves);
-    writeBattlePokeToSave(out, 0, species, lvl, moves, tmp, 0x88, "WILD MON");
+    writeBattlePokeToSave(out, 0, species, lvl, moves, tmp, 0x88, nick);
 }
 
 uint32_t MonsterMeshTerminal::rand32()
@@ -447,4 +521,100 @@ uint32_t MonsterMeshTerminal::rand32()
     rng_ ^= rng_ << 5;
     if (rng_ == 0) rng_ = 0xCAFEBABEu;
     return rng_;
+}
+
+// ── Roguelike run ────────────────────────────────────────────────────────────
+
+uint8_t MonsterMeshTerminal::runAvgLevel() const
+{
+    if (savParty_.count == 0) return 5;
+    uint32_t sum = 0;
+    for (uint8_t i = 0; i < savParty_.count; i++) {
+        uint8_t lvl = savParty_.mons[i].level ? savParty_.mons[i].level : savParty_.mons[i].boxLevel;
+        sum += lvl;
+    }
+    return (uint8_t)(sum / savParty_.count);
+}
+
+void MonsterMeshTerminal::startRun()
+{
+    if (savParty_.count == 0) { print("No party loaded."); return; }
+
+    // Copy full party and heal all Pokemon to full HP
+    memcpy(&runParty_, &savParty_, sizeof(Gen1Party));
+    for (uint8_t i = 0; i < runParty_.count; i++) {
+        Gen1Pokemon &p = runParty_.mons[i];
+        setBe16(p.hp, be16(p.maxHp));
+        p.status = 0;
+        for (int j = 0; j < 4; j++) {
+            const Gen1MoveData *mv = gen1Move(p.moves[j]);
+            if (mv) p.pp[j] = mv->pp;
+        }
+    }
+
+    runActive_ = true;
+    waveNum_   = 0;
+
+    char msg[48];
+    snprintf(msg, sizeof(msg), "Run started! %u Pokemon healed.", (unsigned)runParty_.count);
+    print(msg);
+    if (meshPeerCount_ > 0) {
+        snprintf(msg, sizeof(msg), "%u mesh trainers nearby.", (unsigned)meshPeerCount_);
+        print(msg);
+    } else {
+        print("No mesh trainers nearby — fighting wild.");
+    }
+    print("Type 'fight' to begin wave 1.");
+    printSep();
+    state_ = State::IN_RUN;
+}
+
+void MonsterMeshTerminal::startRunWave()
+{
+    if (!runActive_ || runParty_.count == 0) { print("No run active."); return; }
+
+    // Check all fainted (shouldn't happen but guard it)
+    uint8_t alive = 0;
+    for (uint8_t i = 0; i < runParty_.count; i++)
+        if (be16(runParty_.mons[i].hp) > 0) alive++;
+    if (alive == 0) {
+        print("All Pokemon fainted. Run over.");
+        runActive_ = false;
+        state_ = State::READY;
+        return;
+    }
+
+    waveNum_++;
+
+    // Opponent level scales with wave: avg party level + wave * 3 (capped 99)
+    uint8_t avgLvl = runAvgLevel();
+    uint8_t oppLvl = avgLvl + waveNum_ * 3;
+    if (oppLvl > 99) oppLvl = 99;
+
+    buildWildOpponent(oppParty_, oppLvl);
+    engine_.start(runParty_, oppParty_, rand32(), 1);
+
+    char msg[48];
+    snprintf(msg, sizeof(msg), "-- Wave %u -- (foe L%u)", (unsigned)waveNum_, (unsigned)oppLvl);
+    print(msg);
+    if (lastFoeSource_[0] != '\0') {
+        snprintf(msg, sizeof(msg), "%s's Pokemon appears!", lastFoeSource_);
+        print(msg);
+    } else {
+        print("A wild foe appears!");
+    }
+    describeBattleStatus();
+    print("Use 1..4 to attack.");
+    state_ = State::IN_RUN_BATTLE;
+}
+
+void MonsterMeshTerminal::syncRunPartyHpFromEngine()
+{
+    const auto &ep = engine_.party(0);
+    for (uint8_t i = 0; i < runParty_.count && i < ep.count; i++) {
+        setBe16(runParty_.mons[i].hp, ep.mons[i].hp);
+        runParty_.mons[i].status = ep.mons[i].status;
+        // Sync PP
+        for (int j = 0; j < 4; j++) runParty_.mons[i].pp[j] = ep.mons[i].pp[j];
+    }
 }

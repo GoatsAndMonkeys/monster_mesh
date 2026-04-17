@@ -598,6 +598,10 @@ int32_t MonsterMeshModule::runOnce()
         terminal_.loadParty(terminalParty_);
         LOG_INFO("[MonsterMesh] Terminal party loaded from cache\n");
     }
+    // Keep terminal's mesh peer list current so fight uses real neighbors
+    if (terminal_.ready()) {
+        terminal_.setMeshPeers(daycare_.getNeighbors(), daycare_.getNeighborCount());
+    }
 #endif
 
     // Deferred auto-daycare check-in — wait 30s after setup so SPI bus
@@ -1214,6 +1218,33 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
     }
 
     // ── KEY mode: read 1-byte ASCII ──────────────────────────────────────
+    // Bare ALT has no ASCII code in KEY mode — peek RAW to detect it.
+    // This mirrors the !mmActive path so ALT exits the browser correctly.
+    {
+        Wire.beginTransmission(0x55);
+        Wire.write(0x03);  // switch to RAW temporarily
+        Wire.endTransmission();
+        Wire.requestFrom((uint8_t)0x55, (uint8_t)5);
+        uint8_t rb[5] = {};
+        for (int i = 0; i < 5 && Wire.available(); i++) rb[i] = Wire.read();
+        Wire.beginTransmission(0x55);
+        Wire.write(0x04);  // back to KEY mode
+        Wire.endTransmission();
+
+        bool altNow = (rb[0] & 0x10) != 0;
+        bool symNow = (rb[0] & 0x04) != 0;
+        if (altNow && !g_altWasHeldKey) {
+            g_altWasHeldKey = true;
+            uint32_t now = millis();
+            if (now - g_micLastToggleMs > 600 && monsterMeshModule) {
+                g_micLastToggleMs = now;
+                monsterMeshModule->handleKeyFromLVGL(symNow ? 0x06 : 0x05);
+                return;
+            }
+        }
+        if (!altNow) g_altWasHeldKey = false;
+    }
+
     Wire.requestFrom((uint8_t)0x55, (uint8_t)1);
     uint8_t key = Wire.available() ? Wire.read() : 0;
 
@@ -1480,6 +1511,12 @@ void MonsterMeshModule::scanlineCallback(uint8_t line, const uint16_t *pixels320
                                        int16_t screenY0, int16_t screenY1, void *ctx)
 {
     MonsterMeshModule *self = static_cast<MonsterMeshModule *>(ctx);
+    static uint32_t scDbgCount = 0;
+    scDbgCount++;
+    if (scDbgCount <= 10 || (scDbgCount & 0x3FF) == 0) {
+        Serial.printf("[SC] #%lu rf=%d fb=%p line=%d\n", scDbgCount, (int)self->renderFrame_, self->frameBuf_, line);
+        Serial.flush();
+    }
     if (!self->renderFrame_ || !self->frameBuf_) return;
 
     // Write scanline to PSRAM framebuffer with byte swap
@@ -1501,6 +1538,11 @@ void MonsterMeshModule::blitFrame()
     frameDirty_ = false;
 
     lgfx::LGFX_Device *gfx = getGfx();
+    static uint32_t blitCount = 0;
+    blitCount++;
+    if (blitCount <= 5 || (blitCount & 0xFF) == 0) {
+        Serial.printf("[BLIT] #%lu gfx=%p\n", blitCount, gfx); Serial.flush();
+    }
     if (!gfx) return;
 
     // Push in 4 chunks of 60 lines, releasing spiLock between chunks
@@ -1747,6 +1789,19 @@ void MonsterMeshModule::launchROM(const char *path)
         lv_label_set_text(g_browserLvLabel, "\n\n\n     Loading ROM...");
         lv_refr_now(lv_display_get_default());
     }
+
+    // CRITICAL: Pause LVGL refresh BEFORE any SD/SPI operations.
+    // LVGL flush writes to TFT via SPI — if it fires while loadROM()
+    // calls SD.end()/SPI.begin(), the shared SPI bus collides and hangs.
+    lv_display_t *disp = lv_display_get_default();
+    Serial.printf("[LAUNCH] pausing LVGL refresh before SD access\n"); Serial.flush();
+    if (disp) {
+        savedFlushCb_ = (void *)disp->flush_cb;
+        lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
+            lv_display_flush_ready(d);
+        });
+        if (disp->refr_timer) lv_timer_pause(disp->refr_timer);
+    }
 #endif
 
     // Browser returns SD-relative paths like "/pokemon.gb"
@@ -1761,6 +1816,16 @@ void MonsterMeshModule::launchROM(const char *path)
         LOG_WARN("[MonsterMesh] Failed to load ROM: %s\n", vfsPath);
         snprintf(setupStatusBuf_, sizeof(setupStatusBuf_), "FAIL: %s", vfsPath);
         setupStatus_ = setupStatusBuf_;
+#if HAS_TFT
+        // Restore LVGL flush on failure so UI works again
+        if (disp) {
+            if (savedFlushCb_) {
+                lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
+                savedFlushCb_ = nullptr;
+            }
+            if (disp->refr_timer) lv_timer_resume(disp->refr_timer);
+        }
+#endif
         browser_.markDirty();  // redraw browser
         return;
     }
@@ -1771,16 +1836,7 @@ void MonsterMeshModule::launchROM(const char *path)
 #if HAS_TFT
     Serial.printf("[LAUNCH] step B: hiding browser\n"); Serial.flush();
     lvgl_hide_browser();  // restore Meshtastic LVGL screen before emulator takes over
-    // Suppress LVGL flush + pause refresh timer so nothing bleeds through
-    lv_display_t *disp = lv_display_get_default();
-    Serial.printf("[LAUNCH] step C: suppressing LVGL flush disp=%p\n", disp); Serial.flush();
-    if (disp) {
-        savedFlushCb_ = (void *)disp->flush_cb;
-        lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
-            lv_display_flush_ready(d);
-        });
-        if (disp->refr_timer) lv_timer_pause(disp->refr_timer);
-    }
+    // LVGL flush already suppressed above — no need to do it again
 #endif
     emulatorActive_ = true;
     Serial.printf("[LAUNCH] step D: kb RAW mode\n"); Serial.flush();
@@ -1794,7 +1850,18 @@ void MonsterMeshModule::launchROM(const char *path)
             memset(frameBuf_, 0, PM_DISP_W * PM_DISP_H * sizeof(uint16_t));
             Serial.printf("[LAUNCH] Framebuffer allocated OK\n"); Serial.flush();
         } else {
-            Serial.printf("[LAUNCH] PSRAM framebuffer alloc FAILED\n"); Serial.flush();
+            Serial.printf("[LAUNCH] PSRAM framebuffer alloc FAILED — aborting launch\n"); Serial.flush();
+            emuInitialized_ = false;
+            emulatorActive_ = false;
+#if HAS_TFT
+            // Restore LVGL flush so UI works again
+            if (disp && savedFlushCb_) {
+                lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
+                savedFlushCb_ = nullptr;
+                if (disp->refr_timer) lv_timer_resume(disp->refr_timer);
+            }
+#endif
+            return;
         }
     }
 
@@ -1823,7 +1890,12 @@ void MonsterMeshModule::launchROM(const char *path)
     lgfx::LGFX_Device *gfx = getGfx();
     Serial.printf("[LAUNCH] gfx=%p\n", gfx); Serial.flush();
     if (gfx) {
+        // SD ops called SPI.begin() which reconfigures GPIO mux and can break
+        // LGFX's SPI device handle. Re-running begin() restores the panel.
+        gfx->begin();
         gfx->clearClipRect();
+        gfx->fillScreen(0x0000);
+        Serial.printf("[LAUNCH] gfx reinit + fillScreen done\n"); Serial.flush();
     }
 #endif
     Serial.printf("[LAUNCH] step I: done with LGFX\n"); Serial.flush();

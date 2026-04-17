@@ -20,6 +20,7 @@
 #include <Arduino.h>
 #include "Gen1BattleEngine.h"
 #include "PokemonData.h"
+#include "DaycareEventGen.h"
 #include "showdown_gen1_basestats.h"
 #include "showdown_gen1_moves.h"
 
@@ -43,11 +44,20 @@ public:
     // Set true when init fires and party isn't loaded yet; module checks this.
     bool needsPartyLoad() const { return needsLoad_; }
 
+    // Point to daycare's live neighbor list — called from runOnce() each tick.
+    // Pointer must remain valid (it points into PokemonDaycare's internal array).
+    void setMeshPeers(const DaycareNeighborPokemon *peers, uint8_t count) {
+        meshPeers_      = peers;
+        meshPeerCount_  = count;
+    }
+
 private:
     enum class State : uint8_t {
         IDLE,           // no party loaded or no Pokemon picked
         READY,          // Pokemon picked, waiting to fight
         IN_BATTLE,      // in a battle
+        IN_RUN,         // roguelike run active, between waves
+        IN_RUN_BATTLE,  // roguelike run, in a wave battle
     };
 
     static constexpr uint16_t MAX_OUTPUT_LINES = 200;
@@ -60,6 +70,16 @@ private:
     Gen1Party        oppParty_    = {};
     uint8_t          chosenSlot_  = 0xFF; // which of the 6 is active
     bool             needsLoad_   = false;
+
+    // Roguelike run state
+    bool      runActive_  = false;
+    uint8_t   waveNum_    = 0;
+    Gen1Party runParty_   = {};   // full party with HP persisted across waves
+
+    // Mesh peer list — pointer into PokemonDaycare::neighbors_ (not owned)
+    const DaycareNeighborPokemon *meshPeers_     = nullptr;
+    uint8_t                       meshPeerCount_ = 0;
+    char                          lastFoeSource_[12] = {};  // trainer short name of last opponent
 
     // LVGL objects (not owned)
     lv_obj_t *outputPanel_    = nullptr;
@@ -80,6 +100,10 @@ private:
     void startBattle();
     void resolvePlayerAction(uint8_t actionType, uint8_t index);
     void describeBattleStatus();
+    void startRun();
+    void startRunWave();
+    void syncRunPartyHpFromEngine();
+    uint8_t runAvgLevel() const;
 
     // Wild opponent generation
     void buildWildOpponent(Gen1Party &out, uint8_t level);
