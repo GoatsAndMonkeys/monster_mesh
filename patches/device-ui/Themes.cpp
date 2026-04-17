@@ -11,6 +11,7 @@
 #define DMG_TEXT    0xff0f380f  // darkest — primary text, icons
 
 LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_unscii_8;
+LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_13;
 
 static enum Themes::Theme theme = Themes::eDark;
 
@@ -208,7 +209,7 @@ void apply_style_panel_style_MAIN_DEFAULT(void)
     lv_style_set_text_color(style, lv_color_hex(THEME(ePanelText)));
     lv_style_set_border_color(style, lv_color_hex(THEME(ePanelBorder)));
     if (theme == Themes::eDark)
-        lv_style_set_text_line_space(style, 7);
+        lv_style_set_text_line_space(style, 4);
 };
 void apply_style_panel_style_MAIN_PRESSED(void)
 {
@@ -223,11 +224,9 @@ void apply_style_home_container_style(void)
     lv_style_set_border_side(style, LV_BORDER_SIDE_FULL);
     lv_style_set_bg_color(style, lv_color_hex(THEME(eHomeContainerBg)));
     lv_style_set_shadow_color(style, lv_color_hex(THEME(eHomeContainerShadow)));
-    lv_style_set_text_font(style, theme == Themes::eDark ? &lv_font_unscii_8 : &ui_font_montserrat_16);
+    lv_style_set_text_font(style, &ui_font_montserrat_16);
     lv_style_set_radius(style, 10);
     lv_style_set_text_color(style, lv_color_hex(THEME(eHomeContainerText)));
-    if (theme == Themes::eDark)
-        lv_style_set_text_line_space(style, 28);
 };
 void apply_style_settings_panel_style(void)
 {
@@ -243,10 +242,7 @@ void apply_style_node_panel_style(void)
     lv_style_t *style = get_style_node_panel_style_MAIN_DEFAULT();
     lv_style_set_bg_color(style, lv_color_hex(THEME(eNodePanelBg)));
     lv_style_set_border_color(style, lv_color_hex(THEME(eNodePanelBorder)));
-    lv_style_set_text_font(style, theme == Themes::eDark ? &lv_font_unscii_8 : &ui_font_montserrat_12);
     lv_style_set_text_color(style, lv_color_hex(THEME(eNodePanelText)));
-    if (theme == Themes::eDark)
-        lv_style_set_text_line_space(style, 20);
 };
 void apply_style_node_button_style(void)
 {
@@ -303,7 +299,7 @@ void apply_style_chat_message_style(void)
     lv_style_set_text_color(style, lv_color_hex(THEME(eChatMessageText)));
     lv_style_set_bg_opa(style, THEME(eChatMessageBgOpa));
     if (theme == Themes::eDark)
-        lv_style_set_text_line_space(style, 5);
+        lv_style_set_text_line_space(style, 2);
 };
 void apply_style_tab_view_style(void)
 {
@@ -342,8 +338,7 @@ void apply_style_main_screen_style(void)
     lv_style_t *style = get_style_main_screen_style_MAIN_DEFAULT();
     lv_style_set_bg_color(style, lv_color_hex(THEME(eMainScreenStyle)));
     if (theme == Themes::eDark) {
-        lv_style_set_text_font(style, &lv_font_unscii_8);
-        lv_style_set_text_line_space(style, 7);
+        lv_style_set_text_line_space(style, 3);
     }
 };
 void apply_style_channel_button_style(void)

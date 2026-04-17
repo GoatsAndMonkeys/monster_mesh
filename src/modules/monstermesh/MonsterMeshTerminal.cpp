@@ -93,7 +93,7 @@ void MonsterMeshTerminal::print(const char *text)
     lv_obj_t *label = lv_label_create(outputPanel_);
     lv_obj_set_width(label, LV_PCT(100));
     lv_obj_set_style_text_font(label, &lv_font_cozette_13, LV_PART_MAIN);
-    lv_obj_set_style_text_color(label, lv_color_hex(0xff0f380f), LV_PART_MAIN);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xff88C070), LV_PART_MAIN);
     lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     lv_label_set_text(label, text);
     lineCount_++;
@@ -104,7 +104,23 @@ void MonsterMeshTerminal::print(const char *text)
 
 void MonsterMeshTerminal::printSep()
 {
-    print("--------------------------------");
+    if (!outputPanel_) return;
+
+    if (lineCount_ >= MAX_OUTPUT_LINES) {
+        lv_obj_t *first = lv_obj_get_child(outputPanel_, 0);
+        if (first) lv_obj_del(first);
+        else lineCount_ = 0;
+    }
+
+    lv_obj_t *label = lv_label_create(outputPanel_);
+    lv_obj_set_width(label, LV_PCT(100));
+    lv_obj_set_style_text_font(label, &lv_font_cozette_13, LV_PART_MAIN);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xff306230), LV_PART_MAIN);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(label, "--------------------------------");
+    lineCount_++;
+
+    lv_obj_scroll_to_view(label, LV_ANIM_OFF);
 }
 
 void MonsterMeshTerminal::engineLogCb(const char *line, void *ctx)
