@@ -281,6 +281,31 @@ bool Gen1BattleEngine::pokeActsFirst(uint8_t side, uint8_t action, uint8_t targe
 
 // ── Logging helper ──────────────────────────────────────────────────────────
 
+// Emits a stat-change message and mutates `stage` by `delta` (+1 or -1).
+static void emitStatChange(Gen1BattleEngine::LogSink log, void *ctx,
+                           const char *nick, const char *statName,
+                           int8_t &stage, int8_t delta)
+{
+    if (!log) return;
+    char buf[64];
+    if (delta > 0) {
+        if (stage >= 6) {
+            snprintf(buf, sizeof(buf), "%.10s's %s can't go any higher!", nick, statName);
+        } else {
+            stage++;
+            snprintf(buf, sizeof(buf), "%.10s's %s rose!", nick, statName);
+        }
+    } else {
+        if (stage <= -6) {
+            snprintf(buf, sizeof(buf), "%.10s's %s can't go any lower!", nick, statName);
+        } else {
+            stage--;
+            snprintf(buf, sizeof(buf), "%.10s's %s fell!", nick, statName);
+        }
+    }
+    log(buf, ctx);
+}
+
 void Gen1BattleEngine::emit(LogSink log, void *ctx, const char *tmpl,
                             const char *poke, const char *move,
                             const char *target, int num)
@@ -488,18 +513,18 @@ void Gen1BattleEngine::applyMove(uint8_t side, uint8_t targetSide,
                 target.confuseTurns = 2 + (rand32() % 4);
                 emit(log, ctx, Gen1Text::STATUS_CONFUSE, target.nickname);
             } break;
-        case EFF_BOOST_ATK: if (user.atkBoost < 6) user.atkBoost++; break;
-        case EFF_BOOST_DEF: if (user.defBoost < 6) user.defBoost++; break;
-        case EFF_BOOST_SPD: if (user.spdBoost < 6) user.spdBoost++; break;
-        case EFF_BOOST_SPC: if (user.spcBoost < 6) user.spcBoost++; break;
-        case EFF_BOOST_ACC: if (user.accBoost < 6) user.accBoost++; break;
-        case EFF_BOOST_EVA: if (user.evaBoost < 6) user.evaBoost++; break;
-        case EFF_DROP_ATK:  if (target.atkBoost > -6) target.atkBoost--; break;
-        case EFF_DROP_DEF:  if (target.defBoost > -6) target.defBoost--; break;
-        case EFF_DROP_SPD:  if (target.spdBoost > -6) target.spdBoost--; break;
-        case EFF_DROP_SPC:  if (target.spcBoost > -6) target.spcBoost--; break;
-        case EFF_DROP_ACC:  if (target.accBoost > -6) target.accBoost--; break;
-        case EFF_DROP_EVA:  if (target.evaBoost > -6) target.evaBoost--; break;
+        case EFF_BOOST_ATK: emitStatChange(log, ctx, user.nickname, "Attack",   user.atkBoost,  1); break;
+        case EFF_BOOST_DEF: emitStatChange(log, ctx, user.nickname, "Defense",  user.defBoost,  1); break;
+        case EFF_BOOST_SPD: emitStatChange(log, ctx, user.nickname, "Speed",    user.spdBoost,  1); break;
+        case EFF_BOOST_SPC: emitStatChange(log, ctx, user.nickname, "Special",  user.spcBoost,  1); break;
+        case EFF_BOOST_ACC: emitStatChange(log, ctx, user.nickname, "accuracy", user.accBoost,  1); break;
+        case EFF_BOOST_EVA: emitStatChange(log, ctx, user.nickname, "evasion",  user.evaBoost,  1); break;
+        case EFF_DROP_ATK:  emitStatChange(log, ctx, target.nickname, "Attack",   target.atkBoost, -1); break;
+        case EFF_DROP_DEF:  emitStatChange(log, ctx, target.nickname, "Defense",  target.defBoost, -1); break;
+        case EFF_DROP_SPD:  emitStatChange(log, ctx, target.nickname, "Speed",    target.spdBoost, -1); break;
+        case EFF_DROP_SPC:  emitStatChange(log, ctx, target.nickname, "Special",  target.spcBoost, -1); break;
+        case EFF_DROP_ACC:  emitStatChange(log, ctx, target.nickname, "accuracy", target.accBoost, -1); break;
+        case EFF_DROP_EVA:  emitStatChange(log, ctx, target.nickname, "evasion",  target.evaBoost, -1); break;
         case EFF_FOCUS_ENERGY: p_[side].focused = true; break;
         case EFF_MIST:         p_[side].mist = true; break;
         case EFF_LIGHT_SCREEN: p_[side].lightScreen = true; p_[side].lightScreenTurns = 5; break;
