@@ -213,9 +213,8 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
     Serial.printf("[EMU] step 2: spiLock acquired, calling SD.end()...\n"); Serial.flush();
 
     SD.end();
-    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-    Serial.printf("[EMU] step 3: SD.end()+SPI.begin() done, SD.begin()...\n"); Serial.flush();
-    bool sdOk = SD.begin(SDCARD_CS, SPI);
+    Serial.printf("[EMU] step 3: SD.end() done, SD.begin()...\n"); Serial.flush();
+    bool sdOk = SD.begin(SDCARD_CS, SPI, 4000000U);
     Serial.printf("[EMU] SD re-init: %d cardType=%d\n", (int)sdOk, (int)SD.cardType());
     if (!sdOk) {
         Serial.printf("[EMU] SD.begin() failed\n");
@@ -303,8 +302,7 @@ void MonsterMeshEmulator::loadSaveFile(const char *romPath) {
 
     concurrency::LockGuard g(spiLock);
     SD.end();
-    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-    if (!SD.begin(SDCARD_CS, SPI)) {
+    if (!SD.begin(SDCARD_CS, SPI, 4000000U)) {
         Serial.println("[EMU] SD reinit failed for save load");
         return;
     }
@@ -326,8 +324,7 @@ void MonsterMeshEmulator::writeSaveFile(const char *romPath) {
 
     concurrency::LockGuard g(spiLock);
     SD.end();
-    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-    if (!SD.begin(SDCARD_CS, SPI)) {
+    if (!SD.begin(SDCARD_CS, SPI, 4000000U)) {
         Serial.printf("[EMU] SD reinit failed for save write\n");
         return;
     }

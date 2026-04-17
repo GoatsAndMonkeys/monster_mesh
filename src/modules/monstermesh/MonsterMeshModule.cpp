@@ -1654,12 +1654,7 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
 #endif
             kbSetMode(true);
         } else {
-            // No ROM loaded — open file browser (only after daycare save-read is done)
-            if (!checkInDone_) {
-                LOG_INFO("[MonsterMesh] ALT → browser blocked, save not loaded yet\n");
-                setupStatus_ = "Loading save...";
-                return;
-            }
+            // No ROM loaded — open file browser
             LOG_INFO("[MonsterMesh] ALT → opening browser\n");
             kbSetMode(false);  // ensure KEY mode for browser navigation
             browserActive_ = true;
@@ -1708,11 +1703,6 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
 
         if (!setupDone_) {
             LOG_WARN("[MonsterMesh] not ready — status: %s\n", setupStatus_);
-            return;
-        }
-        if (!checkInDone_) {
-            LOG_INFO("[MonsterMesh] Sym+Alt → browser blocked, save not loaded yet\n");
-            setupStatus_ = "Loading save...";
             return;
         }
         LOG_INFO("[MonsterMesh] Sym+Alt → opening browser\n");
@@ -1875,22 +1865,19 @@ void MonsterMeshModule::launchROM(const char *path)
         }
     }
 
-    // LGFX reinit BEFORE tasks start — SD ops called SPI.begin() which
-    // reconfigures GPIO mux and breaks LGFX's SPI device handle.
-    // Must happen before render task is created; otherwise blitFrame()
-    // calls gfx->pushImage() on an uninitialised panel and gets a black screen.
-    Serial.printf("[LAUNCH] step F: LGFX reinit\n"); Serial.flush();
+    // Clear screen before tasks start so render task starts on a known black canvas.
+    // No gfx->begin() needed: SD.begin() no longer calls SPI.begin() so LGFX's
+    // GPIO mux and SPI device handle are unaffected by the ROM load.
+    Serial.printf("[LAUNCH] step F: clear screen\n"); Serial.flush();
 #if HAS_TFT
     {
         lgfx::LGFX_Device *gfx = getGfx();
         Serial.printf("[LAUNCH] gfx=%p\n", gfx); Serial.flush();
         if (gfx) {
             concurrency::LockGuard g(spiLock);
-            gfx->begin();
-            gfx->setRotation(1);  // landscape
             gfx->clearClipRect();
             gfx->fillScreen(0x0000);
-            Serial.printf("[LAUNCH] gfx reinit + fillScreen done\n"); Serial.flush();
+            Serial.printf("[LAUNCH] fillScreen done\n"); Serial.flush();
         }
     }
 #endif
@@ -2044,22 +2031,21 @@ void MonsterMeshModule::daycareAutoCheckIn()
     {
         concurrency::LockGuard g(spiLock);
         SD.end();
-        SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
         if (!SD.begin(SDCARD_CS, SPI, 4000000U)) {
             LOG_WARN("[MonsterMesh] auto-daycare: SD re-init failed\n");
-            checkInDone_ = true;
+            
             return;
         }
         File lrf = SD.open("/last_rom.txt", FILE_READ);
         if (!lrf) {
             LOG_INFO("[MonsterMesh] no /last_rom.txt — skipping auto-daycare\n");
-            checkInDone_ = true;
+            
             return;
         }
         len = lrf.readBytes(romPath, sizeof(romPath) - 1);
         lrf.close();
     }
-    if (len == 0) { checkInDone_ = true; return; }
+    if (len == 0) {  return; }
     romPath[len] = '\0';
     while (len > 0 && (romPath[len-1] == '\n' || romPath[len-1] == '\r' || romPath[len-1] == ' '))
         romPath[--len] = '\0';
@@ -2071,7 +2057,7 @@ void MonsterMeshModule::daycareAutoCheckIn()
     uint8_t *sram = static_cast<uint8_t *>(ps_malloc(0x8000));
     if (!sram) {
         LOG_WARN("[MonsterMesh] auto-daycare: PSRAM alloc failed\n");
-        checkInDone_ = true;
+        
         return;
     }
     memset(sram, 0, 0x8000);
@@ -2081,18 +2067,17 @@ void MonsterMeshModule::daycareAutoCheckIn()
     {
         concurrency::LockGuard g(spiLock);
         SD.end();
-        SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
         if (!SD.begin(SDCARD_CS, SPI, 4000000U)) {
             LOG_WARN("[MonsterMesh] auto-daycare: SD re-init failed for .sav\n");
             free(sram);
-            checkInDone_ = true;
+            
             return;
         }
         File sf = SD.open(savPath, FILE_READ);
         if (!sf) {
             LOG_INFO("[MonsterMesh] no save file '%s' — skipping auto-daycare\n", savPath);
             free(sram);
-            checkInDone_ = true;
+            
             return;
         }
         n = sf.read(sram, 0x8000);
@@ -2102,7 +2087,7 @@ void MonsterMeshModule::daycareAutoCheckIn()
 
     if (n == 0) {
         free(sram);
-        checkInDone_ = true;
+        
         return;
     }
 
@@ -2137,7 +2122,7 @@ void MonsterMeshModule::daycareAutoCheckIn()
         LOG_INFO("[MonsterMesh] auto-daycare: beacon + event sent\n");
         setupStatus_ = "Daycare active";
     }
-    checkInDone_ = true;
+    
 }
 
 // ── Build Gen1Party with decoded ASCII nicknames from raw SRAM ──────────────

@@ -194,7 +194,6 @@ private:
     void daycareStatus(uint32_t replyTo);
     void daycareAutoCheckIn();  // load last .sav from SD, auto check-in without emulator
     bool pendingAutoCheckin_  = false;
-    bool checkInDone_         = false;  // set true after daycareAutoCheckIn() completes (or skips)
 
     // Cached party from SAV for terminal use (decoded nicknames).
     Gen1Party terminalParty_ = {};
