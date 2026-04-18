@@ -26,21 +26,12 @@
 #include <lvgl.h>
 #include "display/lv_display_private.h"
 #include "indev/lv_indev_private.h"
-#include "generated/ui_320x240/screens.h"
 
 // UNSCII 16px pixel font — declared manually because lv_conf.h disables it
 LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_unscii_8;
 #endif
 
 MonsterMeshModule *monsterMeshModule = nullptr;
-
-// Called from device-ui event handler when Enter is pressed in the terminal input
-extern "C" void monsterMeshTerminalSubmit()
-{
-    if (monsterMeshModule && monsterMeshModule->terminal().ready()) {
-        monsterMeshModule->terminal().submitCommand();
-    }
-}
 
 // Weak default — device-ui provides the real implementation when present
 extern "C" __attribute__((weak)) void monstermesh_set_toggle_cb(void (*cb)(void)) { (void)cb; }
@@ -580,33 +571,14 @@ int32_t MonsterMeshModule::runOnce()
         setupStatus_ = "MonsterMesh ready";
         LOG_INFO("[MonsterMesh] SD ready — waiting for user to open MonsterMesh\n");
 
-        // Terminal init is deferred — see below
-
         // Defer auto-daycare to next runOnce() tick — doing 32KB SD read
         // inline here blocks spiLock too long and starves the radio task.
         pendingAutoCheckin_ = true;
     }
 
-    // Deferred terminal init — screens may not be created yet when setupDone_ fires
-#if HAS_TFT
-    if (!terminal_.ready() && objects.mm_terminal_output && objects.mm_terminal_input) {
-        terminal_.init(objects.mm_terminal_output, objects.mm_terminal_input);
-        LOG_INFO("[MonsterMesh] Terminal initialized\n");
-    }
-    // Pass cached SAV party to terminal when it requests it.
-    if (terminal_.ready() && terminal_.needsPartyLoad() && terminalPartyReady_) {
-        terminal_.loadParty(terminalParty_);
-        LOG_INFO("[MonsterMesh] Terminal party loaded from cache\n");
-    }
-    // Keep terminal's mesh peer list current so fight uses real neighbors
-    if (terminal_.ready()) {
-        terminal_.setMeshPeers(daycare_.getNeighbors(), daycare_.getNeighborCount());
-    }
-#endif
-
     // Deferred auto-daycare check-in — wait 30s after setup so SPI bus
     // is settled (TFT, radio, LVGL all initialized and not contending).
-    if (pendingAutoCheckin_ && millis() > 38000) {
+    if (pendingAutoCheckin_ && !browserActive_ && !emulatorActive_ && millis() > 38000) {
         pendingAutoCheckin_ = false;
         daycareAutoCheckIn();
     }
@@ -856,54 +828,14 @@ static lv_obj_t *g_browserInner    = nullptr;  // dark inner panel
 static lv_obj_t *g_browserTitle    = nullptr;  // "GAME PAK" title bar
 static lv_obj_t *g_browserFooter   = nullptr;  // bottom hint bar
 
-// Theme-aware GB palette for the ROM browser
-#include "graphics/view/TFT/Themes.h"
-
-struct GBPalette {
-    lv_color_t c[4];         // [0]=darkest, [1]=dark, [2]=light, [3]=lightest
-    char hex[4][7];           // hex strings for LVGL recolor markup (no #)
-};
-
-static GBPalette getBrowserPalette()
-{
-    GBPalette p;
-    // Palette shades: [0]=darkest bg, [1]=dark panel, [2]=light accent, [3]=lightest text
-    struct { uint32_t c[4]; } palettes[] = {
-        // DMG:    darkest,    dark,       light,      lightest
-        {{0x0F380F, 0x306230, 0x8BAC0F, 0x9BBC0F}},
-        // GBC:
-        {{0x081820, 0x346856, 0x88C070, 0xE0F8D0}},
-        // Pocket:
-        {{0x0F380F, 0x306230, 0x88D048, 0xC4E878}},
-    };
-    int idx = 0;
-    auto th = Themes::get();
-    if (th == Themes::eGbcGreen)    idx = 1;
-    else if (th == Themes::ePocketGreen) idx = 2;
-    // Dark/Light themes default to DMG palette for the browser
-    for (int i = 0; i < 4; i++) {
-        p.c[i] = lv_color_hex(0xff000000 | palettes[idx].c[i]);
-        snprintf(p.hex[i], 7, "%06X", (unsigned)palettes[idx].c[i]);
-    }
-    return p;
-}
-
 static void lvgl_show_browser(MonsterMeshFileBrowser &b)
 {
-    GBPalette pal = getBrowserPalette();
-    lv_color_t GB_00 = pal.c[3];  // lightest
-    lv_color_t GB_01 = pal.c[2];  // light
-    lv_color_t GB_10 = pal.c[1];  // dark
-    lv_color_t GB_11 = pal.c[0];  // darkest
-
-    // Recreate browser screen if theme changed (colors are baked into LVGL objects)
-    static int lastTheme = -1;
-    int curTheme = (int)Themes::get();
-    if (g_browserLvScr && curTheme != lastTheme) {
-        lv_obj_del(g_browserLvScr);
-        g_browserLvScr = g_browserLvLabel = g_browserBorder = g_browserInner = g_browserTitle = g_browserFooter = nullptr;
-    }
-    lastTheme = curTheme;
+    // ── Classic Game Boy DMG green palette ─────────────────────────────
+    // 00 lightest #E0F8D0, 01 light #88C070, 10 dark #346856, 11 darkest #081820
+    static constexpr lv_color_t GB_00 = {.blue = 0xD0, .green = 0xF8, .red = 0xE0};  // lightest
+    static constexpr lv_color_t GB_01 = {.blue = 0x70, .green = 0xC0, .red = 0x88};  // light
+    static constexpr lv_color_t GB_10 = {.blue = 0x56, .green = 0x68, .red = 0x34};  // dark
+    static constexpr lv_color_t GB_11 = {.blue = 0x20, .green = 0x18, .red = 0x08};  // darkest
 
     if (!g_browserLvScr) {
         // Screen background — darkest green
@@ -995,17 +927,18 @@ static void lvgl_show_browser(MonsterMeshFileBrowser &b)
             if (isEjectEntry) {
                 if (b.isConfirmingEject() && i == b.cursor()) {
                     pos += snprintf(buf+pos, sizeof(buf)-pos,
-                                    "%s#%s Eject cart? K to confirm#\n", cursor, pal.hex[0]);
+                                    "%s#081820 Eject cart? K to confirm#\n", cursor);  // darkest
                 } else {
                     pos += snprintf(buf+pos, sizeof(buf)-pos,
-                                    "%s#%s %s#\n", cursor, pal.hex[0], e.name);
+                                    "%s#081820 %s#\n", cursor, e.name);  // darkest
                 }
             } else if (e.isDir) {
-                pos += snprintf(buf+pos, sizeof(buf)-pos, "%s#%s [%s]#\n", cursor, pal.hex[2], e.name);
+                pos += snprintf(buf+pos, sizeof(buf)-pos, "%s#88C070 [%s]#\n", cursor, e.name);  // light green
             } else if (e.hasSave) {
-                pos += snprintf(buf+pos, sizeof(buf)-pos, "%s#%s %s [SAV]#\n", cursor, pal.hex[3], e.name);
+                // Save file — lightest, with star
+                pos += snprintf(buf+pos, sizeof(buf)-pos, "%s#E0F8D0 %s [SAV]#\n", cursor, e.name);
             } else {
-                pos += snprintf(buf+pos, sizeof(buf)-pos, "%s#%s %s#\n", cursor, pal.hex[2], e.name);
+                pos += snprintf(buf+pos, sizeof(buf)-pos, "%s#88C070 %s#\n", cursor, e.name);  // light green
             }
         }
     }
@@ -1218,33 +1151,6 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
     }
 
     // ── KEY mode: read 1-byte ASCII ──────────────────────────────────────
-    // Bare ALT has no ASCII code in KEY mode — peek RAW to detect it.
-    // This mirrors the !mmActive path so ALT exits the browser correctly.
-    {
-        Wire.beginTransmission(0x55);
-        Wire.write(0x03);  // switch to RAW temporarily
-        Wire.endTransmission();
-        Wire.requestFrom((uint8_t)0x55, (uint8_t)5);
-        uint8_t rb[5] = {};
-        for (int i = 0; i < 5 && Wire.available(); i++) rb[i] = Wire.read();
-        Wire.beginTransmission(0x55);
-        Wire.write(0x04);  // back to KEY mode
-        Wire.endTransmission();
-
-        bool altNow = (rb[0] & 0x10) != 0;
-        bool symNow = (rb[0] & 0x04) != 0;
-        if (altNow && !g_altWasHeldKey) {
-            g_altWasHeldKey = true;
-            uint32_t now = millis();
-            if (now - g_micLastToggleMs > 600 && monsterMeshModule) {
-                g_micLastToggleMs = now;
-                monsterMeshModule->handleKeyFromLVGL(symNow ? 0x06 : 0x05);
-                return;
-            }
-        }
-        if (!altNow) g_altWasHeldKey = false;
-    }
-
     Wire.requestFrom((uint8_t)0x55, (uint8_t)1);
     uint8_t key = Wire.available() ? Wire.read() : 0;
 
@@ -1373,7 +1279,6 @@ void MonsterMeshModule::emuTaskEntry(void *pv)
 
 void MonsterMeshModule::emuTaskLoop()
 {
-    Serial.printf("[EMU-TASK] entered emuTaskLoop on core %d\n", xPortGetCoreID()); Serial.flush();
     const TickType_t framePeriod = pdMS_TO_TICKS(16);  // ~60fps
     TickType_t lastWake = xTaskGetTickCount();
     uint8_t frameCount = 0;
@@ -1495,7 +1400,6 @@ void MonsterMeshModule::renderTaskEntry(void *pv)
 
 void MonsterMeshModule::renderTaskLoop()
 {
-    Serial.printf("[RENDER-TASK] entered renderTaskLoop on core %d\n", xPortGetCoreID()); Serial.flush();
     while (true) {
         if (emulatorActive_ && frameDirty_) {
             blitFrame();
@@ -1511,12 +1415,6 @@ void MonsterMeshModule::scanlineCallback(uint8_t line, const uint16_t *pixels320
                                        int16_t screenY0, int16_t screenY1, void *ctx)
 {
     MonsterMeshModule *self = static_cast<MonsterMeshModule *>(ctx);
-    static uint32_t scDbgCount = 0;
-    scDbgCount++;
-    if (scDbgCount <= 10 || (scDbgCount & 0x3FF) == 0) {
-        Serial.printf("[SC] #%lu rf=%d fb=%p line=%d\n", scDbgCount, (int)self->renderFrame_, self->frameBuf_, line);
-        Serial.flush();
-    }
     if (!self->renderFrame_ || !self->frameBuf_) return;
 
     // Write scanline to PSRAM framebuffer with byte swap
@@ -1538,11 +1436,6 @@ void MonsterMeshModule::blitFrame()
     frameDirty_ = false;
 
     lgfx::LGFX_Device *gfx = getGfx();
-    static uint32_t blitCount = 0;
-    blitCount++;
-    if (blitCount <= 5 || (blitCount & 0xFF) == 0) {
-        Serial.printf("[BLIT] #%lu gfx=%p\n", blitCount, gfx); Serial.flush();
-    }
     if (!gfx) return;
 
     // Push in 4 chunks of 60 lines, releasing spiLock between chunks
@@ -1782,19 +1675,15 @@ void MonsterMeshModule::renderBrowser()
 
 void MonsterMeshModule::launchROM(const char *path)
 {
-    // Show "Loading ROM..." on the browser screen so the user
-    // knows the 2-3s SD read is happening (not a freeze)
+    // Show "Loading ROM..." then immediately suppress LVGL so the SD read
+    // doesn't race with the TFT flush on the shared SPI bus.
 #if HAS_TFT
     if (g_browserLvLabel) {
         lv_label_set_text(g_browserLvLabel, "\n\n\n     Loading ROM...");
         lv_refr_now(lv_display_get_default());
     }
-
-    // CRITICAL: Pause LVGL refresh BEFORE any SD/SPI operations.
-    // LVGL flush writes to TFT via SPI — if it fires while loadROM()
-    // calls SD.end()/SPI.begin(), the shared SPI bus collides and hangs.
+    // Pause LVGL BEFORE any SD I/O — TFT and SD share the SPI bus.
     lv_display_t *disp = lv_display_get_default();
-    Serial.printf("[LAUNCH] pausing LVGL refresh before SD access\n"); Serial.flush();
     if (disp) {
         savedFlushCb_ = (void *)disp->flush_cb;
         lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
@@ -1810,87 +1699,56 @@ void MonsterMeshModule::launchROM(const char *path)
     snprintf(vfsPath, sizeof(vfsPath), "/sd%s", path);
     LOG_INFO("[MonsterMesh] Launching ROM: %s\n", vfsPath);
 
-    // Don't hold spiLock here — SD.open() needs SPI access internally
     bool romOk = emu_.begin(vfsPath);
     if (!romOk) {
         LOG_WARN("[MonsterMesh] Failed to load ROM: %s\n", vfsPath);
         snprintf(setupStatusBuf_, sizeof(setupStatusBuf_), "FAIL: %s", vfsPath);
         setupStatus_ = setupStatusBuf_;
+        // Restore LVGL before returning to browser
 #if HAS_TFT
-        // Restore LVGL flush on failure so UI works again
-        if (disp) {
-            if (savedFlushCb_) {
-                lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
-                savedFlushCb_ = nullptr;
-            }
-            if (disp->refr_timer) lv_timer_resume(disp->refr_timer);
+        if (disp && savedFlushCb_) {
+            lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
+            savedFlushCb_ = nullptr;
         }
+        if (disp && disp->refr_timer) lv_timer_resume(disp->refr_timer);
 #endif
-        browser_.markDirty();  // redraw browser
+        browser_.markDirty();
         return;
     }
 
-    Serial.printf("[LAUNCH] step A: begin() OK, setting flags\n"); Serial.flush();
-    emuInitialized_ = true;
-    browserActive_ = false;
-#if HAS_TFT
-    Serial.printf("[LAUNCH] step B: hiding browser\n"); Serial.flush();
-    lvgl_hide_browser();  // restore Meshtastic LVGL screen before emulator takes over
-    // LVGL flush already suppressed above — no need to do it again
-#endif
-    emulatorActive_ = true;
-    Serial.printf("[LAUNCH] step D: kb RAW mode\n"); Serial.flush();
-    kbSetMode(true);  // switch keyboard to RAW mode for emulator input
-
-    // Allocate PSRAM framebuffer for rendering (320x240 RGB565 = 153,600 bytes)
-    Serial.printf("[LAUNCH] step E: frameBuf=%p freePSRAM=%u\n", frameBuf_, (unsigned)ESP.getFreePsram()); Serial.flush();
+    // Bail early if PSRAM framebuffer can't be allocated
     if (!frameBuf_) {
         frameBuf_ = static_cast<uint16_t *>(ps_malloc(PM_DISP_W * PM_DISP_H * sizeof(uint16_t)));
-        if (frameBuf_) {
-            memset(frameBuf_, 0, PM_DISP_W * PM_DISP_H * sizeof(uint16_t));
-            Serial.printf("[LAUNCH] Framebuffer allocated OK\n"); Serial.flush();
-        } else {
-            Serial.printf("[LAUNCH] PSRAM framebuffer alloc FAILED — aborting launch\n"); Serial.flush();
-            emuInitialized_ = false;
-            emulatorActive_ = false;
+        if (!frameBuf_) {
+            LOG_WARN("[MonsterMesh] PSRAM framebuffer alloc failed — aborting ROM launch\n");
 #if HAS_TFT
-            // Restore LVGL flush so UI works again
             if (disp && savedFlushCb_) {
                 lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
                 savedFlushCb_ = nullptr;
-                if (disp->refr_timer) lv_timer_resume(disp->refr_timer);
             }
+            if (disp && disp->refr_timer) lv_timer_resume(disp->refr_timer);
 #endif
+            browser_.markDirty();
             return;
         }
+        memset(frameBuf_, 0, PM_DISP_W * PM_DISP_H * sizeof(uint16_t));
     }
 
-    // Clear screen before tasks start so render task starts on a known black canvas.
-    // No gfx->begin() needed: SD.begin() no longer calls SPI.begin() so LGFX's
-    // GPIO mux and SPI device handle are unaffected by the ROM load.
-    Serial.printf("[LAUNCH] step F: clear screen\n"); Serial.flush();
+    emuInitialized_ = true;
+    browserActive_ = false;
 #if HAS_TFT
-    {
-        lgfx::LGFX_Device *gfx = getGfx();
-        Serial.printf("[LAUNCH] gfx=%p\n", gfx); Serial.flush();
-        if (gfx) {
-            concurrency::LockGuard g(spiLock);
-            gfx->clearClipRect();
-            gfx->fillScreen(0x0000);
-            Serial.printf("[LAUNCH] fillScreen done\n"); Serial.flush();
-        }
-    }
+    lvgl_hide_browser();
 #endif
+    emulatorActive_ = true;
+    kbSetMode(true);  // switch keyboard to RAW mode for emulator input
 
     // Create emulator FreeRTOS task on Core 1 (high priority — never stalls)
-    Serial.printf("[LAUNCH] step G: creating emu task\n"); Serial.flush();
     if (!emuTaskHandle_) {
         xTaskCreatePinnedToCore(
             emuTaskEntry, "monstermesh_emu",
             16384, this, 5, &emuTaskHandle_, 1
         );
     }
-    Serial.printf("[LAUNCH] step H: creating render task\n"); Serial.flush();
 
     // Create render task on Core 0 (lower priority — blits framebuffer to TFT
     // without blocking the emulator task, so audio stays smooth)
@@ -1900,11 +1758,18 @@ void MonsterMeshModule::launchROM(const char *path)
             4096, this, 2, &renderTaskHandle_, 0
         );
     }
-    Serial.printf("[LAUNCH] step I: tasks created\n"); Serial.flush();
+
+    // Set up LGFX for emulator rendering (LVGL flush already suppressed)
+#if HAS_TFT
+    lgfx::LGFX_Device *gfx = getGfx();
+    if (gfx) {
+        gfx->clearClipRect();
+    }
+#endif
 
     kbSetMode(true);  // RAW mode for held-key d-pad input
     setupStatus_ = "Playing!";
-    Serial.printf("[LAUNCH] step J: saving last_rom.txt\n"); Serial.flush();
+    LOG_INFO("[MonsterMesh] ROM loaded, emulator started\n");
 
     // Remember this ROM path for auto-daycare on next boot
     {
@@ -2031,21 +1896,20 @@ void MonsterMeshModule::daycareAutoCheckIn()
     {
         concurrency::LockGuard g(spiLock);
         SD.end();
+        SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
         if (!SD.begin(SDCARD_CS, SPI, 4000000U)) {
             LOG_WARN("[MonsterMesh] auto-daycare: SD re-init failed\n");
-            
             return;
         }
         File lrf = SD.open("/last_rom.txt", FILE_READ);
         if (!lrf) {
             LOG_INFO("[MonsterMesh] no /last_rom.txt — skipping auto-daycare\n");
-            
             return;
         }
         len = lrf.readBytes(romPath, sizeof(romPath) - 1);
         lrf.close();
     }
-    if (len == 0) {  return; }
+    if (len == 0) return;
     romPath[len] = '\0';
     while (len > 0 && (romPath[len-1] == '\n' || romPath[len-1] == '\r' || romPath[len-1] == ' '))
         romPath[--len] = '\0';
@@ -2057,7 +1921,6 @@ void MonsterMeshModule::daycareAutoCheckIn()
     uint8_t *sram = static_cast<uint8_t *>(ps_malloc(0x8000));
     if (!sram) {
         LOG_WARN("[MonsterMesh] auto-daycare: PSRAM alloc failed\n");
-        
         return;
     }
     memset(sram, 0, 0x8000);
@@ -2067,17 +1930,16 @@ void MonsterMeshModule::daycareAutoCheckIn()
     {
         concurrency::LockGuard g(spiLock);
         SD.end();
+        SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
         if (!SD.begin(SDCARD_CS, SPI, 4000000U)) {
             LOG_WARN("[MonsterMesh] auto-daycare: SD re-init failed for .sav\n");
             free(sram);
-            
             return;
         }
         File sf = SD.open(savPath, FILE_READ);
         if (!sf) {
             LOG_INFO("[MonsterMesh] no save file '%s' — skipping auto-daycare\n", savPath);
             free(sram);
-            
             return;
         }
         n = sf.read(sram, 0x8000);
@@ -2087,7 +1949,6 @@ void MonsterMeshModule::daycareAutoCheckIn()
 
     if (n == 0) {
         free(sram);
-        
         return;
     }
 
@@ -2103,9 +1964,6 @@ void MonsterMeshModule::daycareAutoCheckIn()
     LOG_INFO("[MonsterMesh] auto-daycare: trainer='%s' node='%s'\n", gameName, shortName);
 
     daycare_.checkIn(sram, shortName, gameName);
-
-    // Build terminal party from SRAM before freeing.
-    buildTerminalPartyFromSram(sram);
     free(sram);
 
     if (daycare_.isActive()) {
@@ -2122,39 +1980,6 @@ void MonsterMeshModule::daycareAutoCheckIn()
         LOG_INFO("[MonsterMesh] auto-daycare: beacon + event sent\n");
         setupStatus_ = "Daycare active";
     }
-    
-}
-
-// ── Build Gen1Party with decoded ASCII nicknames from raw SRAM ──────────────
-
-void MonsterMeshModule::buildTerminalPartyFromSram(const uint8_t *sram)
-{
-    memset(&terminalParty_, 0, sizeof(terminalParty_));
-    uint8_t count = sram[SAV_PARTY_COUNT];
-    if (count > 6) count = 6;
-    terminalParty_.count = count;
-
-    // Copy species list.
-    memcpy(terminalParty_.species, &sram[SAV_SPECIES_LIST], 7);
-
-    // Copy raw Gen1Pokemon structs (binary-compatible).
-    memcpy(terminalParty_.mons, &sram[SAV_POKEMON_DATA], count * sizeof(Gen1Pokemon));
-
-    // Decode nicknames from Gen 1 text encoding to ASCII.
-    for (uint8_t i = 0; i < count; ++i) {
-        const uint8_t *nickRaw = &sram[SAV_NICKNAMES + i * SAV_NAME_SIZE];
-        for (int j = 0; j < 10; ++j) {
-            if (nickRaw[j] == SAV_STRING_TERMINATOR) {
-                terminalParty_.nicknames[i][j] = 0;
-                break;
-            }
-            terminalParty_.nicknames[i][j] = (uint8_t)gen1CharToAscii(nickRaw[j]);
-            if (j == 9) terminalParty_.nicknames[i][10] = 0;
-        }
-    }
-
-    terminalPartyReady_ = true;
-    LOG_INFO("[MonsterMesh] terminal party: %u pokemon cached\n", (unsigned)count);
 }
 
 #endif // T_DECK && !MESHTASTIC_EXCLUDE_MONSTERMESH

@@ -202,19 +202,17 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
     if (strncmp(path, "/sd", 3) == 0 && path[3] == '\0') sdPath = "/";
 
     Serial.printf("[EMU] loadROM: path='%s' sdPath='%s'\n", path, sdPath);
-    Serial.flush();
 
     // Free previous ROM if reloading
     if (romData_) { free(romData_); romData_ = nullptr; romSize_ = 0; }
 
-    Serial.printf("[EMU] step 1: acquiring spiLock...\n"); Serial.flush();
     // SD shares SPI bus with radio and TFT — must hold spiLock
     concurrency::LockGuard g(spiLock);
-    Serial.printf("[EMU] step 2: spiLock acquired, calling SD.end()...\n"); Serial.flush();
 
+    // Full re-init of SD — end first, then begin fresh
     SD.end();
-    Serial.printf("[EMU] step 3: SD.end() done, SD.begin()...\n"); Serial.flush();
-    bool sdOk = SD.begin(SDCARD_CS, SPI, 4000000U);
+    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+    bool sdOk = SD.begin(SDCARD_CS, SPI);
     Serial.printf("[EMU] SD re-init: %d cardType=%d\n", (int)sdOk, (int)SD.cardType());
     if (!sdOk) {
         Serial.printf("[EMU] SD.begin() failed\n");
@@ -300,9 +298,10 @@ void MonsterMeshEmulator::loadSaveFile(const char *romPath) {
     romPathToSavePath(romPath, savPath, sizeof(savPath));
     Serial.printf("[EMU] loading save: %s (ROM: %s)\n", savPath, romPath);
 
-    concurrency::LockGuard g(spiLock);
+    // SD shares SPI bus — reinit before access
     SD.end();
-    if (!SD.begin(SDCARD_CS, SPI, 4000000U)) {
+    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+    if (!SD.begin(SDCARD_CS, SPI)) {
         Serial.println("[EMU] SD reinit failed for save load");
         return;
     }
@@ -322,9 +321,11 @@ void MonsterMeshEmulator::writeSaveFile(const char *romPath) {
     romPathToSavePath(romPath, savPath, sizeof(savPath));
     Serial.printf("[EMU] writing save: %s (ROM: %s)\n", savPath, romPath);
 
+    // SD shares SPI bus — reinit before access
     concurrency::LockGuard g(spiLock);
     SD.end();
-    if (!SD.begin(SDCARD_CS, SPI, 4000000U)) {
+    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+    if (!SD.begin(SDCARD_CS, SPI)) {
         Serial.printf("[EMU] SD reinit failed for save write\n");
         return;
     }

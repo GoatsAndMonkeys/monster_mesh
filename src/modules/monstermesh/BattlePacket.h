@@ -28,24 +28,7 @@ enum class PktType : uint8_t {
     PATCH_LIST_PART  = 0x52,
     TRADE_SELECT     = 0x53,
     TRADE_CONFIRM    = 0x54,
-
-    // Text-battle protocol (Gen1BattleEngine, deterministic dual-side execution).
-    // Both sides share an RNG seed and only exchange inputs — no battle state.
-    TEXT_BATTLE_START   = 0x60,  // payload: u32 rngSeed | u8 gen | u8 partyCount | partyHash[8]
-    TEXT_BATTLE_ACTION  = 0x61,  // payload: u16 turn | u8 actionType | u8 index
-    TEXT_BATTLE_FORFEIT = 0x62,  // payload: empty (session field identifies battle)
-    TEXT_BATTLE_HASH    = 0x63,  // payload: u16 turn | u8 stateHash[8] (desync detection)
-    TEXT_BATTLE_PARTY   = 0x64,  // payload chunk: u8 partIdx | u8 partTotal | bytes  (full party data, sent once at start)
 };
-
-// Text-battle action types (TEXT_BATTLE_ACTION.payload[2])
-enum class TextBattleAction : uint8_t {
-    USE_MOVE = 0,   // index = move slot 0-3
-    SWITCH   = 1,   // index = party slot 0-5
-};
-
-// How often (in turns) each side broadcasts a state hash so we can detect desync.
-static constexpr uint8_t TEXT_BATTLE_HASH_INTERVAL = 5;
 
 #pragma pack(push, 1)
 struct BattlePacket {
