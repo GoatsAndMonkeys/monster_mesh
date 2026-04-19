@@ -199,6 +199,7 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
         print("explore         daily wild route ('home' to leave)");
         print("rogue           unlimited roguelike campaign");
         print("home            flee, return to town");
+        print("fight list      show nearby trainers");
         print("fight <name>    async battle vs nearby trainer");
         print("mmt on          live text PvP vs nearby trainer");
         print("mml on          link cable battle vs nearby trainer");
@@ -391,6 +392,20 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
             print("Link cable handshake started...");
             return;
         }
+    }
+
+    // ── fight list — show nearby trainers ────────────────────────────────────
+    if (strcmp(cmd, "fight list") == 0) {
+        if (meshPeerCount_ == 0) { print("No trainers nearby."); return; }
+        print("Nearby trainers:");
+        for (uint8_t i = 0; i < meshPeerCount_; i++) {
+            const DaycareNeighborPokemon &p = meshPeers_[i];
+            char line[48];
+            snprintf(line, sizeof(line), "  %s  (%s L%u)",
+                     p.shortName, p.nickname[0] ? p.nickname : "???", p.level);
+            print(line);
+        }
+        return;
     }
 
     // ── fight <name> — async battle vs neighbor beacon party ─────────────────
