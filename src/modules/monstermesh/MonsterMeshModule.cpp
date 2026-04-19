@@ -3,6 +3,7 @@
 #if defined(T_DECK) && !MESHTASTIC_EXCLUDE_MONSTERMESH
 
 #include "gps/RTC.h"
+#include "main.h"
 #include "MeshService.h"
 #include "Router.h"
 #include "NodeDB.h"
@@ -539,6 +540,41 @@ int32_t MonsterMeshModule::runOnce()
         kbObserverRegistered_ = true;
         installKeyboardHook();
         inputObserver_.observe(inputBroker);
+    }
+
+    // One-time LoRa sanity fix: SHORT_TURBO on channel 50 = 935 MHz, out of US band.
+    // Detect and reset to LONG_FAST defaults before the phone app connects and
+    // triggers a save-reboot loop.
+    {
+        static bool loraChecked = false;
+        if (!loraChecked && millis() > 2000) {
+            loraChecked = true;
+            auto &lora = config.lora;
+            bool needsFix = false;
+            // Flag out-of-band: SHORT_TURBO (8) with channel_num > 0 or bandwidth 250
+            if (lora.modem_preset == 8 && (lora.channel_num > 20 || lora.bandwidth >= 250))
+                needsFix = true;
+            // Flag any channel that would exceed 928 MHz in US region
+            if (lora.region == 1 && lora.channel_num > 25 && lora.bandwidth >= 125)
+                needsFix = true;
+            if (needsFix) {
+                LOG_INFO("[MonsterMesh] LoRa config out-of-band (preset=%d ch=%d bw=%d), resetting to LONG_FAST\n",
+                         (int)lora.modem_preset, (int)lora.channel_num, (int)lora.bandwidth);
+                lora.modem_preset  = meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST;
+                lora.use_preset    = true;
+                lora.bandwidth     = 0;
+                lora.spread_factor = 0;
+                lora.coding_rate   = 0;
+                lora.channel_num   = 0;
+                lora.tx_enabled    = true;
+                lora.tx_power      = 30;
+                lora.region        = meshtastic_Config_LoRaConfig_RegionCode_US;
+                lora.hop_limit     = 3;
+                lora.sx126x_rx_boosted_gain = true;
+                nodeDB->saveToDisk(SEGMENT_CONFIG);
+                rebootAtMsec = millis() + 2000;
+            }
+        }
     }
 
     // Lazy init — setup() is never called by Meshtastic, so we do it here.
