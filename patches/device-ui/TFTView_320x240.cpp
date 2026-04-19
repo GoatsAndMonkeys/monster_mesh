@@ -4614,7 +4614,15 @@ void TFTView_320x240::addNode(uint32_t nodeNum, uint8_t ch, const char *userShor
     lv_obj_set_size(sn_lbl, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_label_set_long_mode(sn_lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_align(sn_lbl, LV_ALIGN_TOP_LEFT, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_font(sn_lbl, &ui_font_montserrat_14, LV_PART_MAIN | LV_STATE_DEFAULT);
+    {
+        LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_13;
+        bool greenTheme = (Themes::get() == Themes::eDmgGreen ||
+                           Themes::get() == Themes::eGbcGreen ||
+                           Themes::get() == Themes::ePocketGreen);
+        lv_obj_set_style_text_font(sn_lbl,
+            greenTheme ? &lv_font_cozette_13 : &ui_font_montserrat_14,
+            LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
     // if short name contains only non-printable glyphs replace with short id
     if (lv_txt_get_width(userShort, strlen(userShort), &ui_font_montserrat_14, 0) <= 4) {
         lv_label_set_text_fmt(sn_lbl, "%04x", nodeNum & 0xffff);
