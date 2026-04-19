@@ -247,6 +247,77 @@ const LordGym LORD_GYMS[LORD_GYM_COUNT] = {
 
 #undef MON_COUNT
 
+// ── Per-gym filler pools ─────────────────────────────────────────────────────
+// Used to pad trainers' parties to 6. Level is overridden at build time.
+
+struct GymFiller { uint8_t species; uint8_t moves[4]; };
+
+static const GymFiller GYM_FILL[8][6] = {
+    // 0: Pewter — Rock/Ground
+    {{ 74, {33,111,88, 0}},   // Geodude
+     { 27, {10, 28,  0, 0}},  // Sandshrew
+     { 95, {33, 20, 88,43}},  // Onix
+     {111, {88, 43, 34, 0}},  // Rhyhorn
+     { 66, {10,106,  0, 0}},  // Machop
+     { 74, {88,111, 33, 0}}}, // Geodude (second)
+
+    // 1: Cerulean — Water
+    {{120, {33, 55,  0, 0}},  // Staryu
+     {118, {64, 39,  0, 0}},  // Goldeen
+     { 54, {10, 39, 55, 0}},  // Psyduck
+     { 72, {40, 51,  0, 0}},  // Tentacool
+     { 86, {44, 45, 62, 0}},  // Seel
+     { 90, {33, 55,  0, 0}}}, // Shellder
+
+    // 2: Vermilion — Electric
+    {{ 25, {84, 28, 98, 0}},  // Pikachu
+     {100, {33,103, 84, 0}},  // Voltorb
+     { 81, {33, 48, 84, 0}},  // Magnemite
+     { 82, {33, 84, 49, 0}},  // Magneton
+     {125, {98, 85, 50, 0}},  // Electabuzz
+     {100, {84,103,153, 0}}}, // Voltorb (Explosion variant)
+
+    // 3: Celadon — Grass
+    {{ 43, {71, 78, 51, 0}},  // Oddish
+     { 69, {22, 74,  0, 0}},  // Bellsprout
+     {102, {79, 77, 71, 0}},  // Exeggcute
+     { 44, {78, 51,  0, 0}},  // Gloom
+     { 46, {78, 77, 71, 0}},  // Paras
+     {114, {22, 20, 75, 0}}}, // Tangela
+
+    // 4: Fuchsia — Poison
+    {{ 41, {44,103,109, 0}},  // Zubat
+     { 48, {48, 50, 93, 0}},  // Venonat
+     { 88, {106,51,124, 0}},  // Grimer
+     { 89, {124,106,34, 0}},  // Muk
+     { 23, {40, 43, 35, 0}},  // Ekans
+     {109, {123,139,  0, 0}}},// Koffing
+
+    // 5: Saffron — Psychic
+    {{ 96, {95, 50, 93, 0}},  // Drowzee
+     { 97, {95, 50, 93,138}}, // Hypno
+     { 64, {93, 50,115,105}}, // Kadabra
+     {122, {50, 93,113,115}}, // Mr. Mime
+     { 79, {93, 95, 55, 0}},  // Slowpoke
+     {124, {93, 95,  0, 0}}}, // Jynx
+
+    // 6: Cinnabar — Fire
+    {{ 77, {52, 45, 39, 0}},  // Ponyta
+     { 58, {52, 43, 36, 0}},  // Growlithe
+     {126, {52, 83,109, 0}},  // Magmar
+     { 37, {52, 45, 98,46}},  // Vulpix
+     { 78, {52, 39, 23,83}},  // Rapidash
+     { 59, {52, 46, 36,53}}}, // Arcanine
+
+    // 7: Viridian — Ground
+    {{ 50, {10, 28, 91, 0}},  // Diglett
+     { 51, {10, 28, 91,89}},  // Dugtrio
+     {111, {88, 43, 34, 0}},  // Rhyhorn
+     { 27, {10, 28,  0, 0}},  // Sandshrew
+     { 31, {40, 89, 34,43}},  // Nidoqueen
+     { 34, {40, 31, 89,30}}}, // Nidoking
+};
+
 // ── Accessors ────────────────────────────────────────────────────────────────
 
 const LordGym *lordGym(uint8_t i)
@@ -260,6 +331,8 @@ const LordGym *lordGym(uint8_t i)
 // Writes a Gen1Party (the 44-byte-per-mon save layout) directly from a
 // LordGymTrainer roster. Stats are computed via Gen1BattleEngine's base-stats
 // helper (average DVs, zero stat-exp), then serialised back into Gen1Pokemon.
+// Every trainer's party is padded to 6 with type-appropriate fillers so the
+// engine's autoReplaceIfFainted() always has reserves to send out.
 
 static void writeMonToParty(Gen1Party &out, uint8_t slot,
                             const LordGymMon &src, const char *nick)
@@ -302,15 +375,27 @@ bool lordBuildGymParty(uint8_t gymIdx, uint8_t trainerIdx, Gen1Party &out)
     if (tr.count == 0 || !tr.party) return false;
 
     memset(&out, 0, sizeof(out));
-    uint8_t n = tr.count;
-    if (n > 6) n = 6;
-    out.count = n;
+    uint8_t n = tr.count < 6 ? tr.count : 6;
 
-    // Use the leader's name as the nickname for their ace; for now, just use
-    // species-agnostic "MON" to keep the code small. Trainer name shows up in
-    // the fight announcement, not on each mon.
-    for (uint8_t i = 0; i < n; ++i) {
+    // Compute average level from the defined roster for filler scaling.
+    uint8_t avgLevel = 0;
+    for (uint8_t i = 0; i < n; ++i) avgLevel += tr.party[i].level;
+    avgLevel /= n;
+
+    // Write the trainer's defined Pokemon.
+    for (uint8_t i = 0; i < n; ++i)
         writeMonToParty(out, i, tr.party[i], "FOE");
+
+    // Pad remaining slots to 6 with type-appropriate fillers.
+    const GymFiller *fill = GYM_FILL[gymIdx];
+    for (uint8_t i = n; i < 6; ++i) {
+        const GymFiller &f = fill[i % 6];
+        LordGymMon filler;
+        filler.species = f.species;
+        filler.level   = avgLevel;
+        memcpy(filler.moves, f.moves, 4);
+        writeMonToParty(out, i, filler, "FOE");
     }
+    out.count = 6;
     return true;
 }
