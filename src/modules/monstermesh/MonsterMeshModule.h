@@ -16,6 +16,7 @@
 #include "MonsterMeshLobby.h"
 #include "MonsterMeshFileBrowser.h"
 #include "PokemonDaycare.h"
+#include "MonsterMeshTerminal.h"
 
 // ── MonsterMeshModule ──────────────────────────────────────────────────────────
 // Meshtastic module that runs a Game Boy Pokemon emulator with LoRa-based
@@ -70,6 +71,7 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     MonsterMeshLobby         lobby_;
     MonsterMeshFileBrowser   browser_;
     PokemonDaycare           daycare_;
+    MonsterMeshTerminal      terminal_;
 
     bool emulatorActive_     = false;
     uint8_t brightness_      = 255;
@@ -103,6 +105,7 @@ public:
     void toggleSound();
     void adjustVolume(int8_t delta);
     void adjustBrightness(int8_t delta);
+    MonsterMeshTerminal &terminal() { return terminal_; }
     const char *getSetupStatus() const { return setupStatus_; }
     // RAW mode: set joypad directly from bitmask (bypasses press/release timer)
     void setJoypadDirect(uint8_t mask) { joypadState_ = mask; kbMask_ = 0; }
@@ -191,6 +194,11 @@ private:
     void daycareStatus(uint32_t replyTo);
     void daycareAutoCheckIn();  // load last .sav from SD, auto check-in without emulator
     bool pendingAutoCheckin_ = false;
+
+    // Cached party from SAV for terminal use (decoded nicknames).
+    Gen1Party terminalParty_ = {};
+    bool      terminalPartyReady_ = false;
+    void buildTerminalPartyFromSram(const uint8_t *sram);
 };
 
 extern MonsterMeshModule *monsterMeshModule;

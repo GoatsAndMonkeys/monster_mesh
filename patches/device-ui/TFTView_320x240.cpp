@@ -889,6 +889,9 @@ void TFTView_320x240::ui_events_init(void)
     lv_obj_add_event_cb(objects.tools_neighbors_button, ui_event_node_details, LV_EVENT_CLICKED, 0);
     lv_obj_add_event_cb(objects.tools_statistics_button, ui_event_statistics, LV_EVENT_ALL, 0);
     lv_obj_add_event_cb(objects.tools_packet_log_button, ui_event_packet_log, LV_EVENT_ALL, 0);
+    lv_obj_add_event_cb(objects.tools_mm_terminal_button, ui_event_mm_terminal, LV_EVENT_CLICKED, 0);
+    lv_obj_add_event_cb(objects.mm_terminal_input, ui_event_mm_terminal_input, LV_EVENT_READY, 0);
+    lv_obj_add_event_cb(objects.mm_terminal_input, ui_event_mm_terminal_input, LV_EVENT_VALUE_CHANGED, 0);
     // tools
     lv_obj_add_event_cb(objects.detector_start_button, ui_event_mesh_detector_start, LV_EVENT_CLICKED, 0);
     lv_obj_add_event_cb(objects.signal_scanner_node_button, ui_event_signal_scanner_node, LV_EVENT_CLICKED, 0);
@@ -2955,6 +2958,51 @@ void TFTView_320x240::ui_event_packet_log(lv_event_t *e)
     } else if (event_code == LV_EVENT_LONG_PRESSED) {
         THIS->packetCounter = 0;
         lv_obj_clean(objects.tools_packet_log_panel);
+    }
+}
+
+void TFTView_320x240::ui_event_mm_terminal(lv_event_t *e)
+{
+    lv_event_code_t event_code = lv_event_get_code(e);
+    if (event_code == LV_EVENT_CLICKED) {
+        THIS->ui_set_active(objects.settings_button, objects.mm_terminal_panel, objects.top_mm_terminal_panel);
+        lv_obj_add_state(objects.mm_terminal_input, LV_STATE_FOCUSED);
+        lv_group_t *grp = (lv_group_t *)lv_obj_get_group(objects.mm_terminal_input);
+        if (grp) {
+            lv_group_focus_obj(objects.mm_terminal_input);
+        } else {
+            lv_group_t *defGrp = lv_group_get_default();
+            if (defGrp) {
+                lv_group_add_obj(defGrp, objects.mm_terminal_input);
+                lv_group_focus_obj(objects.mm_terminal_input);
+            }
+        }
+        if (objects.keyboard) {
+            lv_keyboard_set_textarea(objects.keyboard, objects.mm_terminal_input);
+        }
+    }
+}
+
+// Weak default — overridden by MonsterMeshModule.cpp when MonsterMesh is enabled
+extern "C" __attribute__((weak)) void monsterMeshTerminalSubmit(void) {}
+
+void TFTView_320x240::ui_event_mm_terminal_input(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_READY) {
+        monsterMeshTerminalSubmit();
+    } else if (code == LV_EVENT_VALUE_CHANGED) {
+        const char *txt = lv_textarea_get_text(objects.mm_terminal_input);
+        const char *nl = txt ? strchr(txt, '\n') : nullptr;
+        if (nl) {
+            char buf[128];
+            size_t len = nl - txt;
+            if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+            memcpy(buf, txt, len);
+            buf[len] = '\0';
+            lv_textarea_set_text(objects.mm_terminal_input, buf);
+            monsterMeshTerminalSubmit();
+        }
     }
 }
 

@@ -26,6 +26,7 @@
 #include <lvgl.h>
 #include "display/lv_display_private.h"
 #include "indev/lv_indev_private.h"
+#include "generated/ui_320x240/screens.h"
 
 // UNSCII 16px pixel font — declared manually because lv_conf.h disables it
 LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_unscii_8;
@@ -63,6 +64,13 @@ static void mmToggle()
     if (monsterMeshModule) {
         monsterMeshModule->handleKeyFromLVGL(0x05); // toggle emulator on/off
     }
+}
+
+// Bridge: called from device-ui when Enter is pressed in the terminal textarea
+extern "C" void monsterMeshTerminalSubmit()
+{
+    if (monsterMeshModule && monsterMeshModule->terminal().ready())
+        monsterMeshModule->terminal().submitCommand();
 }
 
 // Status getter for device-ui debug overlay
@@ -582,6 +590,21 @@ int32_t MonsterMeshModule::runOnce()
         pendingAutoCheckin_ = false;
         daycareAutoCheckIn();
     }
+
+    // Deferred terminal init — LVGL screen objects may not exist at setupDone_ time.
+#if HAS_TFT
+    if (!terminal_.ready() && objects.mm_terminal_output && objects.mm_terminal_input) {
+        terminal_.init(objects.mm_terminal_output, objects.mm_terminal_input);
+        LOG_INFO("[MonsterMesh] Terminal initialized\n");
+    }
+    if (terminal_.ready() && terminal_.needsPartyLoad() && terminalPartyReady_) {
+        terminal_.loadParty(terminalParty_);
+        LOG_INFO("[MonsterMesh] Terminal party loaded from cache\n");
+    }
+    if (terminal_.ready()) {
+        terminal_.setMeshPeers(daycare_.getNeighbors(), daycare_.getNeighborCount());
+    }
+#endif
 
     // Keep keyboard hook installed while MonsterMesh is active
     if (emulatorActive_ || browserActive_) {
@@ -1964,6 +1987,9 @@ void MonsterMeshModule::daycareAutoCheckIn()
     LOG_INFO("[MonsterMesh] auto-daycare: trainer='%s' node='%s'\n", gameName, shortName);
 
     daycare_.checkIn(sram, shortName, gameName);
+
+    // Cache party for terminal before freeing SRAM
+    buildTerminalPartyFromSram(sram);
     free(sram);
 
     if (daycare_.isActive()) {
@@ -1980,6 +2006,32 @@ void MonsterMeshModule::daycareAutoCheckIn()
         LOG_INFO("[MonsterMesh] auto-daycare: beacon + event sent\n");
         setupStatus_ = "Daycare active";
     }
+}
+
+void MonsterMeshModule::buildTerminalPartyFromSram(const uint8_t *sram)
+{
+    memset(&terminalParty_, 0, sizeof(terminalParty_));
+    uint8_t count = sram[SAV_PARTY_COUNT];
+    if (count > 6) count = 6;
+    terminalParty_.count = count;
+
+    memcpy(terminalParty_.species, &sram[SAV_SPECIES_LIST], 7);
+    memcpy(terminalParty_.mons, &sram[SAV_POKEMON_DATA], count * sizeof(Gen1Pokemon));
+
+    for (uint8_t i = 0; i < count; ++i) {
+        const uint8_t *nickRaw = &sram[SAV_NICKNAMES + i * SAV_NAME_SIZE];
+        for (int j = 0; j < 10; ++j) {
+            if (nickRaw[j] == SAV_STRING_TERMINATOR) {
+                terminalParty_.nicknames[i][j] = 0;
+                break;
+            }
+            terminalParty_.nicknames[i][j] = (uint8_t)gen1CharToAscii(nickRaw[j]);
+            if (j == 9) terminalParty_.nicknames[i][10] = 0;
+        }
+    }
+
+    terminalPartyReady_ = true;
+    LOG_INFO("[MonsterMesh] terminal party: %u pokemon cached\n", (unsigned)count);
 }
 
 #endif // T_DECK && !MESHTASTIC_EXCLUDE_MONSTERMESH
