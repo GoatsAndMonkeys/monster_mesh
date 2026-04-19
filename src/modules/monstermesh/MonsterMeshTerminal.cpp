@@ -389,20 +389,22 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
 
     if (strcmp(cmd, "sysinfo") == 0) {
         char buf[64];
-        uint32_t freeHeap  = esp_get_free_heap_size();
-        uint32_t minHeap   = esp_get_minimum_free_heap_size();
+        // Internal SRAM: fast on-chip memory used by CPU, stack, small buffers
+        uint32_t freeInternal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        uint32_t totInternal  = heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
+        uint32_t minInternal  = esp_get_minimum_free_heap_size();
+        // PSRAM: external 8MB chip for large buffers (ROM data, frame buffer, SAV)
         uint32_t freePsram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
         uint32_t totPsram  = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
         uint32_t upSec     = (uint32_t)(esp_timer_get_time() / 1000000ULL);
         uint32_t h = upSec / 3600, m = (upSec % 3600) / 60, s = upSec % 60;
-        print("-- System Info --");
-        snprintf(buf, sizeof(buf), "Heap:  %u KB free (%u KB min)", freeHeap/1024, minHeap/1024);
+        print("-- System --");
+        snprintf(buf, sizeof(buf), "RAM:   %u/%u KB (lo:%u KB)",
+                 freeInternal/1024, totInternal/1024, minInternal/1024);
         print(buf);
-        snprintf(buf, sizeof(buf), "PSRAM: %u / %u KB free", freePsram/1024, totPsram/1024);
+        snprintf(buf, sizeof(buf), "PSRAM: %u/%u KB", freePsram/1024, totPsram/1024);
         print(buf);
-        snprintf(buf, sizeof(buf), "Uptime: %uh %um %us", h, m, s);
-        print(buf);
-        snprintf(buf, sizeof(buf), "Peers: %u", (unsigned)meshPeerCount_);
+        snprintf(buf, sizeof(buf), "Up: %uh%um%us  Peers: %u", h, m, s, (unsigned)meshPeerCount_);
         print(buf);
         printSep();
         return;

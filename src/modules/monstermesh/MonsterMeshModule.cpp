@@ -645,12 +645,29 @@ int32_t MonsterMeshModule::runOnce()
         pendingAutoCheckin_ = true;
     }
 
-    // Deferred auto-daycare check-in — runs ASAP after setupDone_ so SAV is
-    // loaded before the browser or ROM loader can access the SD card.
+    // Deferred auto-daycare check-in — suppress LVGL flush first so SD.end()
+    // inside daycareAutoCheckIn() doesn't collide with LGFX DMA on the shared SPI bus.
     if (pendingAutoCheckin_ && !emulatorActive_ && !browserActive_) {
         pendingAutoCheckin_ = false;
+#if HAS_TFT
+        lv_display_t *dcDisp = lv_display_get_default();
+        void *dcSavedCb = dcDisp ? (void *)dcDisp->flush_cb : nullptr;
+        if (dcDisp) {
+            lv_display_set_flush_cb(dcDisp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
+                lv_display_flush_ready(d);
+            });
+            if (dcDisp->refr_timer) lv_timer_pause(dcDisp->refr_timer);
+        }
+#endif
         daycareAutoCheckIn();
         daycareCheckinDone_ = true;
+#if HAS_TFT
+        if (dcDisp && dcSavedCb) {
+            lv_display_set_flush_cb(dcDisp, (lv_display_flush_cb_t)dcSavedCb);
+        }
+        if (dcDisp && dcDisp->refr_timer) lv_timer_resume(dcDisp->refr_timer);
+        if (dcDisp) lv_obj_invalidate(lv_screen_active());
+#endif
     }
 
     // Deferred terminal init — LVGL screen objects may not exist at setupDone_ time.
@@ -1659,9 +1676,14 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
             kbSetMode(true);
         } else {
             // No ROM loaded — open file browser
+            // If checkin hasn't run yet, open browser anyway after 15s
+            // (handles case where no last_rom.txt exists on SD card)
             if (!daycareCheckinDone_) {
-                setupStatus_ = "Loading party...";
-                return;
+                if (millis() < 15000) {
+                    setupStatus_ = "Loading party...";
+                    return;
+                }
+                daycareCheckinDone_ = true;  // give up waiting, open browser
             }
             LOG_INFO("[MonsterMesh] ALT → opening browser\n");
             kbSetMode(false);  // ensure KEY mode for browser navigation
@@ -1714,8 +1736,11 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
             return;
         }
         if (!daycareCheckinDone_) {
-            setupStatus_ = "Loading party...";
-            return;
+            if (millis() < 15000) {
+                setupStatus_ = "Loading party...";
+                return;
+            }
+            daycareCheckinDone_ = true;
         }
         LOG_INFO("[MonsterMesh] Sym+Alt → opening browser\n");
         browserActive_ = true;
