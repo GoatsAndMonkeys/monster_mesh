@@ -926,9 +926,9 @@ static void lvgl_show_browser(MonsterMeshFileBrowser &b)
         static char titleBuf[128];
         const char *dir = b.currentDir();
         if (strcmp(dir, "/") == 0)
-            snprintf(titleBuf, sizeof(titleBuf), "MonsterMesh v0.1.02  < Select ROM >");
+            snprintf(titleBuf, sizeof(titleBuf), "MM " MONSTERMESH_VERSION "  < Select ROM >");
         else
-            snprintf(titleBuf, sizeof(titleBuf), "MonsterMesh v0.1.02  < %s >", dir);
+            snprintf(titleBuf, sizeof(titleBuf), "MM " MONSTERMESH_VERSION "  < %s >", dir);
         lv_label_set_text(g_browserTitle, titleBuf);
     }
 
@@ -1494,7 +1494,7 @@ void MonsterMeshModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *stat
         display->setFont(ArialMT_Plain_16);
         display->drawString(x + 64, y + 20, "MonsterMesh");
         display->setFont(ArialMT_Plain_10);
-        display->drawString(x + 64, y + 32, "v0.1.02 pre-alpha");
+        display->drawString(x + 64, y + 32, MONSTERMESH_VERSION);
         display->drawString(x + 64, y + 44, setupStatus_);
         return;
     }
