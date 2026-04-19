@@ -82,6 +82,7 @@ void MonsterMeshTerminal::loadParty(const Gen1Party &party)
 {
     memcpy(&savParty_, &party, sizeof(Gen1Party));
     needsLoad_ = false;
+    if (state_ == State::IDLE) state_ = State::READY;
 
     if (ready()) {
         showParty();
@@ -254,8 +255,8 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
             print("rogue           unlimited roguelike");
             print("fight list      show nearby trainers");
             print("fight <name>    async battle");
-            print("mmt on          live PvP challenge");
-            print("mml on          link cable battle");
+            print("mmt <name>      live PvP challenge (DM)");
+            print("mml <name>      cable club link (DM)");
             print("stats / badges / news");
             print("party           view your Pokemon");
         }
@@ -422,45 +423,78 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
         return;
     }
 
-    // ── mmt on / mml on ─────────────────────────────────────────────────────
-    {
-        char n[32]; normNoSpaces(cmd, n, sizeof(n));
-        if (strcmp(n, "mmton") == 0 || strcmp(n, "mmtexton") == 0) {
-            if (state_ == State::IN_NET_CHALLENGE_SENT) {
-                print("Already waiting for a response. Stand by...");
-                return;
-            }
-            if (state_ != State::READY) {
-                const char *what =
-                    (state_ == State::IN_NET_CHALLENGE_SENT) ? "waiting for challenge response (type 'cancel')" :
-                    (state_ == State::IN_NET_CHALLENGE_WAIT) ? "pending challenge - type 'y' or 'n'" :
-                    (state_ == State::IN_NET_BATTLE || state_ == State::IN_NET_BATTLE_WAIT) ? "in a live battle (type 'cancel')" :
-                    (state_ == State::IN_BATTLE)      ? "in battle (type 'quit')" :
-                    (state_ == State::IN_RUN || state_ == State::IN_RUN_BATTLE)   ? "on a route (type 'home')" :
-                    (state_ == State::IN_ROGUE || state_ == State::IN_ROGUE_BATTLE) ? "in rogue mode (type 'quit')" :
-                    (state_ == State::IN_GYM_SELECT || state_ == State::IN_GYM_BATTLE) ? "at a gym (type 'quit')" :
-                    "busy";
-                char msg[64];
-                snprintf(msg, sizeof(msg), "Still %s.", what);
-                print(msg);
-                return;
-            }
-            if (savParty_.count == 0)  { print("Load a save first."); return; }
-            netPartner_ = 0;
-            pendingNetChallenge_ = true;
-            state_ = State::IN_NET_CHALLENGE_SENT;
-            print("Text battle challenge broadcast.");
-            print("Waiting for a nearby trainer to respond...");
+    // ── mmt <name> — targeted live PvP text battle challenge ────────────────
+    if (strncmp(cmd, "mmt ", 4) == 0) {
+        const char *name = cmd + 4;
+        if (state_ == State::IN_NET_CHALLENGE_SENT) {
+            print("Already waiting for a response. Stand by...");
             return;
         }
-        if (strcmp(n, "mmlon") == 0 || strcmp(n, "mmlinkon") == 0) {
-            // Alias for cable link: queue DM to self to trigger mmc on flow
-            pendingDM_ = true;
-            dmTarget_  = 0;          // 0 = self (module uses nodeDB->getNodeNum())
-            strncpy(dmText_, "mmc on", sizeof(dmText_));
-            print("Link cable handshake started...");
+        if (state_ != State::READY) {
+            const char *what =
+                (state_ == State::IN_NET_CHALLENGE_WAIT) ? "pending challenge - type 'y' or 'n'" :
+                (state_ == State::IN_NET_BATTLE || state_ == State::IN_NET_BATTLE_WAIT) ? "in a live battle (type 'cancel')" :
+                (state_ == State::IN_BATTLE)      ? "in battle (type 'quit')" :
+                (state_ == State::IN_RUN || state_ == State::IN_RUN_BATTLE)   ? "on a route (type 'home')" :
+                (state_ == State::IN_ROGUE || state_ == State::IN_ROGUE_BATTLE) ? "in rogue mode (type 'quit')" :
+                (state_ == State::IN_GYM_SELECT || state_ == State::IN_GYM_BATTLE) ? "at a gym (type 'quit')" :
+                "busy";
+            char msg[64];
+            snprintf(msg, sizeof(msg), "Still %s.", what);
+            print(msg);
             return;
         }
+        if (savParty_.count == 0) { print("Load a save first."); return; }
+        // Find target peer by short name
+        uint32_t targetId = 0;
+        for (uint8_t i = 0; i < meshPeerCount_; i++) {
+            if (strncasecmp(meshPeers_[i].shortName, name, 4) == 0 ||
+                strncasecmp(meshPeers_[i].gameName,  name, 7) == 0) {
+                targetId = meshPeers_[i].nodeId;
+                break;
+            }
+        }
+        if (targetId == 0) {
+            if (meshPeerCount_ == 0) print("No trainers in range.");
+            else { char msg[48]; snprintf(msg, sizeof(msg), "Trainer '%s' not in range.", name); print(msg); }
+            return;
+        }
+        pendingNetChallenge_ = true;
+        pendingNetChallengeTarget_ = targetId;
+        netPartner_ = 0;
+        state_ = State::IN_NET_CHALLENGE_SENT;
+        char msg[32];
+        snprintf(msg, sizeof(msg), "Challenge sent to %.6s!", name);
+        print(msg);
+        print("Waiting for response...");
+        return;
+    }
+
+    // ── mml <name> — cable club link invite ─────────────────────────────────
+    if (strncmp(cmd, "mml ", 4) == 0) {
+        const char *name = cmd + 4;
+        uint32_t targetId = 0;
+        for (uint8_t i = 0; i < meshPeerCount_; i++) {
+            if (strncasecmp(meshPeers_[i].shortName, name, 4) == 0 ||
+                strncasecmp(meshPeers_[i].gameName,  name, 7) == 0) {
+                targetId = meshPeers_[i].nodeId;
+                break;
+            }
+        }
+        if (targetId == 0) {
+            if (meshPeerCount_ == 0) print("No trainers in range.");
+            else { char msg[48]; snprintf(msg, sizeof(msg), "Trainer '%s' not in range.", name); print(msg); }
+            return;
+        }
+        // Queue DM to target: human-readable + protocol trigger
+        pendingDM_ = true;
+        dmTarget_  = targetId;
+        const char *me = localShortName_[0] ? localShortName_ : "???";
+        snprintf(dmText_, sizeof(dmText_), "[%.4s] invites Cable Club! Go to Cable Club. mmc on", me);
+        char msg[32];
+        snprintf(msg, sizeof(msg), "Cable Club invite sent to %.6s.", name);
+        print(msg);
+        return;
     }
 
     // ── fight list — show nearby trainers ────────────────────────────────────

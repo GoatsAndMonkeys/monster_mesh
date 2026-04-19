@@ -2,6 +2,7 @@
 
 #if defined(T_DECK) && !MESHTASTIC_EXCLUDE_MONSTERMESH
 
+#include "gps/RTC.h"
 #include "MeshService.h"
 #include "Router.h"
 #include "NodeDB.h"
@@ -717,10 +718,19 @@ int32_t MonsterMeshModule::runOnce()
             terminal_.clearNetAction();
         }
 
-        // Drain net challenge broadcast
+        // Drain net challenge — send targeted DM with human text + MMT:ON signal
         if (terminal_.hasPendingNetChallenge()) {
+            uint32_t target = terminal_.netChallengeTarget();
             terminal_.clearPendingNetChallenge();
-            sendTextDM(NODENUM_BROADCAST, "MMT:ON");
+            if (target != 0) {
+                char challengeDM[128];
+                snprintf(challengeDM, sizeof(challengeDM),
+                         "[%s] wants a text battle! Open MonsterMesh Terminal to respond. MMT:ON",
+                         getShortName(nodeDB->getNodeNum()));
+                sendTextDM(target, challengeDM);
+            } else {
+                sendTextDM(NODENUM_BROADCAST, "MMT:ON");
+            }
         }
     }
 #endif
@@ -786,13 +796,21 @@ int32_t MonsterMeshModule::runOnce()
             pendingBrowserKey_ = 0;
             LOG_DEBUG("[MonsterMesh] browser key=0x%02X cursor=%d count=%d\n",
                       key, browser_.cursor(), browser_.count());
-            // handleKey may call scan() on dir change — pause LVGL to avoid SPI contention
+            // handleKey may call scan() on dir change — suppress LVGL flush + pause timer
+            // to avoid SPI bus contention (SD reinit vs LGFX DMA on shared bus)
 #if HAS_TFT
             lv_display_t *disp = lv_display_get_default();
-            if (disp && disp->refr_timer) lv_timer_pause(disp->refr_timer);
+            void *bkSavedCb = disp ? (void *)disp->flush_cb : nullptr;
+            if (disp) {
+                lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
+                    lv_display_flush_ready(d);
+                });
+                if (disp->refr_timer) lv_timer_pause(disp->refr_timer);
+            }
 #endif
             bool selected = browser_.handleKey(key);
 #if HAS_TFT
+            if (disp && bkSavedCb) lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)bkSavedCb);
             if (disp && disp->refr_timer) lv_timer_resume(disp->refr_timer);
 #endif
             LOG_DEBUG("[MonsterMesh] handleKey returned selected=%d ejected=%d\n",
@@ -834,6 +852,40 @@ int32_t MonsterMeshModule::runOnce()
     if (pendingSave_) {
         pendingSave_ = false;
         emu_.save();
+    }
+
+    // Simulated weather — rotates every 3 hours using Unix time as seed.
+    // Gives daycare weather events without requiring WiFi.
+    {
+        static uint32_t lastWeatherWindowMs = 0;
+        uint32_t nowMs = millis();
+        if (nowMs - lastWeatherWindowMs >= 60000) {  // check once per minute
+            lastWeatherWindowMs = nowMs;
+            uint32_t t = getTime();
+            if (t > 1000000000u) {  // valid RTC
+                uint32_t window = t / (3 * 3600);  // changes every 3 hours
+                static uint32_t lastWindow = 0;
+                if (window != lastWindow) {
+                    lastWindow = window;
+                    // Hash window to pick weather
+                    uint32_t h = window * 2654435761u;
+                    static const DaycareWeatherType kWeather[] = {
+                        WEATHER_CLEAR, WEATHER_CLEAR, WEATHER_CLEAR,
+                        WEATHER_RAIN, WEATHER_RAIN,
+                        WEATHER_WINDY, WEATHER_WINDY,
+                        WEATHER_FOG,
+                        WEATHER_THUNDERSTORM,
+                        WEATHER_HOT,
+                        WEATHER_COLD,
+                        WEATHER_SNOW,
+                    };
+                    DaycareWeatherType wt = kWeather[h % 12];
+                    int8_t tempC = (int8_t)(((h >> 8) % 30) - 5);  // -5..24°C
+                    uint8_t wind = (uint8_t)((h >> 16) % 15);
+                    daycare_.setWeather(wt, tempC, wind);
+                }
+            }
+        }
     }
 
     // Daycare tick — generates events every 5 min, sends beacons, autosaves
@@ -1694,7 +1746,7 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
             // If checkin hasn't run yet, open browser anyway after 15s
             // (handles case where no last_rom.txt exists on SD card)
             if (!daycareCheckinDone_) {
-                if (millis() < 15000) {
+                if (millis() < 3000) {
                     setupStatus_ = "Loading party...";
                     return;
                 }

@@ -71,9 +71,10 @@ public:
     uint32_t netPartnerNodeId() const { return netPartner_; }
     void clearNetAction() { netMyAction_ = 0xFF; }
 
-    // Net challenge broadcast — module polls & sends "MMT:ON" then clears.
+    // Net challenge — module polls & sends targeted DM then clears.
     bool hasPendingNetChallenge() const { return pendingNetChallenge_; }
-    void clearPendingNetChallenge() { pendingNetChallenge_ = false; }
+    uint32_t netChallengeTarget() const { return pendingNetChallengeTarget_; }
+    void clearPendingNetChallenge() { pendingNetChallenge_ = false; pendingNetChallengeTarget_ = 0; }
 
     // Called by module when opponent sends "MMT:ON" broadcast.
     void receiveNetChallenge(uint32_t fromNodeId, const char *shortName);
@@ -150,7 +151,8 @@ private:
     bool     netActionReady_      = false; // opponent's action received
     uint8_t  netOppAction_        = 0;
     uint8_t  netOppIndex_         = 0;
-    bool     pendingNetChallenge_ = false; // 'mmt on' typed — module broadcasts
+    bool     pendingNetChallenge_       = false;
+    uint32_t pendingNetChallengeTarget_ = 0;
 
     // LORD — Legend of Charizard (door-game layer)
     LordSave     lord_            = {};
