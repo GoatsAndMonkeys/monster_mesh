@@ -84,9 +84,6 @@ void MonsterMeshTerminal::loadParty(const Gen1Party &party)
     needsLoad_ = false;
 
     if (ready()) {
-        char buf[48];
-        snprintf(buf, sizeof(buf), "%u Pokemon loaded.", (unsigned)savParty_.count);
-        print(buf);
         printSep();
         showParty();
     }
@@ -207,7 +204,7 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
         print("news       recent events");
         print("party      view your Pokemon");
         print("pick N     swap to Pokemon N in battle");
-        print("W/E/R/S or 1/2/3/4 - use move");
+        print("1/W 2/E 3/R 4/S    use move");
         print("quit       forfeit battle");
         printSep();
         return;
@@ -630,8 +627,8 @@ void MonsterMeshTerminal::describeBattleStatus()
     for (uint8_t i = 0; i < 4; ++i) {
         if (m.moves[i] == 0) continue;
         const Gen1MoveData *mv = gen1Move(m.moves[i]);
-        snprintf(buf, sizeof(buf), " %c/%u) %-12s PP %u",
-                 MOVE_KEYS[i], (unsigned)(i + 1), mv ? mv->name : "?", (unsigned)m.pp[i]);
+        snprintf(buf, sizeof(buf), " %u/%c) %-12s PP %u",
+                 (unsigned)(i + 1), MOVE_KEYS[i], mv ? mv->name : "?", (unsigned)m.pp[i]);
         print(buf);
     }
 }
