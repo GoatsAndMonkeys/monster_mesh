@@ -1,0 +1,233 @@
+// SPDX-License-Identifier: MIT
+//
+// MonsterMeshTerminal — LVGL text terminal for Gen 1 Pokemon battles.
+//
+// Text-based multiplayer Pokemon battles over LoRa mesh. Uses the 6 Pokemon
+// from the player's Game Boy SAV file (same as PokemonDaycare). Player picks
+// one Pokemon at a time and battles opponents.
+//
+// Commands:
+//   help             — list commands
+//   party            — show your 6 Pokemon from the SAV
+//   pick 1..6        — choose Pokemon for battle
+//   fight            — battle a random CPU opponent
+//   1..4             — use move 1-4
+//   status           — show battle status
+//   quit             — forfeit current battle
+
+#pragma once
+
+#include <Arduino.h>
+#include "Gen1BattleEngine.h"
+#include "PokemonData.h"
+#include "DaycareEventGen.h"
+#include "LordSave.h"
+#include "LordLogic.h"
+#include "showdown_gen1_basestats.h"
+#include "showdown_gen1_moves.h"
+
+// Forward-declare LVGL types so we don't pull in lvgl.h in the header.
+struct _lv_obj_t;
+typedef struct _lv_obj_t lv_obj_t;
+
+class MonsterMeshTerminal {
+public:
+    MonsterMeshTerminal() = default;
+
+    void init(lv_obj_t *outputPanel, lv_obj_t *inputTextarea);
+    void submitCommand();
+    bool ready() const { return outputPanel_ != nullptr; }
+
+    // Called by MonsterMeshModule after reading .sav from SD card.
+    // Copies the full party (up to 6 Pokemon with decoded ASCII nicknames).
+    void loadParty(const Gen1Party &party);
+    bool hasParty() const { return savParty_.count > 0; }
+
+    // Set true when init fires and party isn't loaded yet; module checks this.
+    bool needsPartyLoad() const { return needsLoad_; }
+
+    // Set local short name (injected by module at setup time).
+    void setLocalShortName(const char *name) {
+        strncpy(localShortName_, name, 4); localShortName_[4] = '\0';
+    }
+
+    // Live PvP — called by module when opponent's TEXT_BATTLE_ACTION arrives.
+    void receiveNetAction(uint8_t actionType, uint8_t index);
+
+    // Start net battle (called by module after both sides accept mmt on).
+    void startNetBattle(uint32_t partnerNodeId, uint32_t rngSeed,
+                        const Gen1Party &opponentParty);
+
+    // Result DM drain — called by module in runOnce().
+    bool hasPendingDM() const { return pendingDM_; }
+    uint32_t dmTarget()  const { return dmTarget_; }
+    const char *dmText() const { return dmText_; }
+    void clearPendingDM()  { pendingDM_ = false; }
+
+    // Net battle: module polls this to know whether to send our action.
+    bool hasNetAction() const { return netMyAction_ != 0xFF; }
+    uint8_t netAction() const { return netMyAction_; }
+    uint8_t netIndex()  const { return netMyIndex_; }
+    uint32_t netPartnerNodeId() const { return netPartner_; }
+    void clearNetAction() { netMyAction_ = 0xFF; }
+
+    // Net challenge — module polls & sends targeted DM then clears.
+    bool hasPendingNetChallenge() const { return pendingNetChallenge_; }
+    uint32_t netChallengeTarget() const { return pendingNetChallengeTarget_; }
+    void clearPendingNetChallenge() { pendingNetChallenge_ = false; pendingNetChallengeTarget_ = 0; }
+
+    // Called by module when opponent sends "MMT:ON" broadcast.
+    void receiveNetChallenge(uint32_t fromNodeId, const char *shortName);
+    // Called by module when opponent sends "MMT:ACCEPT:<seed>" DM.
+    void receiveNetAccept(uint32_t fromNodeId, uint32_t seed, const Gen1Party &oppParty);
+    // Called by module when opponent sends "MMT:REJECT" DM.
+    void receiveNetReject(uint32_t fromNodeId);
+
+    // Public for module to build opponent party from daycare neighbor data.
+    void buildAsyncOpponent(const DaycareNeighborPokemon &peer, Gen1Party &out);
+
+    // Point to daycare's live neighbor list — called from runOnce() each tick.
+    // Pointer must remain valid (it points into PokemonDaycare's internal array).
+    void setMeshPeers(const DaycareNeighborPokemon *peers, uint8_t count) {
+        meshPeers_      = peers;
+        meshPeerCount_  = count;
+    }
+
+private:
+    enum class State : uint8_t {
+        IDLE,             // no party loaded
+        READY,            // party loaded, waiting
+        IN_BATTLE,        // async fight vs neighbor's party (AI)
+        IN_RUN,           // explore: between waves
+        IN_RUN_BATTLE,    // explore: in a wave battle
+        IN_ROGUE,         // rogue: between waves
+        IN_ROGUE_BATTLE,  // rogue: in a wave battle
+        IN_GYM_SELECT,    // LORD: choosing a gym
+        IN_GYM_BATTLE,    // LORD: in a gym gauntlet fight
+        IN_NET_BATTLE,        // live PvP: our turn to pick move
+        IN_NET_BATTLE_WAIT,   // live PvP: waiting for opponent's action
+        IN_NET_CHALLENGE_SENT,// mmt on sent: waiting for opponent Y/N
+        IN_NET_CHALLENGE_WAIT,// received challenge: waiting for our Y/N
+    };
+
+    static constexpr uint16_t MAX_OUTPUT_LINES = 200;
+
+    State    state_      = State::IDLE;
+    uint32_t rng_        = 0;
+    Gen1BattleEngine engine_;
+    Gen1Party        savParty_    = {};   // full 6-mon party from SAV
+    Gen1Party        battleParty_ = {};   // single chosen Pokemon
+    Gen1Party        oppParty_    = {};
+    uint8_t          chosenSlot_  = 0xFF; // which of the 6 is active
+    bool             needsLoad_   = false;
+
+    // Explore run state
+    bool      runActive_   = false;
+    uint8_t   waveNum_     = 0;
+    Gen1Party runParty_    = {};
+    bool      runWildOnly_ = false;
+
+    // Rogue campaign state
+    bool      rogueActive_ = false;
+    uint8_t   rogueWave_   = 0;
+    Gen1Party rogueParty_  = {};
+
+    // Async battle (fight <name>) — opponent is AI using neighbor's beacon party
+    uint32_t asyncOpponentNodeId_ = 0;
+    char     asyncOpponentName_[12] = {};
+
+    // Result DM — drained by MonsterMeshModule::runOnce()
+    bool     pendingDM_     = false;
+    uint32_t dmTarget_      = 0;
+    char     dmText_[80]    = {};
+
+    // Local short name injected by module for DM messages
+    char     localShortName_[5] = {};
+
+    // Live PvP (mmt on) — net battle state
+    uint32_t netPartner_          = 0;
+    uint8_t  netMyAction_         = 0xFF;  // 0xFF = not yet submitted
+    uint8_t  netMyIndex_          = 0;
+    bool     netActionReady_      = false; // opponent's action received
+    uint8_t  netOppAction_        = 0;
+    uint8_t  netOppIndex_         = 0;
+    bool     pendingNetChallenge_       = false;
+    uint32_t pendingNetChallengeTarget_ = 0;
+
+    // LORD — Legend of Charizard (door-game layer)
+    LordSave     lord_            = {};
+    bool         lordLoaded_      = false;
+    LordRunStats currentRun_      = {};
+    int8_t       tzOffsetHours_   = -5;   // TODO: wire to Meshtastic TZ config
+    uint8_t      currentGymIdx_   = 0xFF;
+    uint8_t      currentGymTrainer_ = 0;
+    Gen1Party    gymParty_        = {};   // full 6-mon player party for gauntlet
+    bool         lordMenuShown_   = false;
+
+    // Mesh peer list — pointer into PokemonDaycare::neighbors_ (not owned)
+    const DaycareNeighborPokemon *meshPeers_     = nullptr;
+    uint8_t                       meshPeerCount_ = 0;
+    char                          lastFoeSource_[12] = {};  // trainer short name of last opponent
+
+    // LVGL objects (not owned)
+    lv_obj_t *outputPanel_    = nullptr;
+    lv_obj_t *inputTextarea_  = nullptr;
+    uint16_t  lineCount_      = 0;
+
+    // Output
+    void print(const char *text);
+    void printSep();
+    static void engineLogCb(const char *line, void *ctx);
+
+    // Commands
+    void handleCommand(const char *cmd);
+
+    // Game logic
+    void showParty();
+    void pickPokemon(uint8_t slot);
+    void startBattle();
+    void resolvePlayerAction(uint8_t actionType, uint8_t index);
+    void describeBattleStatus();
+    void startRun();
+    void startRunWave();
+    void syncRunPartyHpFromEngine();
+    uint8_t runAvgLevel() const;
+
+    // Rogue campaign
+    void startRogue();
+    void startRogueWave();
+    void syncRoguePartyHpFromEngine();
+
+    // Async fight vs neighbor beacon party
+    void queueResultDM(bool playerWon);
+
+    // Net PvP helpers
+    void resolveNetTurn();
+
+    // Command normalization
+    static void normNoSpaces(const char *in, char *out, size_t outLen);
+
+    // LORD commands
+    void lordEnsureLoaded();
+    void showGymSelect();
+    void startGymGauntlet(uint8_t gymIdx);
+    void startGymFight();
+    void advanceGymTrainer();
+    void showStats();
+    void showNews();
+    void showBadges();
+    void showLeaderboard();
+    void syncGymPartyHpFromEngine();
+
+    // Wild opponent generation
+    void buildWildOpponent(Gen1Party &out, uint8_t level);
+    static void pickMovesForSpecies(uint8_t species, uint8_t outMoves[4]);
+    void writeBattlePokeToSave(Gen1Party &out, uint8_t slot,
+                               uint8_t species, uint8_t lvl,
+                               const uint8_t moves[4],
+                               const Gen1BattleEngine::BattlePoke &tmp,
+                               uint8_t dvByte, const char *nick);
+
+    // RNG
+    uint32_t rand32();
+};
