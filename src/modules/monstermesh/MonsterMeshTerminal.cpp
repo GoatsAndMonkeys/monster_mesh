@@ -13,15 +13,31 @@
 // Cozette 13px pixel font
 LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_13;
 
-// ── Wild encounter pool ────────────────────────────────────────────────────
+// ── Wild encounter pools by badge count (area-appropriate) ────────────────
 namespace {
 
-const uint8_t WILD_POOL[] = {
-     16, 19, 21, 23, 27, 29, 32, 41, 43, 46, 48, 50, 54, 56, 58,
-     60, 63, 66, 69, 72, 74, 77, 79, 81, 84, 86, 88, 90, 92, 95,
-     96, 98,100,102,104,109,111,114,116,118,120,127,129,133,
+// Each pool reflects the routes between the current and next gym.
+// Badge 0 = Viridian/Pallet area; badge 7-8 = Victory Road.
+static const uint8_t AREA_POOL_0[] = { 16,19,21,10,13,32,29,23,46,48 };
+static const uint8_t AREA_POOL_1[] = { 74,41,35,39,95,66,23,46,19,21  };
+static const uint8_t AREA_POOL_2[] = { 118,129,72,25,43,60,79,54,98,100};
+static const uint8_t AREA_POOL_3[] = { 92,93,96,79,124,102,109,60,54,41};
+static const uint8_t AREA_POOL_4[] = { 123,127,115,128,113,43,70,102,118,60};
+static const uint8_t AREA_POOL_5[] = { 64,67,122,106,107,96,79,116,60,102};
+static const uint8_t AREA_POOL_6[] = { 58,77,126,111,100,88,90,69,109,77};
+static const uint8_t AREA_POOL_7[] = { 67,74,75,105,42,104,111,112,95,66};
+
+struct AreaPool { const uint8_t *data; uint8_t len; };
+static const AreaPool AREA_POOLS[8] = {
+    { AREA_POOL_0, sizeof(AREA_POOL_0) },
+    { AREA_POOL_1, sizeof(AREA_POOL_1) },
+    { AREA_POOL_2, sizeof(AREA_POOL_2) },
+    { AREA_POOL_3, sizeof(AREA_POOL_3) },
+    { AREA_POOL_4, sizeof(AREA_POOL_4) },
+    { AREA_POOL_5, sizeof(AREA_POOL_5) },
+    { AREA_POOL_6, sizeof(AREA_POOL_6) },
+    { AREA_POOL_7, sizeof(AREA_POOL_7) },
 };
-constexpr uint8_t WILD_POOL_LEN = sizeof(WILD_POOL) / sizeof(WILD_POOL[0]);
 
 } // namespace
 
@@ -34,8 +50,9 @@ void MonsterMeshTerminal::init(lv_obj_t *outputPanel, lv_obj_t *inputTextarea)
     lineCount_     = 0;
     rng_           = (uint32_t)millis() ^ 0xA5A5A5A5u;
 
+    print("Legend of Charizard");
     if (savParty_.count > 0) {
-        print("Party loaded. Type 'party' to view.");
+        print("Party loaded. Type 'help'.");
     } else {
         print("Loading party from SAV...");
         needsLoad_ = true;
@@ -52,9 +69,7 @@ void MonsterMeshTerminal::loadParty(const Gen1Party &party)
         char buf[48];
         snprintf(buf, sizeof(buf), "%u Pokemon loaded.", (unsigned)savParty_.count);
         print(buf);
-        printSep();
-        showParty();
-        print("Type 'pick N' to choose.");
+        print("Type 'help' to start.");
         printSep();
     }
 }
@@ -140,27 +155,24 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
     if (!*cmd) return;
 
     if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
-        print("party    show your 6 Pokemon");
-        print("pick N   choose Pokemon N for battle");
-        print("fight    battle a random opponent");
-        print("run      roguelike: fight til all faint");
-        print("1..4     use move in battle");
-        print("status   show battle status");
-        print("quit     forfeit battle");
-        print("-- LORD --");
-        print("gym      list Kanto gyms");
-        print("gym N    challenge gym N");
-        print("explore  once-a-day random roguelike");
-        print("stats    badges, best run, totals");
-        print("badges   earned badges");
-        print("news     recent events");
+        print("-- Legend of Charizard --");
+        print("gym list   list Kanto gyms");
+        print("gym go     challenge next gym");
+        print("gym N      challenge gym N directly");
+        print("explore    daily roguelike (wild route)");
+        print("stats      badges, best run, totals");
+        print("badges     earned badges");
+        print("news       recent events");
+        print("party      view your Pokemon");
+        print("1..4       use move in battle");
+        print("quit       forfeit battle");
         printSep();
         return;
     }
 
     // ── LORD commands ────────────────────────────────────────────────────────
 
-    if (strcmp(cmd, "gym") == 0) {
+    if (strcmp(cmd, "gym") == 0 || strcmp(cmd, "gym list") == 0) {
         if (state_ == State::IN_BATTLE || state_ == State::IN_RUN_BATTLE ||
             state_ == State::IN_GYM_BATTLE) {
             print("Finish your current battle first.");
@@ -171,6 +183,33 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
             return;
         }
         showGymSelect();
+        return;
+    }
+
+    if (strcmp(cmd, "gym go") == 0) {
+        if (state_ == State::IN_BATTLE || state_ == State::IN_RUN_BATTLE ||
+            state_ == State::IN_GYM_BATTLE) {
+            print("Finish your current battle first.");
+            return;
+        }
+        if (savParty_.count == 0) {
+            print("Load a Pokemon save first.");
+            return;
+        }
+        lordEnsureLoaded();
+        // Find first unlocked gym without a badge
+        int8_t next = -1;
+        for (uint8_t i = 0; i < LORD_GYM_COUNT; ++i) {
+            if (lordGymUnlocked(lord_, i) && !lordHasBadge(lord_, i)) {
+                next = (int8_t)i;
+                break;
+            }
+        }
+        if (next < 0) {
+            print("You've conquered all 8 gyms!");
+            return;
+        }
+        startGymGauntlet((uint8_t)next);
         return;
     }
 
@@ -233,16 +272,6 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
             return;
         }
         pickPokemon((uint8_t)(slot - 1));
-        return;
-    }
-
-    if (strcmp(cmd, "run") == 0) {
-        if (savParty_.count == 0) {
-            print("No party loaded. Waiting for SAV...");
-            return;
-        }
-        runWildOnly_ = false;   // legacy `run`: mesh-peer encounters allowed
-        startRun();
         return;
     }
 
@@ -494,8 +523,8 @@ void MonsterMeshTerminal::resolvePlayerAction(uint8_t actionType, uint8_t index)
         } else {
             const LordGym *g = lordGym(currentGymIdx_);
             char msg[64];
-            snprintf(msg, sizeof(msg), "You lost at %s. Retry with 'gym %u'.",
-                     g ? g->city : "the gym", (unsigned)(currentGymIdx_ + 1));
+            snprintf(msg, sizeof(msg), "You lost at %s. Try 'gym go' to retry.",
+                     g ? g->city : "the gym");
             print(msg);
             currentGymIdx_ = 0xFF;
             state_ = State::READY;
@@ -615,7 +644,11 @@ void MonsterMeshTerminal::buildWildOpponent(Gen1Party &out, uint8_t avgLvl)
     }
 
     if (species == 0 || species > 151) {
-        species = WILD_POOL[rand32() % WILD_POOL_LEN];
+        // Pick from badge-appropriate area pool
+        uint8_t badges = lordLoaded_ ? __builtin_popcount(lord_.badges) : 0;
+        if (badges > 7) badges = 7;
+        const AreaPool &pool = AREA_POOLS[badges];
+        species = pool.data[rand32() % pool.len];
         lastFoeSource_[0] = '\0';
     }
 
@@ -769,7 +802,7 @@ void MonsterMeshTerminal::showGymSelect()
                         (unsigned)(i + 1), g->city, g->leaderName, tag);
     }
     print(buf);
-    print("Type 'gym N' to challenge.");
+    print("'gym go' for next gym  'gym N' for specific.");
     printSep();
     state_ = State::IN_GYM_SELECT;
 }
