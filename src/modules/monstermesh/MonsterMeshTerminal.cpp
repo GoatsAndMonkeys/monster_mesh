@@ -198,14 +198,16 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
         print("gym list   list Kanto gyms");
         print("gym go     challenge next gym");
         print("gym N      challenge gym N directly");
-        print("explore    daily roguelike (wild route)");
+        print("explore    wild route (type 'home' to leave)");
+        print("rogue      unlimited roguelike campaign");
+        print("home       flee explore/rogue, return to town");
         print("stats      badges, best run, totals");
         print("badges     earned badges");
         print("news       recent events");
         print("party      view your Pokemon");
         print("pick N     swap to Pokemon N in battle");
         print("1/W 2/E 3/R 4/S    use move");
-        print("quit       forfeit battle");
+        print("quit       forfeit current battle");
         printSep();
         return;
     }
@@ -293,6 +295,42 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
         return;
     }
 
+    if (strcmp(cmd, "rogue") == 0) {
+        if (savParty_.count == 0) { print("Load a Pokemon save first."); return; }
+        if (state_ == State::IN_BATTLE || state_ == State::IN_RUN_BATTLE ||
+            state_ == State::IN_ROGUE_BATTLE || state_ == State::IN_GYM_BATTLE) {
+            print("Finish your current battle first.");
+            return;
+        }
+        startRogue();
+        return;
+    }
+
+    if (strcmp(cmd, "home") == 0) {
+        if (state_ == State::IN_RUN || state_ == State::IN_RUN_BATTLE) {
+            if (runWildOnly_) {
+                lordEnsureLoaded();
+                lordOnRunEnd(lord_, currentRun_);
+                lordSave(lord_);
+                runWildOnly_ = false;
+            }
+            runActive_ = false;
+            state_ = State::READY;
+            print("You head home to rest.");
+            printSep();
+        } else if (state_ == State::IN_ROGUE || state_ == State::IN_ROGUE_BATTLE) {
+            rogueActive_ = false;
+            state_ = State::READY;
+            char msg[48];
+            snprintf(msg, sizeof(msg), "Rogue run ended at wave %u.", (unsigned)rogueWave_);
+            print(msg);
+            printSep();
+        } else {
+            print("You're already in town.");
+        }
+        return;
+    }
+
     if (strcmp(cmd, "stats") == 0)       { showStats();       return; }
     if (strcmp(cmd, "badges") == 0)      { showBadges();      return; }
     if (strcmp(cmd, "news") == 0)        { showNews();        return; }
@@ -318,6 +356,10 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
     if (strcmp(cmd, "fight") == 0) {
         if (state_ == State::IN_RUN) {
             startRunWave();
+            return;
+        }
+        if (state_ == State::IN_ROGUE) {
+            startRogueWave();
             return;
         }
         if (state_ == State::IN_GYM_SELECT) {
@@ -354,15 +396,22 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
     }
 
     if (strcmp(cmd, "quit") == 0) {
-        if (state_ == State::IN_BATTLE || state_ == State::IN_RUN_BATTLE) {
+        if (state_ == State::IN_BATTLE || state_ == State::IN_RUN_BATTLE ||
+            state_ == State::IN_ROGUE_BATTLE) {
             runActive_ = false;
+            rogueActive_ = false;
             state_ = State::READY;
             print("Battle forfeited.");
             printSep();
         } else if (state_ == State::IN_RUN) {
             runActive_ = false;
             state_ = State::READY;
-            print("Run abandoned.");
+            print("Run abandoned. Type 'home' to leave cleanly next time.");
+            printSep();
+        } else if (state_ == State::IN_ROGUE) {
+            rogueActive_ = false;
+            state_ = State::READY;
+            print("Rogue run abandoned.");
             printSep();
         } else if (state_ == State::IN_GYM_BATTLE || state_ == State::IN_GYM_SELECT) {
             state_ = State::READY;
@@ -388,7 +437,7 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
 
         if (slot != 0xFF) {
         if (state_ != State::IN_BATTLE && state_ != State::IN_RUN_BATTLE &&
-            state_ != State::IN_GYM_BATTLE) {
+            state_ != State::IN_ROGUE_BATTLE && state_ != State::IN_GYM_BATTLE) {
             print("Not in battle. Type 'fight'.");
             return;
         }
@@ -451,7 +500,7 @@ void MonsterMeshTerminal::pickPokemon(uint8_t slot)
         return;
     }
     if (state_ == State::IN_BATTLE || state_ == State::IN_RUN_BATTLE ||
-        state_ == State::IN_GYM_BATTLE) {
+        state_ == State::IN_ROGUE_BATTLE || state_ == State::IN_GYM_BATTLE) {
         // Mid-battle switch — costs a turn (CPU attacks while you switch)
         if (slot >= engine_.party(0).count) {
             char buf[32];
@@ -568,6 +617,31 @@ void MonsterMeshTerminal::resolvePlayerAction(uint8_t actionType, uint8_t index)
                 runWildOnly_ = false;
             }
             runActive_ = false;
+            state_ = State::READY;
+        }
+        printSep();
+        return;
+    }
+
+    if (state_ == State::IN_ROGUE_BATTLE) {
+        if (res == Gen1BattleEngine::Result::P1_WIN) {
+            syncRoguePartyHpFromEngine();
+            char msg[48];
+            bool isBoss = (rogueWave_ % 5 == 0);
+            snprintf(msg, sizeof(msg), "%s %u cleared!", isBoss ? "Boss wave" : "Wave", (unsigned)rogueWave_);
+            print(msg);
+            uint8_t alive = 0;
+            for (uint8_t i = 0; i < rogueParty_.count; i++)
+                if (be16(rogueParty_.mons[i].hp) > 0) alive++;
+            snprintf(msg, sizeof(msg), "%u Pokemon still standing.", (unsigned)alive);
+            print(msg);
+            print("Type 'fight' for next wave or 'home' to leave.");
+            state_ = State::IN_ROGUE;
+        } else {
+            char msg[48];
+            snprintf(msg, sizeof(msg), "All fainted. Rogue run ends at wave %u.", (unsigned)rogueWave_);
+            print(msg);
+            rogueActive_ = false;
             state_ = State::READY;
         }
         printSep();
@@ -828,6 +902,99 @@ void MonsterMeshTerminal::syncRunPartyHpFromEngine()
         runParty_.mons[i].status = ep.mons[i].status;
         // Sync PP
         for (int j = 0; j < 4; j++) runParty_.mons[i].pp[j] = ep.mons[i].pp[j];
+    }
+}
+
+// ── Rogue campaign ───────────────────────────────────────────────────────────
+
+void MonsterMeshTerminal::startRogue()
+{
+    // Heal full party to max HP
+    memcpy(&rogueParty_, &savParty_, sizeof(Gen1Party));
+    for (uint8_t i = 0; i < rogueParty_.count; i++) {
+        Gen1Pokemon &p = rogueParty_.mons[i];
+        setBe16(p.hp, be16(p.maxHp));
+        p.status = 0;
+        for (int j = 0; j < 4; j++) {
+            const Gen1MoveData *mv = gen1Move(p.moves[j]);
+            if (mv) p.pp[j] = mv->pp;
+        }
+    }
+    rogueActive_ = true;
+    rogueWave_   = 0;
+    print("Rogue run started! Party healed.");
+    print("Type 'fight' to begin. 'home' to flee.");
+    printSep();
+    state_ = State::IN_ROGUE;
+}
+
+void MonsterMeshTerminal::startRogueWave()
+{
+    if (!rogueActive_ || rogueParty_.count == 0) { print("No rogue run active."); return; }
+
+    uint8_t alive = 0;
+    for (uint8_t i = 0; i < rogueParty_.count; i++)
+        if (be16(rogueParty_.mons[i].hp) > 0) alive++;
+    if (alive == 0) {
+        print("All Pokemon fainted. Rogue run over.");
+        rogueActive_ = false;
+        state_ = State::READY;
+        return;
+    }
+
+    rogueWave_++;
+    bool isBoss = (rogueWave_ % 5 == 0);
+
+    // Level scales: base 10 + wave * 4, capped 99
+    uint8_t oppLvl = (uint8_t)(10 + rogueWave_ * 4);
+    if (oppLvl > 99) oppLvl = 99;
+
+    if (isBoss) {
+        // Boss: fixed species from ROGUE_BOSS array, +5 levels
+        uint8_t bossIdx = ((rogueWave_ / 5) - 1) % 5;
+        uint8_t bossSpecies = ROGUE_BOSS[bossIdx];
+        uint8_t moves[4] = {};
+        pickMovesForSpecies(bossSpecies, moves);
+        oppParty_ = {};
+        writeBattlePokeToSave(oppParty_, 0, bossSpecies, (uint8_t)(oppLvl + 5 > 99 ? 99 : oppLvl + 5),
+                              moves, Gen1BattleEngine::BattlePoke{}, 0x88, "BOSS");
+        oppParty_.count = 1;
+    } else {
+        // Regular: pick from the themed pool for this floor (theme cycles every 5 waves)
+        uint8_t theme = (rogueWave_ / 5) % 5;
+        const RoguePool &pool = ROGUE_POOLS[theme];
+        uint8_t species = pool.data[rand32() % pool.len];
+        uint8_t moves[4] = {};
+        pickMovesForSpecies(species, moves);
+        oppParty_ = {};
+        writeBattlePokeToSave(oppParty_, 0, species, oppLvl, moves,
+                              Gen1BattleEngine::BattlePoke{}, 0x88, "FOE");
+        oppParty_.count = 1;
+    }
+
+    engine_.start(rogueParty_, oppParty_, rand32(), 1);
+
+    char msg[48];
+    static const char *THEME_NAMES[5] = { "Route","Water","Fire","Psychic","Dragon" };
+    uint8_t theme = (rogueWave_ / 5) % 5;
+    if (isBoss) {
+        snprintf(msg, sizeof(msg), "-- BOSS Wave %u --", (unsigned)rogueWave_);
+    } else {
+        snprintf(msg, sizeof(msg), "-- Wave %u (%s) --", (unsigned)rogueWave_, THEME_NAMES[theme]);
+    }
+    print(msg);
+    describeBattleStatus();
+    print("Use 1..4 to attack.");
+    state_ = State::IN_ROGUE_BATTLE;
+}
+
+void MonsterMeshTerminal::syncRoguePartyHpFromEngine()
+{
+    const auto &ep = engine_.party(0);
+    for (uint8_t i = 0; i < rogueParty_.count && i < ep.count; i++) {
+        setBe16(rogueParty_.mons[i].hp, ep.mons[i].hp);
+        rogueParty_.mons[i].status = ep.mons[i].status;
+        for (int j = 0; j < 4; j++) rogueParty_.mons[i].pp[j] = ep.mons[i].pp[j];
     }
 }
 
