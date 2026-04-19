@@ -1012,9 +1012,9 @@ static void lvgl_show_browser(MonsterMeshFileBrowser &b)
         static char titleBuf[128];
         const char *dir = b.currentDir();
         if (strcmp(dir, "/") == 0)
-            snprintf(titleBuf, sizeof(titleBuf), "MM " MONSTERMESH_VERSION "  < Select ROM >");
+            snprintf(titleBuf, sizeof(titleBuf), "MonsterMesh  < Select ROM >");
         else
-            snprintf(titleBuf, sizeof(titleBuf), "MM " MONSTERMESH_VERSION "  < %s >", dir);
+            snprintf(titleBuf, sizeof(titleBuf), "MonsterMesh  < %s >", dir);
         lv_label_set_text(g_browserTitle, titleBuf);
     }
 

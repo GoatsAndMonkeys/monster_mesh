@@ -68,14 +68,12 @@ void MonsterMeshTerminal::init(lv_obj_t *outputPanel, lv_obj_t *inputTextarea)
     lineCount_     = 0;
     rng_           = (uint32_t)millis() ^ 0xA5A5A5A5u;
 
-    print("Legend of Charizard");
     if (savParty_.count > 0) {
-        print("Party loaded. Type 'help'.");
+        print("Ready. Type 'help'.");
     } else {
         print("Loading party from SAV...");
         needsLoad_ = true;
     }
-    printSep();
 }
 
 void MonsterMeshTerminal::loadParty(const Gen1Party &party)
@@ -228,7 +226,6 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
     }
 
     if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
-        print("-- Legend of Charizard --");
         print("gym list        list Kanto gyms");
         print("gym go          challenge next gym");
         print("explore         daily wild route ('home' to leave)");
