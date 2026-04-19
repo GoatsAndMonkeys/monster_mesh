@@ -611,5 +611,6 @@ uint32_t Themes::mid()      { return THEME(eNodePanelBorder); }
 uint32_t Themes::accent()   { return THEME(eChannelButtonBorder); }
 uint32_t Themes::light()    { return THEME(eBatteryPercentageText); }
 uint32_t Themes::lightest() { return THEME(ePanelText); }
+lv_color_t Themes::navAccent()  { return lv_color_hex(THEME(ePanelBorder)); }
 
 #endif // VIEW_320x240

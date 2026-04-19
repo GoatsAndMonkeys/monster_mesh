@@ -22,6 +22,7 @@ class Themes
     static uint32_t accent();    // shade 4 (input border)
     static uint32_t light();     // shade 5 (secondary text)
     static uint32_t lightest();  // shade 6 (primary text, icons)
+    static lv_color_t navAccent();  // active nav-button indicator (themed border color)
 
   private:
     Themes(void) = default;

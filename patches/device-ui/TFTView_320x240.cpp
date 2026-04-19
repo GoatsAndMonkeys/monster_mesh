@@ -247,7 +247,7 @@ bool TFTView_320x240::setupUIConfig(const meshtastic_DeviceUIConfig &uiconfig)
     Themes::recolorButton(objects.home_bell_button, false);
     Themes::recolorText(objects.home_bell_label, false);
 
-    lv_obj_set_style_bg_img_recolor(objects.home_button, colorMesh, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_img_recolor(objects.home_button, Themes::navAccent(), LV_PART_MAIN | LV_STATE_DEFAULT);
 
     // set brightness
     if (displaydriver->hasLight())
@@ -469,7 +469,7 @@ void TFTView_320x240::ui_set_active(lv_obj_t *b, lv_obj_t *p, lv_obj_t *tp)
         lv_obj_set_style_bg_img_recolor(activeButton, colorGray, LV_PART_MAIN | LV_STATE_DEFAULT);
     }
     lv_obj_set_style_border_width(b, 3, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_img_recolor(b, colorMesh, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_img_recolor(b, Themes::navAccent(), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_img_recolor_opa(b, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     if (activePanel) {
@@ -719,6 +719,17 @@ void TFTView_320x240::ui_events_init(void)
     lv_obj_add_event_cb(objects.messages_button, this->ui_event_MessagesButton, LV_EVENT_ALL, NULL);
     lv_obj_add_event_cb(objects.map_button, this->ui_event_MapButton, LV_EVENT_ALL, NULL);
     lv_obj_add_event_cb(objects.settings_button, this->ui_event_SettingsButton, LV_EVENT_ALL, NULL);
+
+    // Override map button: replace map icon with ">_" terminal label
+    {
+        lv_obj_set_style_bg_image_src(objects.map_button, NULL, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_t *termLbl = lv_label_create(objects.map_button);
+        lv_label_set_text(termLbl, ">_");
+        lv_obj_center(termLbl);
+        LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_13;
+        lv_obj_set_style_text_font(termLbl, &lv_font_cozette_13, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_color(termLbl, lv_color_hex(0xffffff), LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
 
     // home buttons
     lv_obj_add_event_cb(objects.home_mail_button, this->ui_event_EnvelopeButton, LV_EVENT_CLICKED, NULL);
@@ -1143,39 +1154,23 @@ void TFTView_320x240::ui_event_MessagesButton(lv_event_t *e)
 
 void TFTView_320x240::ui_event_MapButton(lv_event_t *e)
 {
-    static bool ignoreClicked = false;
     lv_event_code_t event_code = lv_event_get_code(e);
     if (event_code == LV_EVENT_CLICKED && THIS->activeSettings == eNone) {
-        if (ignoreClicked) { // prevent long press to enter this setting
-            ignoreClicked = false;
-            return;
-        }
-        if (THIS->activePanel == objects.map_panel) {
-            // toggle navigation and zoom slider
-            static bool toggle = true;
-            toggle = !toggle;
-            if (toggle) {
-                // lv_obj_clear_flag(objects.zoom_slider, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_clear_flag(objects.gps_lock_button, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_clear_flag(objects.zoom_in_button, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_clear_flag(objects.zoom_out_button, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_clear_flag(objects.navigation_panel, LV_OBJ_FLAG_HIDDEN);
-            } else {
-                lv_obj_add_flag(objects.zoom_slider, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_add_flag(objects.gps_lock_button, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_add_flag(objects.zoom_in_button, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_add_flag(objects.zoom_out_button, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_add_flag(objects.navigation_panel, LV_OBJ_FLAG_HIDDEN);
-            }
+        // Map button now opens the MonsterMesh Terminal
+        THIS->ui_set_active(objects.map_button, objects.mm_terminal_panel, objects.top_mm_terminal_panel);
+        lv_obj_add_state(objects.mm_terminal_input, LV_STATE_FOCUSED);
+        lv_group_t *grp = (lv_group_t *)lv_obj_get_group(objects.mm_terminal_input);
+        if (grp) {
+            lv_group_focus_obj(objects.mm_terminal_input);
         } else {
-            THIS->ui_set_active(objects.map_button, objects.map_panel, objects.top_map_panel);
-            THIS->loadMap();
-            lv_group_focus_obj(objects.nav_button);
+            lv_group_t *defGrp = lv_group_get_default();
+            if (defGrp) {
+                lv_group_add_obj(defGrp, objects.mm_terminal_input);
+                lv_group_focus_obj(objects.mm_terminal_input);
+            }
         }
-        lv_obj_add_flag(objects.map_osd_panel, LV_OBJ_FLAG_HIDDEN);
-    } else if (event_code == LV_EVENT_LONG_PRESSED && THIS->activeSettings == eNone) {
-        lv_obj_clear_flag(objects.map_osd_panel, LV_OBJ_FLAG_HIDDEN);
-        ignoreClicked = true;
+        if (!lv_obj_has_flag(objects.keyboard, LV_OBJ_FLAG_HIDDEN))
+            lv_keyboard_set_textarea(objects.keyboard, objects.mm_terminal_input);
     }
 }
 
@@ -4041,7 +4036,7 @@ void TFTView_320x240::ui_event_ok(lv_event_t *e)
                 THIS->setTheme(value);
                 THIS->db.uiConfig.theme = meshtastic_Theme(value);
                 THIS->controller->storeUIConfig(THIS->db.uiConfig);
-                lv_obj_set_style_bg_img_recolor(objects.settings_button, colorMesh, LV_PART_MAIN | LV_STATE_DEFAULT);
+                lv_obj_set_style_bg_img_recolor(objects.settings_button, Themes::navAccent(), LV_PART_MAIN | LV_STATE_DEFAULT);
             }
 
             lv_obj_add_flag(objects.settings_theme_panel, LV_OBJ_FLAG_HIDDEN);

@@ -215,16 +215,7 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
     File f = SD.open(sdPath, FILE_READ);
     Serial.printf("[EMU] SD.open('%s') = %d\n", sdPath, (int)(bool)f);
     if (!f) {
-        // Fall back: try full re-init once
-        SD.end();
-        SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-        bool sdOk = SD.begin(SDCARD_CS, SPI, 4000000U);
-        Serial.printf("[EMU] SD re-init: %d cardType=%d\n", (int)sdOk, (int)SD.cardType());
-        f = SD.open(sdPath, FILE_READ);
-        Serial.printf("[EMU] SD.open('%s') after reinit = %d\n", sdPath, (int)(bool)f);
-    }
-    if (!f) {
-        // Try with /sd prefix
+        // Try with original path (e.g. without /sd strip)
         f = SD.open(path, FILE_READ);
         Serial.printf("[EMU] SD.open('%s') = %d\n", path, (int)(bool)f);
     }

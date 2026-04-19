@@ -2004,6 +2004,11 @@ void MonsterMeshModule::launchROM(const char *path)
     lgfx::LGFX_Device *gfx = getGfx();
     if (gfx) {
         gfx->clearClipRect();
+        // Reset display scroll/window state and clear to black so the first
+        // frame has a clean canvas (prevents horizontal sync artifact on load)
+        gfx->setScrollRect(0, 0, 0, 0, 0);
+        concurrency::LockGuard _g(spiLock);
+        gfx->fillScreen(TFT_BLACK);
     }
 #endif
 
