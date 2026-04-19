@@ -15,9 +15,11 @@ struct DaycareNeighborPokemon {
     uint32_t nodeId;
     char     shortName[5];      // Meshtastic short name (4 + null)
     char     gameName[8];       // Pokemon in-game trainer name (7 + null)
-    uint8_t  speciesDex;
-    uint8_t  level;
-    char     nickname[11];      // Player nickname (10 + null), empty = species name
+    uint8_t  speciesDex;        // = party[0].species (compat)
+    uint8_t  level;             // = party[0].level   (compat)
+    char     nickname[11];      // = party[0].nickname (compat)
+    uint8_t  partyCount;
+    struct { uint8_t species; uint8_t level; char nickname[11]; } party[6];
 };
 
 // ── Event generator ──────────────────────────────────────────────────────────

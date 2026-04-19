@@ -46,6 +46,30 @@ public:
     // Set true when init fires and party isn't loaded yet; module checks this.
     bool needsPartyLoad() const { return needsLoad_; }
 
+    // Set local short name (injected by module at setup time).
+    void setLocalShortName(const char *name) {
+        strncpy(localShortName_, name, 4); localShortName_[4] = '\0';
+    }
+
+    // Live PvP — called by module when opponent's TEXT_BATTLE_ACTION arrives.
+    void receiveNetAction(uint8_t actionType, uint8_t index);
+
+    // Start net battle (called by module after both sides accept mmt on).
+    void startNetBattle(uint32_t partnerNodeId, uint32_t rngSeed,
+                        const Gen1Party &opponentParty);
+
+    // Result DM drain — called by module in runOnce().
+    bool hasPendingDM() const { return pendingDM_; }
+    uint32_t dmTarget()  const { return dmTarget_; }
+    const char *dmText() const { return dmText_; }
+    void clearPendingDM()  { pendingDM_ = false; }
+
+    // Net battle: module polls this to know whether to send our action.
+    bool hasNetAction() const { return netMyAction_ != 0xFF; }
+    uint8_t netAction() const { return netMyAction_; }
+    uint8_t netIndex()  const { return netMyIndex_; }
+    void clearNetAction() { netMyAction_ = 0xFF; }
+
     // Point to daycare's live neighbor list — called from runOnce() each tick.
     // Pointer must remain valid (it points into PokemonDaycare's internal array).
     void setMeshPeers(const DaycareNeighborPokemon *peers, uint8_t count) {
@@ -55,13 +79,17 @@ public:
 
 private:
     enum class State : uint8_t {
-        IDLE,           // no party loaded or no Pokemon picked
-        READY,          // Pokemon picked, waiting to fight
-        IN_BATTLE,      // in a battle
-        IN_RUN,         // roguelike run active, between waves
-        IN_RUN_BATTLE,  // roguelike run, in a wave battle
-        IN_GYM_SELECT,  // LORD: choosing a gym
-        IN_GYM_BATTLE,  // LORD: in a gym gauntlet fight
+        IDLE,             // no party loaded
+        READY,            // party loaded, waiting
+        IN_BATTLE,        // async fight vs neighbor's party (AI)
+        IN_RUN,           // explore: between waves
+        IN_RUN_BATTLE,    // explore: in a wave battle
+        IN_ROGUE,         // rogue: between waves
+        IN_ROGUE_BATTLE,  // rogue: in a wave battle
+        IN_GYM_SELECT,    // LORD: choosing a gym
+        IN_GYM_BATTLE,    // LORD: in a gym gauntlet fight
+        IN_NET_BATTLE,    // live PvP: our turn to pick move
+        IN_NET_BATTLE_WAIT, // live PvP: waiting for opponent's action
     };
 
     static constexpr uint16_t MAX_OUTPUT_LINES = 200;
@@ -75,11 +103,36 @@ private:
     uint8_t          chosenSlot_  = 0xFF; // which of the 6 is active
     bool             needsLoad_   = false;
 
-    // Roguelike run state
-    bool      runActive_  = false;
-    uint8_t   waveNum_    = 0;
-    Gen1Party runParty_   = {};   // full party with HP persisted across waves
-    bool      runWildOnly_ = false;  // Explore (LORD) forces random wilds, no mesh pulls
+    // Explore run state
+    bool      runActive_   = false;
+    uint8_t   waveNum_     = 0;
+    Gen1Party runParty_    = {};
+    bool      runWildOnly_ = false;
+
+    // Rogue campaign state
+    bool      rogueActive_ = false;
+    uint8_t   rogueWave_   = 0;
+    Gen1Party rogueParty_  = {};
+
+    // Async battle (fight <name>) — opponent is AI using neighbor's beacon party
+    uint32_t asyncOpponentNodeId_ = 0;
+    char     asyncOpponentName_[12] = {};
+
+    // Result DM — drained by MonsterMeshModule::runOnce()
+    bool     pendingDM_     = false;
+    uint32_t dmTarget_      = 0;
+    char     dmText_[80]    = {};
+
+    // Local short name injected by module for DM messages
+    char     localShortName_[5] = {};
+
+    // Live PvP (mmt on) — net battle state
+    uint32_t netPartner_       = 0;
+    uint8_t  netMyAction_      = 0xFF;  // 0xFF = not yet submitted
+    uint8_t  netMyIndex_       = 0;
+    bool     netActionReady_   = false; // opponent's action received
+    uint8_t  netOppAction_     = 0;
+    uint8_t  netOppIndex_      = 0;
 
     // LORD — Legend of Charizard (door-game layer)
     LordSave     lord_            = {};
@@ -119,6 +172,18 @@ private:
     void startRunWave();
     void syncRunPartyHpFromEngine();
     uint8_t runAvgLevel() const;
+
+    // Rogue campaign
+    void startRogue();
+    void startRogueWave();
+    void syncRoguePartyHpFromEngine();
+
+    // Async fight vs neighbor beacon party
+    void buildAsyncOpponent(const DaycareNeighborPokemon &peer, Gen1Party &out);
+    void queueResultDM(bool playerWon);
+
+    // Command normalization
+    static void normNoSpaces(const char *in, char *out, size_t outLen);
 
     // LORD commands
     void lordEnsureLoaded();

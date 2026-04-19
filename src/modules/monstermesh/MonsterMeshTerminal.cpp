@@ -39,6 +39,24 @@ static const AreaPool AREA_POOLS[8] = {
     { AREA_POOL_7, sizeof(AREA_POOL_7) },
 };
 
+// Rogue campaign floor theme pools (5 themes, cycling per floor)
+static const uint8_t ROGUE_POOL_NORMAL[]  = { 16,19,21,39,52,113,115,128,143,132 };
+static const uint8_t ROGUE_POOL_WATER[]   = { 54,60,72,79,90,98,116,118,120,129  };
+static const uint8_t ROGUE_POOL_FIRE[]    = { 4,5,6,58,77,78,126,136             };
+static const uint8_t ROGUE_POOL_PSYCHIC[] = { 49,64,65,80,96,97,121,122,124,150  };
+static const uint8_t ROGUE_POOL_DRAGON[]  = { 6,59,62,130,131,147,148,149        };
+static const uint8_t ROGUE_BOSS[5]        = { 143,131,6,150,149 }; // Snorlax/Lapras/Charizard/Mewtwo/Dragonite
+
+struct RoguePool { const uint8_t *data; uint8_t len; };
+static const RoguePool ROGUE_POOLS[5] = {
+    { ROGUE_POOL_NORMAL,  sizeof(ROGUE_POOL_NORMAL)  },
+    { ROGUE_POOL_WATER,   sizeof(ROGUE_POOL_WATER)   },
+    { ROGUE_POOL_FIRE,    sizeof(ROGUE_POOL_FIRE)    },
+    { ROGUE_POOL_PSYCHIC, sizeof(ROGUE_POOL_PSYCHIC) },
+    { ROGUE_POOL_DRAGON,  sizeof(ROGUE_POOL_DRAGON)  },
+};
+static const char *ROGUE_THEME_NAMES[5] = { "Normal","Water","Fire","Psychic","Dragon" };
+
 } // namespace
 
 // ── LVGL wiring ─────────────────────────────────────────────────────────────
@@ -146,6 +164,19 @@ void MonsterMeshTerminal::engineLogCb(const char *line, void *ctx)
     if (self) self->print(line);
 }
 
+// ── Command normalization ───────────────────────────────────────────────────
+
+void MonsterMeshTerminal::normNoSpaces(const char *in, char *out, size_t outLen)
+{
+    size_t n = 0;
+    for (; *in && n < outLen - 1; ++in) {
+        char c = *in;
+        if (c >= 'A' && c <= 'Z') c += 32;
+        if (c != ' ' && c != '\t') out[n++] = c;
+    }
+    out[n] = '\0';
+}
+
 // ── Command processing ──────────────────────────────────────────────────────
 
 void MonsterMeshTerminal::handleCommand(const char *cmd)
@@ -153,6 +184,17 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
     // Skip leading whitespace.
     while (*cmd == ' ' || *cmd == '\t') ++cmd;
     if (!*cmd) return;
+
+    // Normalized (no spaces, lowercase) for single-word command matching.
+    char norm[32];
+    normNoSpaces(cmd, norm, sizeof(norm));
+
+    // Also plain lowercase (spaces preserved) for argument extraction.
+    char low[64];
+    size_t li = 0;
+    for (const char *p = cmd; *p && li < sizeof(low)-1; ++p)
+        low[li++] = (*p >= 'A' && *p <= 'Z') ? *p + 32 : *p;
+    low[li] = '\0';
 
     if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
         print("-- Legend of Charizard --");

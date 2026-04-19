@@ -390,10 +390,18 @@ void PokemonDaycare::handleBeacon(const DaycareBeacon &beacon) {
     neighbors_[slot].shortName[4] = '\0';
     strncpy(neighbors_[slot].gameName, beacon.gameName, 7);
     neighbors_[slot].gameName[7] = '\0';
-    // Use first Pokemon from beacon party
-    if (beacon.partyCount > 0) {
+    // Store full party from beacon
+    uint8_t cnt = beacon.partyCount < 6 ? beacon.partyCount : 6;
+    neighbors_[slot].partyCount = cnt;
+    for (uint8_t i = 0; i < cnt; ++i) {
+        neighbors_[slot].party[i].species = beacon.pokemon[i].species;
+        neighbors_[slot].party[i].level   = beacon.pokemon[i].level;
+        strncpy(neighbors_[slot].party[i].nickname, beacon.pokemon[i].nickname, 10);
+        neighbors_[slot].party[i].nickname[10] = '\0';
+    }
+    if (cnt > 0) {
         neighbors_[slot].speciesDex = beacon.pokemon[0].species;
-        neighbors_[slot].level = beacon.pokemon[0].level;
+        neighbors_[slot].level      = beacon.pokemon[0].level;
         strncpy(neighbors_[slot].nickname, beacon.pokemon[0].nickname, 10);
         neighbors_[slot].nickname[10] = '\0';
     }
