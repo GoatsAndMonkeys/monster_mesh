@@ -226,20 +226,37 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
     }
 
     if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
-        print("gym list        list Kanto gyms");
-        print("gym go          challenge next gym");
-        print("explore         daily wild route ('home' to leave)");
-        print("rogue           unlimited roguelike campaign");
-        print("home            flee, return to town");
-        print("fight list      show nearby trainers");
-        print("fight <name>    async battle vs nearby trainer");
-        print("mmt on          live text PvP vs nearby trainer");
-        print("mml on          link cable battle vs nearby trainer");
-        print("stats / badges / news");
-        print("party           view your Pokemon");
-        print("pick N          swap Pokemon in battle");
-        print("1/W 2/E 3/R 4/S  use move");
-        print("quit            forfeit current battle");
+        bool inBattle = (state_ == State::IN_BATTLE   || state_ == State::IN_RUN_BATTLE ||
+                         state_ == State::IN_ROGUE_BATTLE || state_ == State::IN_GYM_BATTLE ||
+                         state_ == State::IN_NET_BATTLE   || state_ == State::IN_NET_BATTLE_WAIT);
+        bool inRun    = (state_ == State::IN_RUN);
+        bool inRogue  = (state_ == State::IN_ROGUE);
+        if (inBattle) {
+            print("1/W 2/E 3/R 4/S  use move");
+            print("pick N          switch Pokemon");
+            print("status          show HP");
+            print("quit            forfeit");
+        } else if (inRun || inRogue) {
+            print("fight           start next wave");
+            print("party           show HP");
+            print("home            leave");
+        } else if (state_ == State::IN_NET_CHALLENGE_WAIT) {
+            print("y               accept battle");
+            print("n               flee");
+        } else if (state_ == State::IN_NET_CHALLENGE_SENT) {
+            print("Waiting for opponent response...");
+        } else {
+            print("gym list        list Kanto gyms");
+            print("gym go          challenge next gym");
+            print("explore         daily wild route");
+            print("rogue           unlimited roguelike");
+            print("fight list      show nearby trainers");
+            print("fight <name>    async battle");
+            print("mmt on          live PvP challenge");
+            print("mml on          link cable battle");
+            print("stats / badges / news");
+            print("party           view your Pokemon");
+        }
         printSep();
         return;
     }

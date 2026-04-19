@@ -647,7 +647,7 @@ int32_t MonsterMeshModule::runOnce()
 
     // Deferred auto-daycare check-in — runs ASAP after setupDone_ so SAV is
     // loaded before the browser or ROM loader can access the SD card.
-    if (pendingAutoCheckin_ && !emulatorActive_) {
+    if (pendingAutoCheckin_ && !emulatorActive_ && !browserActive_) {
         pendingAutoCheckin_ = false;
         daycareAutoCheckIn();
         daycareCheckinDone_ = true;

@@ -212,7 +212,7 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
     // Full re-init of SD — end first, then begin fresh
     SD.end();
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-    bool sdOk = SD.begin(SDCARD_CS, SPI);
+    bool sdOk = SD.begin(SDCARD_CS, SPI, 4000000U);
     Serial.printf("[EMU] SD re-init: %d cardType=%d\n", (int)sdOk, (int)SD.cardType());
     if (!sdOk) {
         Serial.printf("[EMU] SD.begin() failed\n");
