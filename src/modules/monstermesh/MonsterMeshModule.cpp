@@ -584,11 +584,12 @@ int32_t MonsterMeshModule::runOnce()
         pendingAutoCheckin_ = true;
     }
 
-    // Deferred auto-daycare check-in — wait 30s after setup so SPI bus
-    // is settled (TFT, radio, LVGL all initialized and not contending).
-    if (pendingAutoCheckin_ && !browserActive_ && !emulatorActive_ && millis() > 38000) {
+    // Deferred auto-daycare check-in — runs ASAP after setupDone_ so SAV is
+    // loaded before the browser or ROM loader can access the SD card.
+    if (pendingAutoCheckin_ && !emulatorActive_) {
         pendingAutoCheckin_ = false;
         daycareAutoCheckIn();
+        daycareCheckinDone_ = true;
     }
 
     // Deferred terminal init — LVGL screen objects may not exist at setupDone_ time.
@@ -1571,6 +1572,10 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
             kbSetMode(true);
         } else {
             // No ROM loaded — open file browser
+            if (!daycareCheckinDone_) {
+                setupStatus_ = "Loading party...";
+                return;
+            }
             LOG_INFO("[MonsterMesh] ALT → opening browser\n");
             kbSetMode(false);  // ensure KEY mode for browser navigation
             browserActive_ = true;
@@ -1619,6 +1624,10 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
 
         if (!setupDone_) {
             LOG_WARN("[MonsterMesh] not ready — status: %s\n", setupStatus_);
+            return;
+        }
+        if (!daycareCheckinDone_) {
+            setupStatus_ = "Loading party...";
             return;
         }
         LOG_INFO("[MonsterMesh] Sym+Alt → opening browser\n");
