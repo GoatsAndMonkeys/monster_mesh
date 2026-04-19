@@ -84,7 +84,6 @@ void MonsterMeshTerminal::loadParty(const Gen1Party &party)
     needsLoad_ = false;
 
     if (ready()) {
-        printSep();
         showParty();
     }
 }
@@ -195,19 +194,19 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
 
     if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
         print("-- Legend of Charizard --");
-        print("gym list   list Kanto gyms");
-        print("gym go     challenge next gym");
-        print("gym N      challenge gym N directly");
-        print("explore    wild route (type 'home' to leave)");
-        print("rogue      unlimited roguelike campaign");
-        print("home       flee explore/rogue, return to town");
-        print("stats      badges, best run, totals");
-        print("badges     earned badges");
-        print("news       recent events");
-        print("party      view your Pokemon");
-        print("pick N     swap to Pokemon N in battle");
-        print("1/W 2/E 3/R 4/S    use move");
-        print("quit       forfeit current battle");
+        print("gym list        list Kanto gyms");
+        print("gym go          challenge next gym");
+        print("explore         daily wild route ('home' to leave)");
+        print("rogue           unlimited roguelike campaign");
+        print("home            flee, return to town");
+        print("fight <name>    async battle vs nearby trainer");
+        print("mmt on          live text PvP vs nearby trainer");
+        print("mml on          link cable battle vs nearby trainer");
+        print("stats / badges / news");
+        print("party           view your Pokemon");
+        print("pick N          swap Pokemon in battle");
+        print("1/W 2/E 3/R 4/S  use move");
+        print("quit            forfeit current battle");
         printSep();
         return;
     }
@@ -353,6 +352,96 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
         return;
     }
 
+    // ── mmt on / mml on ─────────────────────────────────────────────────────
+    {
+        char n[32]; normNoSpaces(cmd, n, sizeof(n));
+        if (strcmp(n, "mmton") == 0 || strcmp(n, "mmtexton") == 0) {
+            if (state_ != State::READY) { print("Finish current activity first."); return; }
+            if (savParty_.count == 0)  { print("Load a save first."); return; }
+            if (netPartner_ != 0) {
+                // Auto-accept the pending challenger
+                uint32_t seed = rand32();
+                char accept[24];
+                snprintf(accept, sizeof(accept), "MMT:ACCEPT:%08lX", (unsigned long)seed);
+                pendingDM_ = true;
+                dmTarget_  = netPartner_;
+                strncpy(dmText_, accept, sizeof(dmText_));
+                // Build opponent party from mesh peers beacon
+                Gen1Party oppP = {};
+                for (uint8_t i = 0; i < meshPeerCount_; i++) {
+                    if (meshPeers_[i].nodeId == netPartner_) {
+                        buildAsyncOpponent(meshPeers_[i], oppP);
+                        break;
+                    }
+                }
+                startNetBattle(netPartner_, seed, oppP);
+                print("Challenge accepted! Battle starting...");
+                return;
+            }
+            pendingNetChallenge_ = true;
+            print("Text battle challenge broadcast...");
+            print("Waiting for a nearby trainer to respond.");
+            return;
+        }
+        if (strcmp(n, "mmlon") == 0 || strcmp(n, "mmlinkon") == 0) {
+            // Alias for cable link: queue DM to self to trigger mmc on flow
+            pendingDM_ = true;
+            dmTarget_  = 0;          // 0 = self (module uses nodeDB->getNodeNum())
+            strncpy(dmText_, "mmc on", sizeof(dmText_));
+            print("Link cable handshake started...");
+            return;
+        }
+    }
+
+    // ── fight <name> — async battle vs neighbor beacon party ─────────────────
+    if (strncmp(cmd, "fight ", 6) == 0) {
+        if (savParty_.count == 0) { print("Load a save first."); return; }
+        if (state_ != State::READY) { print("Finish current activity first."); return; }
+        const char *name = cmd + 6;
+        bool found = false;
+        for (uint8_t i = 0; i < meshPeerCount_; i++) {
+            const DaycareNeighborPokemon &p = meshPeers_[i];
+            if (strncasecmp(p.shortName, name, 4) == 0 ||
+                strncasecmp(p.gameName,  name, 7) == 0 ||
+                strncasecmp(p.nickname,  name, 10) == 0) {
+                buildAsyncOpponent(p, oppParty_);
+                asyncOpponentNodeId_ = p.nodeId;
+                strncpy(asyncOpponentName_, p.shortName, sizeof(asyncOpponentName_) - 1);
+
+                // Heal a copy of our party for the fight
+                Gen1Party myParty = savParty_;
+                for (uint8_t j = 0; j < myParty.count; j++) {
+                    setBe16(myParty.mons[j].hp, be16(myParty.mons[j].maxHp));
+                    myParty.mons[j].status = 0;
+                    for (int k = 0; k < 4; k++) {
+                        const Gen1MoveData *mv = gen1Move(myParty.mons[j].moves[k]);
+                        if (mv) myParty.mons[j].pp[k] = mv->pp;
+                    }
+                }
+
+                engine_.start(myParty, oppParty_, rand32(), 1);
+                char msg[48];
+                snprintf(msg, sizeof(msg), "Challenging %s!", p.shortName);
+                print(msg);
+                describeBattleStatus();
+                print("Use 1..4 to attack.");
+                state_ = State::IN_BATTLE;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            if (meshPeerCount_ == 0)
+                print("No mesh trainers nearby.");
+            else {
+                char msg[48];
+                snprintf(msg, sizeof(msg), "Trainer '%s' not found nearby.", name);
+                print(msg);
+            }
+        }
+        return;
+    }
+
     if (strcmp(cmd, "fight") == 0) {
         if (state_ == State::IN_RUN) {
             startRunWave();
@@ -436,6 +525,22 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
         else if ((c == 's' || c == 'S') && (cmd[1] == 0)) slot = 3;
 
         if (slot != 0xFF) {
+        if (state_ == State::IN_NET_BATTLE) {
+            // Live PvP — store action, transition to wait
+            const auto &mine = engine_.party(0);
+            const auto &m = mine.mons[mine.active];
+            if (m.moves[slot] == 0) { print("Empty move slot."); return; }
+            if (m.pp[slot] == 0)    { print("No PP left."); return; }
+            netMyAction_ = 0;
+            netMyIndex_  = slot;
+            if (netActionReady_) {
+                resolveNetTurn();
+            } else {
+                state_ = State::IN_NET_BATTLE_WAIT;
+                print("Move chosen. Waiting for opponent...");
+            }
+            return;
+        }
         if (state_ != State::IN_BATTLE && state_ != State::IN_RUN_BATTLE &&
             state_ != State::IN_ROGUE_BATTLE && state_ != State::IN_GYM_BATTLE) {
             print("Not in battle. Type 'fight'.");
@@ -469,15 +574,20 @@ void MonsterMeshTerminal::showParty()
         return;
     }
 
-    print("Your party:");
+    // In run/rogue, show live HP from the active party, not the SAV party.
+    bool inRun   = (state_ == State::IN_RUN   || state_ == State::IN_RUN_BATTLE);
+    bool inRogue = (state_ == State::IN_ROGUE || state_ == State::IN_ROGUE_BATTLE);
+    const Gen1Party &src = inRun ? runParty_ : (inRogue ? rogueParty_ : savParty_);
+
+    print(inRun ? "Run party:" : (inRogue ? "Rogue party:" : "Your party:"));
     char buf[48];
-    for (uint8_t i = 0; i < savParty_.count; ++i) {
-        Gen1Pokemon &p = savParty_.mons[i];
+    for (uint8_t i = 0; i < src.count; ++i) {
+        const Gen1Pokemon &p = src.mons[i];
         uint8_t lvl = p.level ? p.level : p.boxLevel;
-        const char *marker = (i == chosenSlot_) ? "*" : "";
+        const char *marker = (!inRun && !inRogue && i == chosenSlot_) ? "*" : "";
         snprintf(buf, sizeof(buf), " %u) %.10s L%u %u/%u HP %s",
                  (unsigned)(i + 1),
-                 (const char *)savParty_.nicknames[i],
+                 (const char *)src.nicknames[i],
                  (unsigned)lvl,
                  (unsigned)be16(p.hp),
                  (unsigned)be16(p.maxHp),
@@ -672,9 +782,13 @@ void MonsterMeshTerminal::resolvePlayerAction(uint8_t actionType, uint8_t index)
 
     if (res == Gen1BattleEngine::Result::P1_WIN) {
         print("You won!");
+        if (asyncOpponentNodeId_ != 0) queueResultDM(true);
     } else {
         print("You lost!");
+        if (asyncOpponentNodeId_ != 0) queueResultDM(false);
     }
+    asyncOpponentNodeId_ = 0;
+    asyncOpponentName_[0] = '\0';
     print("Type 'fight' for another battle.");
     state_ = State::READY;
     printSep();
@@ -996,6 +1110,137 @@ void MonsterMeshTerminal::syncRoguePartyHpFromEngine()
         rogueParty_.mons[i].status = ep.mons[i].status;
         for (int j = 0; j < 4; j++) rogueParty_.mons[i].pp[j] = ep.mons[i].pp[j];
     }
+}
+
+// ── Async / PvP helpers ──────────────────────────────────────────────────────
+
+void MonsterMeshTerminal::buildAsyncOpponent(const DaycareNeighborPokemon &peer,
+                                              Gen1Party &out)
+{
+    memset(&out, 0, sizeof(out));
+    uint8_t n = peer.partyCount < 6 ? peer.partyCount : 6;
+    if (n == 0) {
+        // Fallback: single Pokemon from speciesDex/level fields
+        uint8_t moves[4] = {};
+        pickMovesForSpecies(peer.speciesDex, moves);
+        Gen1BattleEngine::BattlePoke dummy{};
+        writeBattlePokeToSave(out, 0, peer.speciesDex, peer.level,
+                              moves, dummy, 0x88, peer.nickname);
+        out.count = 1;
+        return;
+    }
+    for (uint8_t i = 0; i < n; i++) {
+        uint8_t moves[4] = {};
+        pickMovesForSpecies(peer.party[i].species, moves);
+        Gen1BattleEngine::BattlePoke dummy{};
+        writeBattlePokeToSave(out, i, peer.party[i].species, peer.party[i].level,
+                              moves, dummy, 0x88, peer.party[i].nickname);
+    }
+    out.count = n;
+}
+
+void MonsterMeshTerminal::queueResultDM(bool playerWon)
+{
+    uint32_t target = (asyncOpponentNodeId_ != 0) ? asyncOpponentNodeId_ : netPartner_;
+    if (target == 0) return;
+    pendingDM_ = true;
+    dmTarget_  = target;
+    const char *me = localShortName_[0] ? localShortName_ : "???";
+    if (asyncOpponentNodeId_ != 0) {
+        snprintf(dmText_, sizeof(dmText_), "[%s] %s your team in a text battle!",
+                 me, playerWon ? "defeated" : "lost to");
+    } else {
+        snprintf(dmText_, sizeof(dmText_), "[%s] text battle: %s",
+                 me, playerWon ? "GG, you lost!" : "GG, you won!");
+    }
+}
+
+void MonsterMeshTerminal::startNetBattle(uint32_t partnerNodeId, uint32_t rngSeed,
+                                          const Gen1Party &opponentParty)
+{
+    netPartner_      = partnerNodeId;
+    netMyAction_     = 0xFF;
+    netActionReady_  = false;
+    oppParty_        = opponentParty;
+
+    // Healed copy of full party for the player
+    Gen1Party myParty = savParty_;
+    for (uint8_t i = 0; i < myParty.count; i++) {
+        setBe16(myParty.mons[i].hp, be16(myParty.mons[i].maxHp));
+        myParty.mons[i].status = 0;
+        for (int j = 0; j < 4; j++) {
+            const Gen1MoveData *mv = gen1Move(myParty.mons[i].moves[j]);
+            if (mv) myParty.mons[i].pp[j] = mv->pp;
+        }
+    }
+    engine_.start(myParty, oppParty_, rngSeed, 1);
+    print("Live battle started!");
+    describeBattleStatus();
+    print("Use 1..4 to attack.");
+    state_ = State::IN_NET_BATTLE;
+}
+
+void MonsterMeshTerminal::receiveNetAction(uint8_t actionType, uint8_t index)
+{
+    netOppAction_ = actionType;
+    netOppIndex_  = index;
+    if (state_ == State::IN_NET_BATTLE_WAIT) {
+        // We already submitted — resolve now
+        resolveNetTurn();
+    } else {
+        // Opponent was faster — store and resolve when player submits
+        netActionReady_ = true;
+        if (state_ == State::IN_NET_BATTLE)
+            print("Opponent chose their move. Pick yours!");
+    }
+}
+
+void MonsterMeshTerminal::resolveNetTurn()
+{
+    engine_.submitAction(0, netMyAction_, netMyIndex_);
+    engine_.submitAction(1, netOppAction_, netOppIndex_);
+    engine_.executeTurn(&MonsterMeshTerminal::engineLogCb, this);
+    engine_.autoReplaceIfFainted(0, &MonsterMeshTerminal::engineLogCb, this);
+    engine_.autoReplaceIfFainted(1, &MonsterMeshTerminal::engineLogCb, this);
+
+    netMyAction_    = 0xFF;
+    netActionReady_ = false;
+
+    auto res = engine_.result();
+    if (res == Gen1BattleEngine::Result::ONGOING) {
+        describeBattleStatus();
+        state_ = State::IN_NET_BATTLE;
+        return;
+    }
+
+    printSep();
+    if (res == Gen1BattleEngine::Result::P1_WIN) {
+        print("You won the live battle!");
+        queueResultDM(true);
+    } else {
+        print("You lost the live battle!");
+        queueResultDM(false);
+    }
+    netPartner_ = 0;
+    state_      = State::READY;
+    printSep();
+}
+
+void MonsterMeshTerminal::receiveNetChallenge(uint32_t fromNodeId, const char *shortName)
+{
+    if (state_ == State::READY && savParty_.count > 0) {
+        char msg[48];
+        snprintf(msg, sizeof(msg), "%s wants a text battle! Type 'mmt on' to accept.", shortName);
+        print(msg);
+        // Store pending challenger so 'mmt on' auto-accepts them
+        netPartner_ = fromNodeId;
+    }
+}
+
+void MonsterMeshTerminal::receiveNetAccept(uint32_t fromNodeId, uint32_t seed,
+                                            const Gen1Party &oppParty)
+{
+    startNetBattle(fromNodeId, seed, oppParty);
 }
 
 // ── Legend of Charizard (LORD) ──────────────────────────────────────────────

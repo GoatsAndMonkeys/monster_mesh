@@ -68,7 +68,20 @@ public:
     bool hasNetAction() const { return netMyAction_ != 0xFF; }
     uint8_t netAction() const { return netMyAction_; }
     uint8_t netIndex()  const { return netMyIndex_; }
+    uint32_t netPartnerNodeId() const { return netPartner_; }
     void clearNetAction() { netMyAction_ = 0xFF; }
+
+    // Net challenge broadcast — module polls & sends "MMT:ON" then clears.
+    bool hasPendingNetChallenge() const { return pendingNetChallenge_; }
+    void clearPendingNetChallenge() { pendingNetChallenge_ = false; }
+
+    // Called by module when opponent sends "MMT:ON" broadcast.
+    void receiveNetChallenge(uint32_t fromNodeId, const char *shortName);
+    // Called by module when opponent sends "MMT:ACCEPT:<seed>" DM.
+    void receiveNetAccept(uint32_t fromNodeId, uint32_t seed, const Gen1Party &oppParty);
+
+    // Public for module to build opponent party from daycare neighbor data.
+    void buildAsyncOpponent(const DaycareNeighborPokemon &peer, Gen1Party &out);
 
     // Point to daycare's live neighbor list — called from runOnce() each tick.
     // Pointer must remain valid (it points into PokemonDaycare's internal array).
@@ -127,12 +140,13 @@ private:
     char     localShortName_[5] = {};
 
     // Live PvP (mmt on) — net battle state
-    uint32_t netPartner_       = 0;
-    uint8_t  netMyAction_      = 0xFF;  // 0xFF = not yet submitted
-    uint8_t  netMyIndex_       = 0;
-    bool     netActionReady_   = false; // opponent's action received
-    uint8_t  netOppAction_     = 0;
-    uint8_t  netOppIndex_      = 0;
+    uint32_t netPartner_          = 0;
+    uint8_t  netMyAction_         = 0xFF;  // 0xFF = not yet submitted
+    uint8_t  netMyIndex_          = 0;
+    bool     netActionReady_      = false; // opponent's action received
+    uint8_t  netOppAction_        = 0;
+    uint8_t  netOppIndex_         = 0;
+    bool     pendingNetChallenge_ = false; // 'mmt on' typed — module broadcasts
 
     // LORD — Legend of Charizard (door-game layer)
     LordSave     lord_            = {};
@@ -179,8 +193,10 @@ private:
     void syncRoguePartyHpFromEngine();
 
     // Async fight vs neighbor beacon party
-    void buildAsyncOpponent(const DaycareNeighborPokemon &peer, Gen1Party &out);
     void queueResultDM(bool playerWon);
+
+    // Net PvP helpers
+    void resolveNetTurn();
 
     // Command normalization
     static void normNoSpaces(const char *in, char *out, size_t outLen);

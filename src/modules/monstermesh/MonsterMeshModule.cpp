@@ -425,6 +425,59 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             return ProcessMessage::CONTINUE;
         }
 
+        // ── mml on — link cable alias (same as mmc on) ───────────────────
+        if (strstr(low, "mml on") || strstr(low, "mmlon") || strstr(low, "mm link on")) {
+            // Treat as mmc on — rewrite and fall through by re-entering same handler
+            if (mp.from != nodeDB->getNodeNum()) {
+                // From another node: treat as cable challenge
+                if (cableOffMs_ && (millis() - cableOffMs_ < 10000))
+                    return ProcessMessage::CONTINUE;
+                pendingChallengerFrom_ = mp.from;
+                pendingChallengeMs_    = millis();
+                sendTextDM(mp.from, "MM waiting");
+            }
+            return ProcessMessage::CONTINUE;
+        }
+
+        // ── MMT:ON — text battle challenge broadcast ──────────────────────
+        if (strstr(low, "mmt:on") || strstr(low, "mmt on")) {
+            if (mp.from == nodeDB->getNodeNum()) return ProcessMessage::CONTINUE;
+            if (terminal_.ready()) {
+                terminal_.receiveNetChallenge(mp.from, getShortName(mp.from));
+            }
+            return ProcessMessage::CONTINUE;
+        }
+
+        // ── MMT:ACCEPT:<seed> — challenge accepted, start battle ──────────
+        if (strncmp(low, "mmt:accept:", 11) == 0 && mp.from != nodeDB->getNodeNum()) {
+            uint32_t seed = (uint32_t)strtoul(low + 11, nullptr, 16);
+            if (terminal_.ready()) {
+                // Build opponent party from daycare neighbor list
+                Gen1Party oppParty{};
+                const DaycareNeighborPokemon *peers = daycare_.getNeighbors();
+                uint8_t count = daycare_.getNeighborCount();
+                for (uint8_t i = 0; i < count; i++) {
+                    if (peers[i].nodeId == mp.from) {
+                        terminal_.buildAsyncOpponent(peers[i], oppParty);
+                        break;
+                    }
+                }
+                terminal_.receiveNetAccept(mp.from, seed, oppParty);
+            }
+            return ProcessMessage::CONTINUE;
+        }
+
+        // ── MMT:ACT:<type>:<index> — opponent's live battle action ────────
+        if (strncmp(low, "mmt:act:", 8) == 0 && mp.from != nodeDB->getNodeNum()) {
+            uint8_t act = (uint8_t)strtoul(low + 8, nullptr, 10);
+            const char *colon = strchr(low + 8, ':');
+            uint8_t idx = colon ? (uint8_t)strtoul(colon + 1, nullptr, 10) : 0;
+            if (terminal_.ready()) {
+                terminal_.receiveNetAction(act, idx);
+            }
+            return ProcessMessage::CONTINUE;
+        }
+
         return ProcessMessage::CONTINUE;
     }
 
@@ -604,6 +657,31 @@ int32_t MonsterMeshModule::runOnce()
     }
     if (terminal_.ready()) {
         terminal_.setMeshPeers(daycare_.getNeighbors(), daycare_.getNeighborCount());
+        terminal_.setLocalShortName(getShortName(nodeDB->getNodeNum()));
+
+        // Drain async battle result DM
+        if (terminal_.hasPendingDM()) {
+            uint32_t t = terminal_.dmTarget();
+            if (t == 0) t = nodeDB->getNodeNum();  // 0 = self (mml on)
+            sendTextDM(t, terminal_.dmText());
+            terminal_.clearPendingDM();
+        }
+
+        // Drain live PvP action
+        if (terminal_.hasNetAction() && terminal_.netPartnerNodeId() != 0) {
+            char act[16];
+            snprintf(act, sizeof(act), "MMT:ACT:%u:%u",
+                     (unsigned)terminal_.netAction(),
+                     (unsigned)terminal_.netIndex());
+            sendTextDM(terminal_.netPartnerNodeId(), act);
+            terminal_.clearNetAction();
+        }
+
+        // Drain net challenge broadcast
+        if (terminal_.hasPendingNetChallenge()) {
+            terminal_.clearPendingNetChallenge();
+            sendTextDM(NODENUM_BROADCAST, "MMT:ON");
+        }
     }
 #endif
 
