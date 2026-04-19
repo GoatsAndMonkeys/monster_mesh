@@ -21,6 +21,8 @@
 #include "Gen1BattleEngine.h"
 #include "PokemonData.h"
 #include "DaycareEventGen.h"
+#include "LordSave.h"
+#include "LordLogic.h"
 #include "showdown_gen1_basestats.h"
 #include "showdown_gen1_moves.h"
 
@@ -58,6 +60,8 @@ private:
         IN_BATTLE,      // in a battle
         IN_RUN,         // roguelike run active, between waves
         IN_RUN_BATTLE,  // roguelike run, in a wave battle
+        IN_GYM_SELECT,  // LORD: choosing a gym
+        IN_GYM_BATTLE,  // LORD: in a gym gauntlet fight
     };
 
     static constexpr uint16_t MAX_OUTPUT_LINES = 200;
@@ -75,6 +79,17 @@ private:
     bool      runActive_  = false;
     uint8_t   waveNum_    = 0;
     Gen1Party runParty_   = {};   // full party with HP persisted across waves
+    bool      runWildOnly_ = false;  // Explore (LORD) forces random wilds, no mesh pulls
+
+    // LORD — Legend of Charizard (door-game layer)
+    LordSave     lord_            = {};
+    bool         lordLoaded_      = false;
+    LordRunStats currentRun_      = {};
+    int8_t       tzOffsetHours_   = -5;   // TODO: wire to Meshtastic TZ config
+    uint8_t      currentGymIdx_   = 0xFF;
+    uint8_t      currentGymTrainer_ = 0;
+    Gen1Party    gymParty_        = {};   // full 6-mon player party for gauntlet
+    bool         lordMenuShown_   = false;
 
     // Mesh peer list — pointer into PokemonDaycare::neighbors_ (not owned)
     const DaycareNeighborPokemon *meshPeers_     = nullptr;
@@ -104,6 +119,18 @@ private:
     void startRunWave();
     void syncRunPartyHpFromEngine();
     uint8_t runAvgLevel() const;
+
+    // LORD commands
+    void lordEnsureLoaded();
+    void showGymSelect();
+    void startGymGauntlet(uint8_t gymIdx);
+    void startGymFight();
+    void advanceGymTrainer();
+    void showStats();
+    void showNews();
+    void showBadges();
+    void showLeaderboard();
+    void syncGymPartyHpFromEngine();
 
     // Wild opponent generation
     void buildWildOpponent(Gen1Party &out, uint8_t level);

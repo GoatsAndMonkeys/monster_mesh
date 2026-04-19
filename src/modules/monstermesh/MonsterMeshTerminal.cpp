@@ -2,6 +2,8 @@
 // See MonsterMeshTerminal.h.
 
 #include "MonsterMeshTerminal.h"
+#include "LordGyms.h"
+#include "gps/RTC.h"
 #include "graphics/view/TFT/Themes.h"
 #include <lvgl.h>
 #include <cstring>
@@ -145,9 +147,77 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
         print("1..4     use move in battle");
         print("status   show battle status");
         print("quit     forfeit battle");
+        print("-- LORD --");
+        print("gym      list Kanto gyms");
+        print("gym N    challenge gym N");
+        print("explore  once-a-day random roguelike");
+        print("stats    badges, best run, totals");
+        print("badges   earned badges");
+        print("news     recent events");
         printSep();
         return;
     }
+
+    // ── LORD commands ────────────────────────────────────────────────────────
+
+    if (strcmp(cmd, "gym") == 0) {
+        if (state_ == State::IN_BATTLE || state_ == State::IN_RUN_BATTLE ||
+            state_ == State::IN_GYM_BATTLE) {
+            print("Finish your current battle first.");
+            return;
+        }
+        if (savParty_.count == 0) {
+            print("Load a Pokemon save first.");
+            return;
+        }
+        showGymSelect();
+        return;
+    }
+
+    if (strncmp(cmd, "gym ", 4) == 0) {
+        if (state_ == State::IN_BATTLE || state_ == State::IN_RUN_BATTLE ||
+            state_ == State::IN_GYM_BATTLE) {
+            print("Finish your current battle first.");
+            return;
+        }
+        if (savParty_.count == 0) {
+            print("Load a Pokemon save first.");
+            return;
+        }
+        int g = atoi(cmd + 4);
+        if (g < 1 || g > 8) { print("Usage: gym 1..8"); return; }
+        startGymGauntlet((uint8_t)(g - 1));
+        return;
+    }
+
+    if (strcmp(cmd, "explore") == 0) {
+        if (savParty_.count == 0) {
+            print("Load a Pokemon save first.");
+            return;
+        }
+        if (state_ == State::IN_BATTLE || state_ == State::IN_RUN_BATTLE ||
+            state_ == State::IN_GYM_BATTLE) {
+            print("Finish your current battle first.");
+            return;
+        }
+        lordEnsureLoaded();
+        lordApplyDailyReset(lord_, getTime(), tzOffsetHours_);
+        if (!lord_.exploreUnlimited && lord_.exploreRunsToday >= 1) {
+            print("You're exhausted. Come back tomorrow.");
+            return;
+        }
+        lord_.exploreRunsToday++;
+        lordSave(lord_);
+        runWildOnly_ = true;
+        lordResetRunStats(currentRun_);
+        startRun();
+        return;
+    }
+
+    if (strcmp(cmd, "stats") == 0)       { showStats();       return; }
+    if (strcmp(cmd, "badges") == 0)      { showBadges();      return; }
+    if (strcmp(cmd, "news") == 0)        { showNews();        return; }
+    if (strcmp(cmd, "leaderboard") == 0) { showLeaderboard(); return; }
 
     if (strcmp(cmd, "party") == 0) {
         showParty();
@@ -171,6 +241,7 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
             print("No party loaded. Waiting for SAV...");
             return;
         }
+        runWildOnly_ = false;   // legacy `run`: mesh-peer encounters allowed
         startRun();
         return;
     }
@@ -178,6 +249,10 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
     if (strcmp(cmd, "fight") == 0) {
         if (state_ == State::IN_RUN) {
             startRunWave();
+            return;
+        }
+        if (state_ == State::IN_GYM_SELECT) {
+            startGymFight();
             return;
         }
         if (state_ != State::READY) {
@@ -220,6 +295,11 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
             state_ = State::READY;
             print("Run abandoned.");
             printSep();
+        } else if (state_ == State::IN_GYM_BATTLE || state_ == State::IN_GYM_SELECT) {
+            state_ = State::READY;
+            currentGymIdx_ = 0xFF;
+            print("Gym challenge abandoned.");
+            printSep();
         } else {
             print("Not in battle.");
         }
@@ -229,7 +309,8 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
     // Move: 1..4
     if (cmd[0] >= '1' && cmd[0] <= '4' &&
         (cmd[1] == 0 || cmd[1] == ' ')) {
-        if (state_ != State::IN_BATTLE && state_ != State::IN_RUN_BATTLE) {
+        if (state_ != State::IN_BATTLE && state_ != State::IN_RUN_BATTLE &&
+            state_ != State::IN_GYM_BATTLE) {
             print("Not in battle. Type 'fight'.");
             return;
         }
@@ -365,10 +446,16 @@ void MonsterMeshTerminal::resolvePlayerAction(uint8_t actionType, uint8_t index)
     if (state_ == State::IN_RUN_BATTLE) {
         if (res == Gen1BattleEngine::Result::P1_WIN) {
             syncRunPartyHpFromEngine();
+            currentRun_.wavesBeaten = waveNum_;
+            const auto &foe = engine_.party(1);
+            if (foe.count > 0) {
+                uint8_t lvl = foe.mons[0].level;
+                if (lvl > currentRun_.highestOppLevel) currentRun_.highestOppLevel = lvl;
+                currentRun_.xpEarned += (uint16_t)lvl * 4;   // rough proxy
+            }
             char msg[48];
             snprintf(msg, sizeof(msg), "Wave %u cleared!", (unsigned)waveNum_);
             print(msg);
-            // Show remaining HP so player knows their state
             uint8_t alive = 0;
             for (uint8_t i = 0; i < runParty_.count; i++)
                 if (be16(runParty_.mons[i].hp) > 0) alive++;
@@ -382,7 +469,35 @@ void MonsterMeshTerminal::resolvePlayerAction(uint8_t actionType, uint8_t index)
             print(msg);
             snprintf(msg, sizeof(msg), "Run over! You reached wave %u.", (unsigned)waveNum_);
             print(msg);
+            if (runWildOnly_) {
+                lordEnsureLoaded();
+                lordOnRunEnd(lord_, currentRun_);
+                lordSave(lord_);
+                runWildOnly_ = false;
+            }
             runActive_ = false;
+            state_ = State::READY;
+        }
+        printSep();
+        return;
+    }
+
+    if (state_ == State::IN_GYM_BATTLE) {
+        if (res == Gen1BattleEngine::Result::P1_WIN) {
+            syncGymPartyHpFromEngine();
+            char msg[48];
+            const LordGym *g = lordGym(currentGymIdx_);
+            const char *who = g ? g->trainers[currentGymTrainer_].name : "Trainer";
+            snprintf(msg, sizeof(msg), "%s defeated!", who);
+            print(msg);
+            advanceGymTrainer();
+        } else {
+            const LordGym *g = lordGym(currentGymIdx_);
+            char msg[64];
+            snprintf(msg, sizeof(msg), "You lost at %s. Retry with 'gym %u'.",
+                     g ? g->city : "the gym", (unsigned)(currentGymIdx_ + 1));
+            print(msg);
+            currentGymIdx_ = 0xFF;
             state_ = State::READY;
         }
         printSep();
@@ -488,7 +603,7 @@ void MonsterMeshTerminal::buildWildOpponent(Gen1Party &out, uint8_t avgLvl)
     uint8_t species = 0;
     const char *nick = "WILD MON";
 
-    if (meshPeerCount_ > 0) {
+    if (meshPeerCount_ > 0 && !runWildOnly_) {
         // Pick a random mesh peer's Pokemon as the opponent
         const DaycareNeighborPokemon &peer = meshPeers_[rand32() % meshPeerCount_];
         species = peer.speciesDex;
@@ -617,4 +732,264 @@ void MonsterMeshTerminal::syncRunPartyHpFromEngine()
         // Sync PP
         for (int j = 0; j < 4; j++) runParty_.mons[i].pp[j] = ep.mons[i].pp[j];
     }
+}
+
+// ── Legend of Charizard (LORD) ──────────────────────────────────────────────
+
+void MonsterMeshTerminal::lordEnsureLoaded()
+{
+    if (lordLoaded_) return;
+    lordLoad(lord_);     // zero-inits on failure — safe
+    lordLoaded_ = true;
+}
+
+void MonsterMeshTerminal::syncGymPartyHpFromEngine()
+{
+    const auto &ep = engine_.party(0);
+    for (uint8_t i = 0; i < gymParty_.count && i < ep.count; i++) {
+        setBe16(gymParty_.mons[i].hp, ep.mons[i].hp);
+        gymParty_.mons[i].status = ep.mons[i].status;
+        for (int j = 0; j < 4; j++) gymParty_.mons[i].pp[j] = ep.mons[i].pp[j];
+    }
+}
+
+void MonsterMeshTerminal::showGymSelect()
+{
+    lordEnsureLoaded();
+    char buf[512];
+    int pos = snprintf(buf, sizeof(buf), "Kanto Gyms:");
+    for (uint8_t i = 0; i < LORD_GYM_COUNT; ++i) {
+        const LordGym *g = lordGym(i);
+        if (!g) continue;
+        const char *tag =
+            lordHasBadge(lord_, i) ? "[earned]" :
+            lordGymUnlocked(lord_, i) ? "[open]" : "[locked]";
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        "\n %u) %s - %s %s",
+                        (unsigned)(i + 1), g->city, g->leaderName, tag);
+    }
+    print(buf);
+    print("Type 'gym N' to challenge.");
+    printSep();
+    state_ = State::IN_GYM_SELECT;
+}
+
+void MonsterMeshTerminal::startGymGauntlet(uint8_t gymIdx)
+{
+    lordEnsureLoaded();
+    if (gymIdx >= LORD_GYM_COUNT) { print("Invalid gym."); return; }
+    if (!lordGymUnlocked(lord_, gymIdx)) {
+        print("Clear earlier gyms first.");
+        return;
+    }
+
+    const LordGym *g = lordGym(gymIdx);
+    if (!g) return;
+
+    // Snapshot and heal the player's party for the gauntlet.
+    memcpy(&gymParty_, &savParty_, sizeof(Gen1Party));
+    for (uint8_t i = 0; i < gymParty_.count; i++) {
+        Gen1Pokemon &p = gymParty_.mons[i];
+        setBe16(p.hp, be16(p.maxHp));
+        p.status = 0;
+        for (int j = 0; j < 4; j++) {
+            const Gen1MoveData *mv = gen1Move(p.moves[j]);
+            if (mv) p.pp[j] = mv->pp;
+        }
+    }
+
+    currentGymIdx_     = gymIdx;
+    currentGymTrainer_ = 0;
+
+    char msg[80];
+    snprintf(msg, sizeof(msg), "-- %s Gym -- Leader: %s (%s Badge)",
+             g->city, g->leaderName, g->badgeName);
+    print(msg);
+    print("5 trainers to beat. No healing between fights.");
+    printSep();
+    startGymFight();
+}
+
+void MonsterMeshTerminal::startGymFight()
+{
+    const LordGym *g = lordGym(currentGymIdx_);
+    if (!g) return;
+    if (currentGymTrainer_ >= LORD_GYM_TRAINERS) return;
+
+    Gen1Party foe{};
+    if (!lordBuildGymParty(currentGymIdx_, currentGymTrainer_, foe)) {
+        print("Trainer roster missing. Aborting.");
+        state_ = State::READY;
+        currentGymIdx_ = 0xFF;
+        return;
+    }
+    oppParty_ = foe;   // reuse terminal's slot
+    lastFoeSource_[0] = '\0';
+
+    // Seed from local RNG — determinism not required for local play.
+    engine_.start(gymParty_, oppParty_, rand32(), 1);
+
+    char msg[64];
+    const LordGymTrainer &tr = g->trainers[currentGymTrainer_];
+    if (currentGymTrainer_ == LORD_GYM_LEADER_INDEX) {
+        snprintf(msg, sizeof(msg), "Leader %s challenges you!", tr.name);
+    } else {
+        snprintf(msg, sizeof(msg), "%s wants to battle!", tr.name);
+    }
+    print(msg);
+    describeBattleStatus();
+    print("Use 1..4 to attack.");
+    state_ = State::IN_GYM_BATTLE;
+}
+
+void MonsterMeshTerminal::advanceGymTrainer()
+{
+    // Carry engine state back into gymParty_ before building the next fight.
+    syncGymPartyHpFromEngine();
+
+    // Check any of the player's party still conscious.
+    uint8_t alive = 0;
+    for (uint8_t i = 0; i < gymParty_.count; i++)
+        if (be16(gymParty_.mons[i].hp) > 0) alive++;
+    if (alive == 0) {
+        const LordGym *g = lordGym(currentGymIdx_);
+        char msg[64];
+        snprintf(msg, sizeof(msg), "All fainted. %s stands.",
+                 g ? g->leaderName : "The leader");
+        print(msg);
+        currentGymIdx_ = 0xFF;
+        state_ = State::READY;
+        printSep();
+        return;
+    }
+
+    currentGymTrainer_++;
+    if (currentGymTrainer_ >= LORD_GYM_TRAINERS) {
+        // Leader cleared!
+        const LordGym *g = lordGym(currentGymIdx_);
+        lordOnGymCleared(lord_, currentGymIdx_);
+        lordSave(lord_);
+
+        char msg[80];
+        snprintf(msg, sizeof(msg), "You earned the %s Badge!",
+                 g ? g->badgeName : "???");
+        print(msg);
+        print("Head home to rest.");
+        currentGymIdx_ = 0xFF;
+        state_ = State::READY;
+        printSep();
+        return;
+    }
+
+    // Next trainer.
+    char msg[48];
+    snprintf(msg, sizeof(msg), "Next up: %u/5",
+             (unsigned)(currentGymTrainer_ + 1));
+    print(msg);
+    startGymFight();
+}
+
+void MonsterMeshTerminal::showStats()
+{
+    lordEnsureLoaded();
+    lordApplyDailyReset(lord_, getTime(), tzOffsetHours_);
+
+    uint8_t earned = 0;
+    for (uint8_t i = 0; i < 8; ++i) if (lordHasBadge(lord_, i)) earned++;
+
+    char buf[256];
+    int pos = snprintf(buf, sizeof(buf),
+        "Badges: %u/8\nTotal runs: %lu\nTotal waves: %lu",
+        (unsigned)earned,
+        (unsigned long)lord_.totalRuns,
+        (unsigned long)lord_.totalWavesBeaten);
+    pos += snprintf(buf + pos, sizeof(buf) - pos,
+        "\nBest run: %u waves (L%u foe, %lu xp)",
+        (unsigned)lord_.bestRunWaves,
+        (unsigned)lord_.bestRunHighestLevel,
+        (unsigned long)lord_.bestRunXp);
+    uint8_t remaining = lord_.exploreUnlimited ? 99 :
+        (lord_.exploreRunsToday >= 1 ? 0 : 1);
+    pos += snprintf(buf + pos, sizeof(buf) - pos,
+        "\nExplore runs today: %u left", (unsigned)remaining);
+    print(buf);
+    printSep();
+}
+
+void MonsterMeshTerminal::showBadges()
+{
+    lordEnsureLoaded();
+    static const char INIT[8] = {'B','C','T','R','S','M','V','E'};
+    char row[17];
+    int pos = 0;
+    for (uint8_t i = 0; i < 8; ++i) {
+        row[pos++] = '[';
+        row[pos++] = lordHasBadge(lord_, i) ? INIT[i] : '-';
+        row[pos++] = ']';
+    }
+    row[pos] = 0;
+
+    char line[48];
+    snprintf(line, sizeof(line), "Badges: %s", row);
+    print(line);
+    printSep();
+}
+
+void MonsterMeshTerminal::showNews()
+{
+    lordEnsureLoaded();
+    lordApplyDailyReset(lord_, getTime(), tzOffsetHours_);
+
+    if (lord_.newsCount == 0) {
+        print("No news yet. Earn a badge!");
+        printSep();
+        return;
+    }
+
+    print("News:");
+    // Walk the ring newest-first.
+    for (uint8_t k = 0; k < lord_.newsCount; ++k) {
+        uint8_t idx = (uint8_t)((lord_.newsHead + LORD_NEWS_CAP - 1 - k) % LORD_NEWS_CAP);
+        const LordNewsEntry &e = lord_.news[idx];
+        char line[80];
+        switch (e.type) {
+        case LORD_NEWS_BADGE: {
+            const LordGym *g = lordGym(e.arg1);
+            snprintf(line, sizeof(line), " - Earned %s Badge",
+                     g ? g->badgeName : "???");
+            break; }
+        case LORD_NEWS_BEST_RUN:
+            snprintf(line, sizeof(line), " - New best run: %u waves",
+                     (unsigned)e.arg2);
+            break;
+        case LORD_NEWS_CENTURY:
+            snprintf(line, sizeof(line), " - %u-run milestone",
+                     (unsigned)e.arg2);
+            break;
+        case LORD_NEWS_RUN_ENDED:
+            snprintf(line, sizeof(line), " - Run ended at wave %u",
+                     (unsigned)e.arg2);
+            break;
+        default:
+            continue;
+        }
+        print(line);
+    }
+    printSep();
+}
+
+void MonsterMeshTerminal::showLeaderboard()
+{
+    lordEnsureLoaded();
+    uint8_t earned = 0;
+    for (uint8_t i = 0; i < 8; ++i) if (lordHasBadge(lord_, i)) earned++;
+    char line[64];
+    snprintf(line, sizeof(line),
+             "You: %u badges | best %u waves | %lu xp",
+             (unsigned)earned,
+             (unsigned)lord_.bestRunWaves,
+             (unsigned long)lord_.bestRunXp);
+    print("Local leaderboard:");
+    print(line);
+    printSep();
 }
