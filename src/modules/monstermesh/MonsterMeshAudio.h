@@ -44,6 +44,7 @@ private:
     bool running_ = false;
     bool muted_ = false;
     uint8_t volume_ = 4;  // default mid volume
+    i2s_port_t port_ = I2S_NUM_0;
 
     // Audio sample buffer (stereo interleaved)
     int16_t sampleBuf_[AUDIO_SAMPLES_TOTAL];

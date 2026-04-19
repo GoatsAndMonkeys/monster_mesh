@@ -785,25 +785,6 @@ void DaycareEventGen::generateCompositional(
             break;
     }
 
-    // Append personality-weighted outcome (for combat/explore categories)
-    if (cat == EVCAT_COMBAT || cat == EVCAT_EXPLORE) {
-        const char *outcome;
-        // 60% personality-weighted, 40% generic
-        if (rngChance(60) && sp->personality < PERS_COUNT) {
-            outcome = personalityOutcomes[sp->personality][rngRange(OUTCOMES_PERSONALITY_COUNT)];
-        } else {
-            outcome = outcomesGeneric[rngRange(OUTCOMES_GENERIC_COUNT)];
-        }
-
-        // Replace the trailing location with outcome if message is getting long
-        size_t msgLen = strlen(msgBuf);
-        if (msgLen + strlen(outcome) + 2 < sizeof(msgBuf)) {
-            // Add space + outcome
-            msgBuf[msgLen] = ' ';
-            strcpy(msgBuf + msgLen + 1, outcome);
-        }
-    }
-
     // Copy to output
     strncpy(out.message, msgBuf, sizeof(out.message) - 1);
     out.message[sizeof(out.message) - 1] = '\0';

@@ -430,7 +430,21 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
                 print("Already waiting for a response. Stand by...");
                 return;
             }
-            if (state_ != State::READY) { print("Finish current activity first."); return; }
+            if (state_ != State::READY) {
+                const char *what =
+                    (state_ == State::IN_NET_CHALLENGE_SENT) ? "waiting for challenge response (type 'cancel')" :
+                    (state_ == State::IN_NET_CHALLENGE_WAIT) ? "pending challenge - type 'y' or 'n'" :
+                    (state_ == State::IN_NET_BATTLE || state_ == State::IN_NET_BATTLE_WAIT) ? "in a live battle (type 'cancel')" :
+                    (state_ == State::IN_BATTLE)      ? "in battle (type 'quit')" :
+                    (state_ == State::IN_RUN || state_ == State::IN_RUN_BATTLE)   ? "on a route (type 'home')" :
+                    (state_ == State::IN_ROGUE || state_ == State::IN_ROGUE_BATTLE) ? "in rogue mode (type 'quit')" :
+                    (state_ == State::IN_GYM_SELECT || state_ == State::IN_GYM_BATTLE) ? "at a gym (type 'quit')" :
+                    "busy";
+                char msg[64];
+                snprintf(msg, sizeof(msg), "Still %s.", what);
+                print(msg);
+                return;
+            }
             if (savParty_.count == 0)  { print("Load a save first."); return; }
             netPartner_ = 0;
             pendingNetChallenge_ = true;
@@ -466,7 +480,21 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
     // ── fight <name> — async battle vs neighbor beacon party ─────────────────
     if (strncmp(cmd, "fight ", 6) == 0) {
         if (savParty_.count == 0) { print("Load a save first."); return; }
-        if (state_ != State::READY) { print("Finish current activity first."); return; }
+        if (state_ != State::READY) {
+            const char *what =
+                (state_ == State::IN_NET_CHALLENGE_SENT) ? "waiting for challenge response (type 'cancel')" :
+                (state_ == State::IN_NET_CHALLENGE_WAIT) ? "pending challenge - type 'y' or 'n'" :
+                (state_ == State::IN_NET_BATTLE || state_ == State::IN_NET_BATTLE_WAIT) ? "in a live battle (type 'cancel')" :
+                (state_ == State::IN_BATTLE)      ? "in battle (type 'quit')" :
+                (state_ == State::IN_RUN || state_ == State::IN_RUN_BATTLE)   ? "on a route (type 'home')" :
+                (state_ == State::IN_ROGUE || state_ == State::IN_ROGUE_BATTLE) ? "in rogue mode (type 'quit')" :
+                (state_ == State::IN_GYM_SELECT || state_ == State::IN_GYM_BATTLE) ? "at a gym (type 'quit')" :
+                "busy";
+            char msg[64];
+            snprintf(msg, sizeof(msg), "Still %s.", what);
+            print(msg);
+            return;
+        }
         const char *name = cmd + 6;
         bool found = false;
         for (uint8_t i = 0; i < meshPeerCount_; i++) {
@@ -554,7 +582,7 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
         return;
     }
 
-    if (strcmp(cmd, "quit") == 0) {
+    if (strcmp(cmd, "quit") == 0 || strcmp(cmd, "cancel") == 0) {
         if (state_ == State::IN_BATTLE || state_ == State::IN_RUN_BATTLE ||
             state_ == State::IN_ROGUE_BATTLE) {
             runActive_ = false;
@@ -565,7 +593,7 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
         } else if (state_ == State::IN_RUN) {
             runActive_ = false;
             state_ = State::READY;
-            print("Run abandoned. Type 'home' to leave cleanly next time.");
+            print("Run abandoned.");
             printSep();
         } else if (state_ == State::IN_ROGUE) {
             rogueActive_ = false;
@@ -577,8 +605,23 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
             currentGymIdx_ = 0xFF;
             print("Gym challenge abandoned.");
             printSep();
+        } else if (state_ == State::IN_NET_CHALLENGE_SENT) {
+            state_ = State::READY;
+            netPartner_ = 0;
+            pendingNetChallenge_ = false;
+            print("Challenge cancelled.");
+        } else if (state_ == State::IN_NET_CHALLENGE_WAIT) {
+            pendingDM_ = true; dmTarget_ = netPartner_;
+            strncpy(dmText_, "MMT:REJECT", sizeof(dmText_));
+            state_ = State::READY;
+            netPartner_ = 0;
+            print("You fled.");
+        } else if (state_ == State::IN_NET_BATTLE || state_ == State::IN_NET_BATTLE_WAIT) {
+            state_ = State::READY;
+            netPartner_ = 0;
+            print("Net battle ended.");
         } else {
-            print("Not in battle.");
+            print("Nothing to cancel.");
         }
         return;
     }
