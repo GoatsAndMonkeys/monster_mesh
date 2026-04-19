@@ -206,22 +206,23 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
     // Free previous ROM if reloading
     if (romData_) { free(romData_); romData_ = nullptr; romSize_ = 0; }
 
-    // SD shares SPI bus with radio and TFT — must hold spiLock
+    // SD shares SPI bus with radio — hold spiLock for the duration
     concurrency::LockGuard g(spiLock);
 
-    // Full re-init of SD — end first, then begin fresh
-    SD.end();
-    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-    bool sdOk = SD.begin(SDCARD_CS, SPI, 4000000U);
-    Serial.printf("[EMU] SD re-init: %d cardType=%d\n", (int)sdOk, (int)SD.cardType());
-    if (!sdOk) {
-        Serial.printf("[EMU] SD.begin() failed\n");
-        return false;
-    }
-
-    // Try direct open first
+    // Try opening the file directly first — SD is already initialized by the browser.
+    // Avoid SD.end()/SPI.begin()/SD.begin() here: the map tile loader accesses SD
+    // outside spiLock, so tearing down the bus races with it and hangs SD.begin().
     File f = SD.open(sdPath, FILE_READ);
     Serial.printf("[EMU] SD.open('%s') = %d\n", sdPath, (int)(bool)f);
+    if (!f) {
+        // Fall back: try full re-init once
+        SD.end();
+        SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+        bool sdOk = SD.begin(SDCARD_CS, SPI, 4000000U);
+        Serial.printf("[EMU] SD re-init: %d cardType=%d\n", (int)sdOk, (int)SD.cardType());
+        f = SD.open(sdPath, FILE_READ);
+        Serial.printf("[EMU] SD.open('%s') after reinit = %d\n", sdPath, (int)(bool)f);
+    }
     if (!f) {
         // Try with /sd prefix
         f = SD.open(path, FILE_READ);
