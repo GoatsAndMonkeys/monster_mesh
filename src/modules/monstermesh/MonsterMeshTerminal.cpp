@@ -69,8 +69,8 @@ void MonsterMeshTerminal::loadParty(const Gen1Party &party)
         char buf[48];
         snprintf(buf, sizeof(buf), "%u Pokemon loaded.", (unsigned)savParty_.count);
         print(buf);
-        print("Type 'help' to start.");
         printSep();
+        showParty();
     }
 }
 
@@ -164,7 +164,8 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
         print("badges     earned badges");
         print("news       recent events");
         print("party      view your Pokemon");
-        print("1..4       use move in battle");
+        print("pick N     swap to Pokemon N in battle");
+        print("W/E/R/S or 1/2/3/4 - use move");
         print("quit       forfeit battle");
         printSep();
         return;
@@ -335,15 +336,23 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
         return;
     }
 
-    // Move: 1..4
-    if (cmd[0] >= '1' && cmd[0] <= '4' &&
-        (cmd[1] == 0 || cmd[1] == ' ')) {
+    // Move: 1/W  2/E  3/R  4/S  (letter aliases avoid SYM key)
+    {
+        uint8_t slot = 0xFF;
+        char c = cmd[0];
+        if ((c >= '1' && c <= '4') && (cmd[1] == 0 || cmd[1] == ' '))
+            slot = (uint8_t)(c - '1');
+        else if ((c == 'w' || c == 'W') && (cmd[1] == 0)) slot = 0;
+        else if ((c == 'e' || c == 'E') && (cmd[1] == 0)) slot = 1;
+        else if ((c == 'r' || c == 'R') && (cmd[1] == 0)) slot = 2;
+        else if ((c == 's' || c == 'S') && (cmd[1] == 0)) slot = 3;
+
+        if (slot != 0xFF) {
         if (state_ != State::IN_BATTLE && state_ != State::IN_RUN_BATTLE &&
             state_ != State::IN_GYM_BATTLE) {
             print("Not in battle. Type 'fight'.");
             return;
         }
-        uint8_t slot = (uint8_t)(cmd[0] - '1');
         const auto &mine = engine_.party(0);
         const auto &m = mine.mons[mine.active];
         if (m.moves[slot] == 0) {
@@ -356,7 +365,8 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
         }
         resolvePlayerAction(0, slot);
         return;
-    }
+        } // if (slot != 0xFF)
+    } // move block
 
     print("Unknown command. Type 'help'.");
 }
@@ -403,8 +413,24 @@ void MonsterMeshTerminal::pickPokemon(uint8_t slot)
         print(buf);
         return;
     }
-    if (state_ == State::IN_BATTLE) {
-        print("Can't switch during battle. 'quit' first.");
+    if (state_ == State::IN_BATTLE || state_ == State::IN_RUN_BATTLE ||
+        state_ == State::IN_GYM_BATTLE) {
+        // Mid-battle switch — costs a turn (CPU attacks while you switch)
+        if (slot >= engine_.party(0).count) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "Only %u Pokemon available.", (unsigned)engine_.party(0).count);
+            print(buf);
+            return;
+        }
+        if (engine_.party(0).mons[slot].hp == 0) {
+            print("That Pokemon has fainted.");
+            return;
+        }
+        if (slot == engine_.party(0).active) {
+            print("That Pokemon is already out.");
+            return;
+        }
+        resolvePlayerAction(1, slot);
         return;
     }
 
@@ -560,11 +586,12 @@ void MonsterMeshTerminal::describeBattleStatus()
              (unsigned)m.hp, (unsigned)m.maxHp);
     print(buf);
 
+    static const char MOVE_KEYS[4] = {'W','E','R','S'};
     for (uint8_t i = 0; i < 4; ++i) {
         if (m.moves[i] == 0) continue;
         const Gen1MoveData *mv = gen1Move(m.moves[i]);
-        snprintf(buf, sizeof(buf), " %u) %-12s PP %u",
-                 (unsigned)(i + 1), mv ? mv->name : "?", (unsigned)m.pp[i]);
+        snprintf(buf, sizeof(buf), " %c/%u) %-12s PP %u",
+                 MOVE_KEYS[i], (unsigned)(i + 1), mv ? mv->name : "?", (unsigned)m.pp[i]);
         print(buf);
     }
 }
