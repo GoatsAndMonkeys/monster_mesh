@@ -9,6 +9,8 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <esp_heap_caps.h>
+#include <esp_timer.h>
 
 // Cozette 13px pixel font
 LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_13;
@@ -384,6 +386,27 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
     if (strcmp(cmd, "badges") == 0)      { showBadges();      return; }
     if (strcmp(cmd, "news") == 0)        { showNews();        return; }
     if (strcmp(cmd, "leaderboard") == 0) { showLeaderboard(); return; }
+
+    if (strcmp(cmd, "sysinfo") == 0) {
+        char buf[64];
+        uint32_t freeHeap  = esp_get_free_heap_size();
+        uint32_t minHeap   = esp_get_minimum_free_heap_size();
+        uint32_t freePsram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        uint32_t totPsram  = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+        uint32_t upSec     = (uint32_t)(esp_timer_get_time() / 1000000ULL);
+        uint32_t h = upSec / 3600, m = (upSec % 3600) / 60, s = upSec % 60;
+        print("-- System Info --");
+        snprintf(buf, sizeof(buf), "Heap:  %u KB free (%u KB min)", freeHeap/1024, minHeap/1024);
+        print(buf);
+        snprintf(buf, sizeof(buf), "PSRAM: %u / %u KB free", freePsram/1024, totPsram/1024);
+        print(buf);
+        snprintf(buf, sizeof(buf), "Uptime: %uh %um %us", h, m, s);
+        print(buf);
+        snprintf(buf, sizeof(buf), "Peers: %u", (unsigned)meshPeerCount_);
+        print(buf);
+        printSep();
+        return;
+    }
 
     if (strcmp(cmd, "party") == 0) {
         showParty();
