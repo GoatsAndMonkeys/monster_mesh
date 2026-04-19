@@ -441,11 +441,20 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             return ProcessMessage::CONTINUE;
         }
 
-        // ── MMT:ON — text battle challenge broadcast ──────────────────────
+        // ── MMT:ON — text battle challenge (terminal or DM) ──────────────
         if (strstr(low, "mmt:on") || strstr(low, "mmt on")) {
             if (mp.from == nodeDB->getNodeNum()) return ProcessMessage::CONTINUE;
             if (terminal_.ready()) {
                 terminal_.receiveNetChallenge(mp.from, getShortName(mp.from));
+                // If this was a direct DM (not broadcast), ack to challenger so
+                // they know to open their terminal to wait for the battle.
+                if (!isBroadcast(mp.to)) {
+                    char ack[64];
+                    snprintf(ack, sizeof(ack),
+                             "[%s] got your challenge! Open MMT terminal to wait.",
+                             getShortName(nodeDB->getNodeNum()));
+                    sendTextDM(mp.from, ack);
+                }
             }
             return ProcessMessage::CONTINUE;
         }

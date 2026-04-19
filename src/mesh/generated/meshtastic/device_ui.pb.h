@@ -20,12 +20,13 @@ typedef enum _meshtastic_CompassMode {
 } meshtastic_CompassMode;
 
 typedef enum _meshtastic_Theme {
-    /* Dark */
     meshtastic_Theme_DARK = 0,
-    /* Light */
     meshtastic_Theme_LIGHT = 1,
-    /* Red */
-    meshtastic_Theme_RED = 2
+    meshtastic_Theme_DMG = 2,
+    meshtastic_Theme_GBC = 3,
+    meshtastic_Theme_POCKET = 4,
+    meshtastic_Theme_POKEMON_BLUE = 5,
+    meshtastic_Theme_POKEMON_RED = 6
 } meshtastic_Theme;
 
 /* Localization */
@@ -206,8 +207,8 @@ extern "C" {
 #define _meshtastic_CompassMode_ARRAYSIZE ((meshtastic_CompassMode)(meshtastic_CompassMode_FREEZE_HEADING+1))
 
 #define _meshtastic_Theme_MIN meshtastic_Theme_DARK
-#define _meshtastic_Theme_MAX meshtastic_Theme_RED
-#define _meshtastic_Theme_ARRAYSIZE ((meshtastic_Theme)(meshtastic_Theme_RED+1))
+#define _meshtastic_Theme_MAX meshtastic_Theme_POKEMON_RED
+#define _meshtastic_Theme_ARRAYSIZE ((meshtastic_Theme)(meshtastic_Theme_POKEMON_RED+1))
 
 #define _meshtastic_Language_MIN meshtastic_Language_ENGLISH
 #define _meshtastic_Language_MAX meshtastic_Language_TRADITIONAL_CHINESE

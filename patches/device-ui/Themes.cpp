@@ -3,7 +3,7 @@
 #include "graphics/view/TFT/Themes.h"
 #include "stdint.h"
 
-// ── Green palette definitions (7 shades each: 4 base + 3 interpolated) ──────
+// ── Pixel palette definitions (7 shades each: 4 base + 3 interpolated) ──────
 
 // A) Classic DMG LCD — the iconic yellow-green Game Boy screen
 #define DMG_0  0xff0F380F  // darkest  (base)
@@ -23,7 +23,7 @@
 #define GBC_5  0xff88C070  // light    (base)
 #define GBC_6  0xffE0F8D0  // lightest (base)
 
-// E) GB Pocket — high contrast, bright lightest shade
+// C) GB Pocket — high contrast, bright lightest shade
 #define PKT_0  0xff0F380F  // darkest  (base)
 #define PKT_1  0xff1A4C1A  // interp
 #define PKT_2  0xff256025  // interp
@@ -31,6 +31,24 @@
 #define PKT_4  0xff5C9C3C  // interp
 #define PKT_5  0xff88D048  // light    (base)
 #define PKT_6  0xffC4E878  // lightest (base)
+
+// D) Pokemon Blue — GBC auto-colorize palette for Pokemon Blue version
+#define BLU_0  0xff000008  // near-black with blue tint
+#define BLU_1  0xff001880  // dark royal blue
+#define BLU_2  0xff1038B8  // medium-dark blue
+#define BLU_3  0xff2060D0  // medium blue
+#define BLU_4  0xff5090E8  // lighter blue
+#define BLU_5  0xff90C0F8  // light blue
+#define BLU_6  0xffE8F0FF  // near-white blue-tinted
+
+// E) Pokemon Red — GBC auto-colorize palette for Pokemon Red version
+#define RED_0  0xff080000  // near-black with red tint
+#define RED_1  0xff600000  // dark blood red
+#define RED_2  0xff900818  // medium-dark red
+#define RED_3  0xffB82020  // medium red
+#define RED_4  0xffD85038  // warm red-orange
+#define RED_5  0xffF08070  // light salmon
+#define RED_6  0xffFFF0E8  // near-white warm-tinted
 
 LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_unscii_8;
 LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_13;
@@ -42,7 +60,7 @@ Themes::Theme Themes::get(void)
     return theme;
 }
 
-// Helper: is current theme one of the green themes?
+// Helper: is current theme a pixel (cozette-font) theme?
 static inline bool isGreen() {
     return theme >= Themes::eDmgGreen;
 }
@@ -130,90 +148,90 @@ enum ThemeColor {
     eTableCellBorder
 };
 
-// Color mapping macro: G(shade) picks shade 0-6 for the active green palette
-// For green themes, columns 2/3/4 use palette macros; dark/light are stock Meshtastic
-uint32_t themeColor[][5] = {
-    //  dark,       light,       DMG,      GBC,      Pocket
-    {0xff303030, 0xfff4f4f4, DMG_0,   GBC_0,   PKT_0  }, // eMainScreenStyle
-    {0xff436C70, 0xff67ea94, DMG_3,   GBC_3,   PKT_3  }, // eTopPanelBg
-    {0xffE0E0E0, 0xff212121, DMG_6,   GBC_6,   PKT_6  }, // eTopPanelText
-    {0xff436C70, 0xff67ea94, DMG_3,   GBC_3,   PKT_3  }, // eTopImageBg
-    {0xffffffff, 0xff212121, DMG_6,   GBC_6,   PKT_6  }, // eTopImageRecolor
-    {255, 255, 255, 255, 255},                             // eTopImageRecolorOpa
-    {0xffffffff, 0xff212121, DMG_6,   GBC_6,   PKT_6  }, // ePositiveImageRecolor
-    {0xff303030, 0xfff4f4f0, DMG_0,   GBC_0,   PKT_0  }, // ePanelBg
-    {0xff303030, 0xfffafafa, DMG_1,   GBC_1,   PKT_1  }, // ePanelPressedBg
-    {0xfff0f0f0, 0xff212121, DMG_6,   GBC_6,   PKT_6  }, // ePanelText
-    {0xff67ea94, 0xff67ea94, DMG_5,   GBC_5,   PKT_5  }, // ePanelBorder
-    {0xff404040, 0xffffffff, DMG_1,   GBC_1,   PKT_1  }, // eNodePanelBg
-    {0xff808080, 0xff979797, DMG_3,   GBC_3,   PKT_3  }, // eNodePanelBorder
-    {0xfff0f0f0, 0xff212121, DMG_6,   GBC_6,   PKT_6  }, // eNodePanelText
-    {0xff404040, 0xffffffff, DMG_1,   GBC_1,   PKT_1  }, // eNodeButtonBg
-    {0, 0, 0, 0, 0},                                      // eNodeButtonBgOpa
-    {0xff585858, 0xffffffff, DMG_1,   GBC_1,   PKT_1  }, // eButtonPanelBg
-    {0xff585858, 0xffeaeae0, DMG_3,   GBC_3,   PKT_3  }, // eMainButtonBg
-    {0xffaafbff, 0xff101010, DMG_6,   GBC_6,   PKT_6  }, // eMainButtonText
-    {0xff67ea94, 0xff67ea94, DMG_5,   GBC_5,   PKT_5  }, // eMainButtonBorder
-    {0xff9e9e9e, 0xffc0c0c0, DMG_1,   GBC_1,   PKT_1  }, // eMainButtonShadow
-    {0xff67ea94, 0xff757575, DMG_6,   GBC_6,   PKT_6  }, // eMainButtonImageRecolor
-    {0, 255, 255, 255, 255},                               // eMainButtonImageRecolorOpa
-    {0xff303030, 0xfffafaf4, DMG_0,   GBC_0,   PKT_0  }, // eHomeContainerBg
-    {0xff67EA94, 0xffaaaaaa, DMG_5,   GBC_5,   PKT_5  }, // eHomeContainerBorder
-    {0xff2B824A, 0xff999999, DMG_3,   GBC_3,   PKT_3  }, // eHomeContainerShadow
-    {0xffaafbff, 0xff294337, DMG_6,   GBC_6,   PKT_6  }, // eHomeContainerText
-    {0xff303030, 0xffffffff, DMG_1,   GBC_1,   PKT_1  }, // eHomeButtonBg
-    {0xffffffff, 0xff101010, DMG_6,   GBC_6,   PKT_6  }, // eHomeButtonText
-    {0xff303030, 0xffd0d0d0, DMG_3,   GBC_3,   PKT_3  }, // eHomeButtonBorder
-    {0xff606060, 0xff57a6b3, DMG_6,   GBC_6,   PKT_6  }, // eHomeButtonImageRecolor
-    {0, 255, 255, 255, 255},                               // eHomeButtonImageRecolorOpa
-    {0xff404040, 0xfffafaf4, DMG_1,   GBC_1,   PKT_1  }, // eChannelButtonBg
-    {0xffA0A0A0, 0xffD0D0D0, DMG_4,   GBC_4,   PKT_4  }, // eChannelButtonBorder
-    {0xffffffff, 0xff101010, DMG_6,   GBC_6,   PKT_6  }, // eChannelButtonText
-    {0xff303030, 0xfff0f0f0, DMG_0,   GBC_0,   PKT_0  }, // eSettingsPanelBg
-    {0xffaafbff, 0xff003c9f, DMG_5,   GBC_5,   PKT_5  }, // eSettingsPanelText
-    {0, 0xff979797, 0, 0, 0},                             // eSettingsPanelBorder
-    {0, 0xff7e7e7e, 0, 0, 0},                             // eSettingsPanelShadow
-    {250, 250, 250, 250, 250},                             // eSettingsPanelBgOpa
-    {0xff505050, 0xffeaeae0, DMG_3,   GBC_3,   PKT_3  }, // eSettingsButtonBg
-    {0xffaafbff, 0xff294337, DMG_6,   GBC_6,   PKT_6  }, // eSettingsButtonText
-    {0xff303030, 0xffd0d0d0, DMG_1,   GBC_1,   PKT_1  }, // eSettingsButtonBorder
-    {0, 0xff67ea94, DMG_6,   GBC_6,   PKT_6  },            // eSettingsButtonImageRecolor
-    {0, 255, 255, 255, 255},                               // eSettingsButtonImageRecolorOpa
-    {0xff404040, 0xffffffff, DMG_1,   GBC_1,   PKT_1  }, // eSettingsLabelBg
-    {0xff404040, 0xff808080, DMG_3,   GBC_3,   PKT_3  }, // eSettingsLabelBorder
-    {0xff303030, 0xfff4f4f4, DMG_0,   GBC_0,   PKT_0  }, // eTabViewBg
-    {0xffaafbff, 0xff003c9f, DMG_5,   GBC_5,   PKT_5  }, // eTabViewText
-    {0xff303030, 0xffe0e0e0, DMG_0,   GBC_0,   PKT_0  }, // eTabButtonDefaultBg
-    {0xff303030, 0xffffffff, DMG_1,   GBC_1,   PKT_1  }, // eTabButtonActiveBg
-    {0xff67ea94, 0xffaafbff, DMG_5,   GBC_5,   PKT_5  }, // eTabButtonPressedBg
-    {0xffA0A0A0, 0xff606060, DMG_4,   GBC_4,   PKT_4  }, // eTabButtonDefaultText
-    {0xffffffff, 0xff101010, DMG_6,   GBC_6,   PKT_6  }, // eTabButtonActiveText
-    {0xffffffff, 0xffffffff, DMG_6,   GBC_6,   PKT_6  }, // eTabButtonPressedText
-    {0xff505050, 0xffb0b0b0, DMG_3,   GBC_3,   PKT_3  }, // eTabButtonDefaultBorder
-    {0xff303030, 0xfffbfce9, DMG_1,   GBC_1,   PKT_1  }, // eChatMessageBg
-    {255, 255, 255, 255, 255},                             // eChatMessageBgOpa
-    {0xffffffff, 0xff294337, DMG_6,   GBC_6,   PKT_6  }, // eChatMessageText
-    {0xff707070, 0xff888888, DMG_3,   GBC_3,   PKT_3  }, // eChatMessageBorder
-    {0xff404040, 0xffffffff, DMG_3,   GBC_3,   PKT_3  }, // eNewMessageBg
-    {255, 255, 255, 255, 255},                             // eNewMessageBgOpa
-    {0xffd0d0d0, 0xff294337, DMG_6,   GBC_6,   PKT_6  }, // eNewMessageText
-    {0xff808080, 0xff888888, DMG_4,   GBC_4,   PKT_4  }, // eNewMessageBorder
-    {0xff303030, 0xfffbfbfb, DMG_0,   GBC_0,   PKT_0  }, // eAlertPanelBg
-    {0xff303030, 0xfff4f4f4, DMG_0,   GBC_0,   PKT_0  }, // eBtnMatrixBorderMain
-    {0xff67ea94, 0xff67ea94, DMG_5,   GBC_5,   PKT_5  }, // eBtnMatrixBorderItems
-    {0xff606060, 0xfffffff8, DMG_3,   GBC_3,   PKT_3  }, // eBtnMatrixBgItems
-    {0xffaafbff, 0xff212121, DMG_6,   GBC_6,   PKT_6  }, // eBtnMatrixTextItems
-    {0xffaafbff, 0xff212121, DMG_5,   GBC_5,   PKT_5  }, // eBatteryPercentageText
-    {0xffaafbff, 0xff003c9f, DMG_5,   GBC_5,   PKT_5  }, // eColorTextLabel
-    {0xff404040, 0xffe0e0e0, DMG_1,   GBC_1,   PKT_1  }, // eSpinnerMainArc
-    {0xff67ea94, 0xff67ea94, DMG_5,   GBC_5,   PKT_5  }, // eSpinnerIndicatorArc
-    {0xffaafbff, 0xff212121, DMG_6,   GBC_6,   PKT_6  }, // eTableHeadingText
-    {0xff303030, 0xfff4f4f0, DMG_1,   GBC_1,   PKT_1  }, // eTableHeadingBg
-    {0xffaafbff, 0xff212121, DMG_5,   GBC_5,   PKT_5  }, // eTableItemText
-    {0xff505050, 0xfff4f4f0, DMG_3,   GBC_3,   PKT_3  }, // eTableItemBg
-    {0xff303030, 0xffd4d4d0, DMG_0,   GBC_0,   PKT_0  }, // eTableItemDarkBg
-    {0xff404040, 0xffe0e0e0, DMG_1,   GBC_1,   PKT_1  }, // eTableBorder
-    {0xff404040, 0xffe0e0e0, DMG_1,   GBC_1,   PKT_1  }  // eTableCellBorder
+// Color mapping macro: picks shade for the active theme palette
+// Columns: dark(0), light(1), DMG(2), GBC(3), Pocket(4), Blue(5), Red(6)
+uint32_t themeColor[][7] = {
+    //  dark,       light,       DMG,    GBC,    Pocket,  Blue,    Red
+    {0xff303030, 0xfff4f4f4, DMG_0, GBC_0, PKT_0, BLU_0, RED_0}, // eMainScreenStyle
+    {0xff436C70, 0xff67ea94, DMG_3, GBC_3, PKT_3, BLU_3, RED_3}, // eTopPanelBg
+    {0xffE0E0E0, 0xff212121, DMG_6, GBC_6, PKT_6, BLU_6, RED_6}, // eTopPanelText
+    {0xff436C70, 0xff67ea94, DMG_3, GBC_3, PKT_3, BLU_3, RED_3}, // eTopImageBg
+    {0xffffffff, 0xff212121, DMG_6, GBC_6, PKT_6, BLU_6, RED_6}, // eTopImageRecolor
+    {255, 255, 255, 255, 255, 255, 255},                           // eTopImageRecolorOpa
+    {0xffffffff, 0xff212121, DMG_6, GBC_6, PKT_6, BLU_6, RED_6}, // ePositiveImageRecolor
+    {0xff303030, 0xfff4f4f0, DMG_0, GBC_0, PKT_0, BLU_0, RED_0}, // ePanelBg
+    {0xff303030, 0xfffafafa, DMG_1, GBC_1, PKT_1, BLU_1, RED_1}, // ePanelPressedBg
+    {0xfff0f0f0, 0xff212121, DMG_6, GBC_6, PKT_6, BLU_6, RED_6}, // ePanelText
+    {0xff67ea94, 0xff67ea94, DMG_5, GBC_5, PKT_5, BLU_5, RED_5}, // ePanelBorder
+    {0xff404040, 0xffffffff, DMG_1, GBC_1, PKT_1, BLU_1, RED_1}, // eNodePanelBg
+    {0xff808080, 0xff979797, DMG_3, GBC_3, PKT_3, BLU_3, RED_3}, // eNodePanelBorder
+    {0xfff0f0f0, 0xff212121, DMG_6, GBC_6, PKT_6, BLU_6, RED_6}, // eNodePanelText
+    {0xff404040, 0xffffffff, DMG_1, GBC_1, PKT_1, BLU_1, RED_1}, // eNodeButtonBg
+    {0, 0, 0, 0, 0, 0, 0},                                        // eNodeButtonBgOpa
+    {0xff585858, 0xffffffff, DMG_1, GBC_1, PKT_1, BLU_1, RED_1}, // eButtonPanelBg
+    {0xff585858, 0xffeaeae0, DMG_3, GBC_3, PKT_3, BLU_3, RED_3}, // eMainButtonBg
+    {0xffaafbff, 0xff101010, DMG_6, GBC_6, PKT_6, BLU_6, RED_6}, // eMainButtonText
+    {0xff67ea94, 0xff67ea94, DMG_5, GBC_5, PKT_5, BLU_5, RED_5}, // eMainButtonBorder
+    {0xff9e9e9e, 0xffc0c0c0, DMG_1, GBC_1, PKT_1, BLU_1, RED_1}, // eMainButtonShadow
+    {0xff67ea94, 0xff757575, DMG_6, GBC_6, PKT_6, BLU_6, RED_6}, // eMainButtonImageRecolor
+    {0, 255, 255, 255, 255, 255, 255},                             // eMainButtonImageRecolorOpa
+    {0xff303030, 0xfffafaf4, DMG_0, GBC_0, PKT_0, BLU_0, RED_0}, // eHomeContainerBg
+    {0xff67EA94, 0xffaaaaaa, DMG_5, GBC_5, PKT_5, BLU_5, RED_5}, // eHomeContainerBorder
+    {0xff2B824A, 0xff999999, DMG_3, GBC_3, PKT_3, BLU_3, RED_3}, // eHomeContainerShadow
+    {0xffaafbff, 0xff294337, DMG_6, GBC_6, PKT_6, BLU_6, RED_6}, // eHomeContainerText
+    {0xff303030, 0xffffffff, DMG_1, GBC_1, PKT_1, BLU_1, RED_1}, // eHomeButtonBg
+    {0xffffffff, 0xff101010, DMG_6, GBC_6, PKT_6, BLU_6, RED_6}, // eHomeButtonText
+    {0xff303030, 0xffd0d0d0, DMG_3, GBC_3, PKT_3, BLU_3, RED_3}, // eHomeButtonBorder
+    {0xff606060, 0xff57a6b3, DMG_6, GBC_6, PKT_6, BLU_6, RED_6}, // eHomeButtonImageRecolor
+    {0, 255, 255, 255, 255, 255, 255},                             // eHomeButtonImageRecolorOpa
+    {0xff404040, 0xfffafaf4, DMG_1, GBC_1, PKT_1, BLU_1, RED_1}, // eChannelButtonBg
+    {0xffA0A0A0, 0xffD0D0D0, DMG_4, GBC_4, PKT_4, BLU_4, RED_4}, // eChannelButtonBorder
+    {0xffffffff, 0xff101010, DMG_6, GBC_6, PKT_6, BLU_6, RED_6}, // eChannelButtonText
+    {0xff303030, 0xfff0f0f0, DMG_0, GBC_0, PKT_0, BLU_0, RED_0}, // eSettingsPanelBg
+    {0xffaafbff, 0xff003c9f, DMG_5, GBC_5, PKT_5, BLU_5, RED_5}, // eSettingsPanelText
+    {0, 0xff979797, 0, 0, 0, 0, 0},                               // eSettingsPanelBorder
+    {0, 0xff7e7e7e, 0, 0, 0, 0, 0},                               // eSettingsPanelShadow
+    {250, 250, 250, 250, 250, 250, 250},                           // eSettingsPanelBgOpa
+    {0xff505050, 0xffeaeae0, DMG_3, GBC_3, PKT_3, BLU_3, RED_3}, // eSettingsButtonBg
+    {0xffaafbff, 0xff294337, DMG_6, GBC_6, PKT_6, BLU_6, RED_6}, // eSettingsButtonText
+    {0xff303030, 0xffd0d0d0, DMG_1, GBC_1, PKT_1, BLU_1, RED_1}, // eSettingsButtonBorder
+    {0, 0xff67ea94, DMG_6, GBC_6, PKT_6, BLU_6, RED_6},           // eSettingsButtonImageRecolor
+    {0, 255, 255, 255, 255, 255, 255},                             // eSettingsButtonImageRecolorOpa
+    {0xff404040, 0xffffffff, DMG_1, GBC_1, PKT_1, BLU_1, RED_1}, // eSettingsLabelBg
+    {0xff404040, 0xff808080, DMG_3, GBC_3, PKT_3, BLU_3, RED_3}, // eSettingsLabelBorder
+    {0xff303030, 0xfff4f4f4, DMG_0, GBC_0, PKT_0, BLU_0, RED_0}, // eTabViewBg
+    {0xffaafbff, 0xff003c9f, DMG_5, GBC_5, PKT_5, BLU_5, RED_5}, // eTabViewText
+    {0xff303030, 0xffe0e0e0, DMG_0, GBC_0, PKT_0, BLU_0, RED_0}, // eTabButtonDefaultBg
+    {0xff303030, 0xffffffff, DMG_1, GBC_1, PKT_1, BLU_1, RED_1}, // eTabButtonActiveBg
+    {0xff67ea94, 0xffaafbff, DMG_5, GBC_5, PKT_5, BLU_5, RED_5}, // eTabButtonPressedBg
+    {0xffA0A0A0, 0xff606060, DMG_4, GBC_4, PKT_4, BLU_4, RED_4}, // eTabButtonDefaultText
+    {0xffffffff, 0xff101010, DMG_6, GBC_6, PKT_6, BLU_6, RED_6}, // eTabButtonActiveText
+    {0xffffffff, 0xffffffff, DMG_6, GBC_6, PKT_6, BLU_6, RED_6}, // eTabButtonPressedText
+    {0xff505050, 0xffb0b0b0, DMG_3, GBC_3, PKT_3, BLU_3, RED_3}, // eTabButtonDefaultBorder
+    {0xff303030, 0xfffbfce9, DMG_1, GBC_1, PKT_1, BLU_1, RED_1}, // eChatMessageBg
+    {255, 255, 255, 255, 255, 255, 255},                           // eChatMessageBgOpa
+    {0xffffffff, 0xff294337, DMG_6, GBC_6, PKT_6, BLU_6, RED_6}, // eChatMessageText
+    {0xff707070, 0xff888888, DMG_3, GBC_3, PKT_3, BLU_3, RED_3}, // eChatMessageBorder
+    {0xff404040, 0xffffffff, DMG_3, GBC_3, PKT_3, BLU_3, RED_3}, // eNewMessageBg
+    {255, 255, 255, 255, 255, 255, 255},                           // eNewMessageBgOpa
+    {0xffd0d0d0, 0xff294337, DMG_6, GBC_6, PKT_6, BLU_6, RED_6}, // eNewMessageText
+    {0xff808080, 0xff888888, DMG_4, GBC_4, PKT_4, BLU_4, RED_4}, // eNewMessageBorder
+    {0xff303030, 0xfffbfbfb, DMG_0, GBC_0, PKT_0, BLU_0, RED_0}, // eAlertPanelBg
+    {0xff303030, 0xfff4f4f4, DMG_0, GBC_0, PKT_0, BLU_0, RED_0}, // eBtnMatrixBorderMain
+    {0xff67ea94, 0xff67ea94, DMG_5, GBC_5, PKT_5, BLU_5, RED_5}, // eBtnMatrixBorderItems
+    {0xff606060, 0xfffffff8, DMG_3, GBC_3, PKT_3, BLU_3, RED_3}, // eBtnMatrixBgItems
+    {0xffaafbff, 0xff212121, DMG_6, GBC_6, PKT_6, BLU_6, RED_6}, // eBtnMatrixTextItems
+    {0xffaafbff, 0xff212121, DMG_5, GBC_5, PKT_5, BLU_5, RED_5}, // eBatteryPercentageText
+    {0xffaafbff, 0xff003c9f, DMG_5, GBC_5, PKT_5, BLU_5, RED_5}, // eColorTextLabel
+    {0xff404040, 0xffe0e0e0, DMG_1, GBC_1, PKT_1, BLU_1, RED_1}, // eSpinnerMainArc
+    {0xff67ea94, 0xff67ea94, DMG_5, GBC_5, PKT_5, BLU_5, RED_5}, // eSpinnerIndicatorArc
+    {0xffaafbff, 0xff212121, DMG_6, GBC_6, PKT_6, BLU_6, RED_6}, // eTableHeadingText
+    {0xff303030, 0xfff4f4f0, DMG_1, GBC_1, PKT_1, BLU_1, RED_1}, // eTableHeadingBg
+    {0xffaafbff, 0xff212121, DMG_5, GBC_5, PKT_5, BLU_5, RED_5}, // eTableItemText
+    {0xff505050, 0xfff4f4f0, DMG_3, GBC_3, PKT_3, BLU_3, RED_3}, // eTableItemBg
+    {0xff303030, 0xffd4d4d0, DMG_0, GBC_0, PKT_0, BLU_0, RED_0}, // eTableItemDarkBg
+    {0xff404040, 0xffe0e0e0, DMG_1, GBC_1, PKT_1, BLU_1, RED_1}, // eTableBorder
+    {0xff404040, 0xffe0e0e0, DMG_1, GBC_1, PKT_1, BLU_1, RED_1}  // eTableCellBorder
 };
 
 #include "fonts.h"

@@ -911,7 +911,7 @@ void create_screen_main_screen() {
                             lv_label_set_text(obj, "ABCD");
                             lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
                             lv_obj_set_style_align(obj, LV_ALIGN_TOP_LEFT, LV_PART_MAIN | LV_STATE_DEFAULT);
-                            lv_obj_set_style_text_font(obj, &lv_font_cozette_20, LV_PART_MAIN | LV_STATE_DEFAULT);
+                            lv_obj_set_style_text_font(obj, &lv_font_cozette_13, LV_PART_MAIN | LV_STATE_DEFAULT);
                         }
                         {
                             // BatteryLabel
@@ -3959,7 +3959,7 @@ void create_screen_main_screen() {
                     objects.settings_theme_dropdown = obj;
                     lv_obj_set_pos(obj, 0, 0);
                     lv_obj_set_size(obj, 150, 30);
-                    lv_dropdown_set_options(obj, _("Dark\nLight\nDMG\nGBC\nPocket"));
+                    lv_dropdown_set_options(obj, _("Dark\nLight\nDMG\nGBC\nPocket\nPoke Blue\nPoke Red"));
                     add_style_drop_down_style(obj);
                     lv_obj_set_style_align(obj, LV_ALIGN_TOP_MID, LV_PART_MAIN | LV_STATE_DEFAULT);
                     lv_obj_set_style_border_color(obj, lv_color_hex(0xffe0e0e0), LV_PART_MAIN | LV_STATE_DEFAULT);
