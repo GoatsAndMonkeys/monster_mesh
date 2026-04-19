@@ -2,6 +2,11 @@
 
 #include "graphics/view/TFT/TFTView_320x240.h"
 #include "Arduino.h"
+#ifdef LGFX_DRIVER
+#include GFX_DRIVER_INC
+#include "graphics/driver/LGFXDriver.h"
+extern "C" __attribute__((weak)) void monstermesh_set_lgfx(void *) {}
+#endif
 #include "graphics/common/BatteryLevel.h"
 #include "graphics/common/LoRaPresets.h"
 #include "graphics/common/Ringtones.h"
@@ -60,8 +65,6 @@ LV_IMAGE_DECLARE(img_circle_image);
 LV_IMAGE_DECLARE(img_no_tile_image);
 LV_IMAGE_DECLARE(node_location_pin24_image);
 
-LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_13;
-
 #define CR_REPLACEMENT 0x0C              // dummy to record several lines in a one line textarea
 #define THIS TFTView_320x240::instance() // need to use this in all static methods
 
@@ -82,7 +85,7 @@ constexpr lv_color_t colorGray = LV_COLOR_HEX(0x757575);
 constexpr lv_color_t colorLightGray = LV_COLOR_HEX(0xAAFBFF);
 constexpr lv_color_t colorMidGray = LV_COLOR_HEX(0x808080);
 constexpr lv_color_t colorDarkGray = LV_COLOR_HEX(0x303030);
-constexpr lv_color_t colorMesh = LV_COLOR_HEX(0x0f380f);  // DMG darkest green
+constexpr lv_color_t colorMesh = LV_COLOR_HEX(0x67ea94);
 
 // children index of nodepanel lv objects (see addNode)
 enum NodePanelIdx {
@@ -168,6 +171,10 @@ void TFTView_320x240::init(IClientBase *client)
     ILOG_DEBUG("### Total size: %d bytes ###", total_size);
 
     MeshtasticView::init(client);
+
+#ifdef LGFX_DRIVER
+    monstermesh_set_lgfx(LGFXDriver<LGFX_DRIVER>::getDevice());
+#endif
 
     ui_init_boot();
     FileLoader::init(&fileSystem);
@@ -882,9 +889,6 @@ void TFTView_320x240::ui_events_init(void)
     lv_obj_add_event_cb(objects.tools_neighbors_button, ui_event_node_details, LV_EVENT_CLICKED, 0);
     lv_obj_add_event_cb(objects.tools_statistics_button, ui_event_statistics, LV_EVENT_ALL, 0);
     lv_obj_add_event_cb(objects.tools_packet_log_button, ui_event_packet_log, LV_EVENT_ALL, 0);
-    lv_obj_add_event_cb(objects.tools_mm_terminal_button, ui_event_mm_terminal, LV_EVENT_CLICKED, 0);
-    lv_obj_add_event_cb(objects.mm_terminal_input, ui_event_mm_terminal_input, LV_EVENT_READY, 0);
-    lv_obj_add_event_cb(objects.mm_terminal_input, ui_event_mm_terminal_input, LV_EVENT_VALUE_CHANGED, 0);
     // tools
     lv_obj_add_event_cb(objects.detector_start_button, ui_event_mesh_detector_start, LV_EVENT_CLICKED, 0);
     lv_obj_add_event_cb(objects.signal_scanner_node_button, ui_event_signal_scanner_node, LV_EVENT_CLICKED, 0);
@@ -2954,58 +2958,6 @@ void TFTView_320x240::ui_event_packet_log(lv_event_t *e)
     }
 }
 
-void TFTView_320x240::ui_event_mm_terminal(lv_event_t *e)
-{
-    lv_event_code_t event_code = lv_event_get_code(e);
-    if (event_code == LV_EVENT_CLICKED) {
-        THIS->ui_set_active(objects.settings_button, objects.mm_terminal_panel, objects.top_mm_terminal_panel);
-        // Focus the input textarea so physical keyboard goes there
-        lv_obj_add_state(objects.mm_terminal_input, LV_STATE_FOCUSED);
-        // Set group focus so physical keyboard input goes to the textarea
-        lv_group_t *grp = (lv_group_t *)lv_obj_get_group(objects.mm_terminal_input);
-        if (grp) {
-            lv_group_focus_obj(objects.mm_terminal_input);
-        } else {
-            // If not in a group, try the default indev group
-            lv_group_t *defGrp = lv_group_get_default();
-            if (defGrp) {
-                lv_group_add_obj(defGrp, objects.mm_terminal_input);
-                lv_group_focus_obj(objects.mm_terminal_input);
-            }
-        }
-        // Also associate with the on-screen keyboard if present
-        if (objects.keyboard) {
-            lv_keyboard_set_textarea(objects.keyboard, objects.mm_terminal_input);
-        }
-    }
-}
-
-// Weak default — overridden by MonsterMeshModule.cpp when MonsterMesh is enabled
-extern "C" __attribute__((weak)) void monsterMeshTerminalSubmit(void) {}
-
-void TFTView_320x240::ui_event_mm_terminal_input(lv_event_t *e)
-{
-    lv_event_code_t code = lv_event_get_code(e);
-    if (code == LV_EVENT_READY) {
-        // On-screen keyboard Enter
-        monsterMeshTerminalSubmit();
-    } else if (code == LV_EVENT_VALUE_CHANGED) {
-        // Physical keyboard Enter inserts '\n' — detect and submit
-        const char *txt = lv_textarea_get_text(objects.mm_terminal_input);
-        const char *nl = txt ? strchr(txt, '\n') : nullptr;
-        if (nl) {
-            // Remove the newline before submitting
-            char buf[128];
-            size_t len = nl - txt;
-            if (len >= sizeof(buf)) len = sizeof(buf) - 1;
-            memcpy(buf, txt, len);
-            buf[len] = '\0';
-            lv_textarea_set_text(objects.mm_terminal_input, buf);
-            monsterMeshTerminalSubmit();
-        }
-    }
-}
-
 void TFTView_320x240::packetDetected(const meshtastic_MeshPacket &p)
 {
     uint32_t heard = 0;
@@ -4614,9 +4566,9 @@ void TFTView_320x240::addNode(uint32_t nodeNum, uint8_t ch, const char *userShor
     lv_obj_set_size(sn_lbl, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_label_set_long_mode(sn_lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_align(sn_lbl, LV_ALIGN_TOP_LEFT, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_font(sn_lbl, &lv_font_cozette_13, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(sn_lbl, &ui_font_montserrat_14, LV_PART_MAIN | LV_STATE_DEFAULT);
     // if short name contains only non-printable glyphs replace with short id
-    if (lv_txt_get_width(userShort, strlen(userShort), &lv_font_cozette_13, 0) <= 4) {
+    if (lv_txt_get_width(userShort, strlen(userShort), &ui_font_montserrat_14, 0) <= 4) {
         lv_label_set_text_fmt(sn_lbl, "%04x", nodeNum & 0xffff);
     } else {
         lv_label_set_text(sn_lbl, userShort);
