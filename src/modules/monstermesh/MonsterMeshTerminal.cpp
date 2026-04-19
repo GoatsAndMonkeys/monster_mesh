@@ -381,23 +381,21 @@ void MonsterMeshTerminal::showParty()
         return;
     }
 
-    // Build entire party as one print so scroll-to-view lands at the header,
-    // not just the last line (which would push the party off screen).
-    char buf[512];
-    int pos = snprintf(buf, sizeof(buf), "Your party:");
+    print("Your party:");
+    char buf[48];
     for (uint8_t i = 0; i < savParty_.count; ++i) {
         Gen1Pokemon &p = savParty_.mons[i];
         uint8_t lvl = p.level ? p.level : p.boxLevel;
-        const char *marker = (i == chosenSlot_) ? " *" : "";
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "\n %u) %.10s L%u  %u/%u HP%s",
-                        (unsigned)(i + 1),
-                        (const char *)savParty_.nicknames[i],
-                        (unsigned)lvl,
-                        (unsigned)be16(p.hp),
-                        (unsigned)be16(p.maxHp),
-                        marker);
+        const char *marker = (i == chosenSlot_) ? "*" : "";
+        snprintf(buf, sizeof(buf), " %u) %.10s L%u %u/%u HP %s",
+                 (unsigned)(i + 1),
+                 (const char *)savParty_.nicknames[i],
+                 (unsigned)lvl,
+                 (unsigned)be16(p.hp),
+                 (unsigned)be16(p.maxHp),
+                 marker);
+        print(buf);
     }
-    print(buf);
     printSep();
 }
 
@@ -816,19 +814,20 @@ void MonsterMeshTerminal::syncGymPartyHpFromEngine()
 void MonsterMeshTerminal::showGymSelect()
 {
     lordEnsureLoaded();
-    char buf[512];
-    int pos = snprintf(buf, sizeof(buf), "Kanto Gyms:");
-    for (uint8_t i = 0; i < LORD_GYM_COUNT; ++i) {
-        const LordGym *g = lordGym(i);
-        if (!g) continue;
-        const char *tag =
-            lordHasBadge(lord_, i) ? "[earned]" :
-            lordGymUnlocked(lord_, i) ? "[open]" : "[locked]";
-        pos += snprintf(buf + pos, sizeof(buf) - pos,
-                        "\n %u) %s - %s %s",
-                        (unsigned)(i + 1), g->city, g->leaderName, tag);
+    print("Kanto Gyms:");
+    {
+        char buf[64];
+        for (uint8_t i = 0; i < LORD_GYM_COUNT; ++i) {
+            const LordGym *g = lordGym(i);
+            if (!g) continue;
+            const char *tag =
+                lordHasBadge(lord_, i) ? "[earned]" :
+                lordGymUnlocked(lord_, i) ? "[open]" : "[locked]";
+            snprintf(buf, sizeof(buf), " %u) %s - %s %s",
+                     (unsigned)(i + 1), g->city, g->leaderName, tag);
+            print(buf);
+        }
     }
-    print(buf);
     print("'gym go' for next gym  'gym N' for specific.");
     printSep();
     state_ = State::IN_GYM_SELECT;
@@ -957,21 +956,18 @@ void MonsterMeshTerminal::showStats()
     uint8_t earned = 0;
     for (uint8_t i = 0; i < 8; ++i) if (lordHasBadge(lord_, i)) earned++;
 
-    char buf[256];
-    int pos = snprintf(buf, sizeof(buf),
-        "Badges: %u/8\nTotal runs: %lu\nTotal waves: %lu",
-        (unsigned)earned,
-        (unsigned long)lord_.totalRuns,
-        (unsigned long)lord_.totalWavesBeaten);
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
-        "\nBest run: %u waves (L%u foe, %lu xp)",
-        (unsigned)lord_.bestRunWaves,
-        (unsigned)lord_.bestRunHighestLevel,
-        (unsigned long)lord_.bestRunXp);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "Badges: %u/8", (unsigned)earned);
+    print(buf);
+    snprintf(buf, sizeof(buf), "Runs: %lu  Waves: %lu",
+             (unsigned long)lord_.totalRuns, (unsigned long)lord_.totalWavesBeaten);
+    print(buf);
+    snprintf(buf, sizeof(buf), "Best: %u waves L%u foe",
+             (unsigned)lord_.bestRunWaves, (unsigned)lord_.bestRunHighestLevel);
+    print(buf);
     uint8_t remaining = lord_.exploreUnlimited ? 99 :
         (lord_.exploreRunsToday >= 1 ? 0 : 1);
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
-        "\nExplore runs today: %u left", (unsigned)remaining);
+    snprintf(buf, sizeof(buf), "Explore today: %u left", (unsigned)remaining);
     print(buf);
     printSep();
 }
