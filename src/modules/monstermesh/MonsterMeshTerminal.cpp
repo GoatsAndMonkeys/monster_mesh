@@ -192,6 +192,41 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
         low[li++] = (*p >= 'A' && *p <= 'Z') ? *p + 32 : *p;
     low[li] = '\0';
 
+    // ── Y/N response to incoming text battle challenge ────────────────────────
+    if (state_ == State::IN_NET_CHALLENGE_WAIT) {
+        bool yes = (norm[0] == 'y');
+        bool no  = (norm[0] == 'n');
+        if (yes || no) {
+            if (yes) {
+                uint32_t seed = rand32();
+                char accept[24];
+                snprintf(accept, sizeof(accept), "MMT:ACCEPT:%08lX", (unsigned long)seed);
+                pendingDM_ = true;
+                dmTarget_  = netPartner_;
+                strncpy(dmText_, accept, sizeof(dmText_));
+                Gen1Party oppP = {};
+                for (uint8_t i = 0; i < meshPeerCount_; i++) {
+                    if (meshPeers_[i].nodeId == netPartner_) {
+                        buildAsyncOpponent(meshPeers_[i], oppP);
+                        break;
+                    }
+                }
+                startNetBattle(netPartner_, seed, oppP);
+                print("Challenge accepted! Battle starting...");
+            } else {
+                pendingDM_ = true;
+                dmTarget_  = netPartner_;
+                strncpy(dmText_, "MMT:REJECT", sizeof(dmText_));
+                netPartner_ = 0;
+                state_      = State::READY;
+                print("You fled!");
+            }
+            return;
+        }
+        print("Type 'y' to accept or 'n' to decline.");
+        return;
+    }
+
     if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
         print("-- Legend of Charizard --");
         print("gym list        list Kanto gyms");
@@ -357,31 +392,17 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
     {
         char n[32]; normNoSpaces(cmd, n, sizeof(n));
         if (strcmp(n, "mmton") == 0 || strcmp(n, "mmtexton") == 0) {
-            if (state_ != State::READY) { print("Finish current activity first."); return; }
-            if (savParty_.count == 0)  { print("Load a save first."); return; }
-            if (netPartner_ != 0) {
-                // Auto-accept the pending challenger
-                uint32_t seed = rand32();
-                char accept[24];
-                snprintf(accept, sizeof(accept), "MMT:ACCEPT:%08lX", (unsigned long)seed);
-                pendingDM_ = true;
-                dmTarget_  = netPartner_;
-                strncpy(dmText_, accept, sizeof(dmText_));
-                // Build opponent party from mesh peers beacon
-                Gen1Party oppP = {};
-                for (uint8_t i = 0; i < meshPeerCount_; i++) {
-                    if (meshPeers_[i].nodeId == netPartner_) {
-                        buildAsyncOpponent(meshPeers_[i], oppP);
-                        break;
-                    }
-                }
-                startNetBattle(netPartner_, seed, oppP);
-                print("Challenge accepted! Battle starting...");
+            if (state_ == State::IN_NET_CHALLENGE_SENT) {
+                print("Already waiting for a response. Stand by...");
                 return;
             }
+            if (state_ != State::READY) { print("Finish current activity first."); return; }
+            if (savParty_.count == 0)  { print("Load a save first."); return; }
+            netPartner_ = 0;
             pendingNetChallenge_ = true;
-            print("Text battle challenge broadcast...");
-            print("Waiting for a nearby trainer to respond.");
+            state_ = State::IN_NET_CHALLENGE_SENT;
+            print("Text battle challenge broadcast.");
+            print("Waiting for a nearby trainer to respond...");
             return;
         }
         if (strcmp(n, "mmlon") == 0 || strcmp(n, "mmlinkon") == 0) {
@@ -1244,11 +1265,21 @@ void MonsterMeshTerminal::resolveNetTurn()
 void MonsterMeshTerminal::receiveNetChallenge(uint32_t fromNodeId, const char *shortName)
 {
     if (state_ == State::READY && savParty_.count > 0) {
-        char msg[48];
-        snprintf(msg, sizeof(msg), "%s wants a text battle! Type 'mmt on' to accept.", shortName);
-        print(msg);
-        // Store pending challenger so 'mmt on' auto-accepts them
         netPartner_ = fromNodeId;
+        state_      = State::IN_NET_CHALLENGE_WAIT;
+        char msg[56];
+        snprintf(msg, sizeof(msg), "%s wants a text battle!", shortName);
+        print(msg);
+        print("Type 'y' to accept or 'n' to flee.");
+    }
+}
+
+void MonsterMeshTerminal::receiveNetReject(uint32_t /*fromNodeId*/)
+{
+    if (state_ == State::IN_NET_CHALLENGE_SENT) {
+        state_      = State::READY;
+        netPartner_ = 0;
+        print("The trainer fled!");
     }
 }
 

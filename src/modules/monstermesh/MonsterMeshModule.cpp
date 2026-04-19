@@ -467,6 +467,14 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             return ProcessMessage::CONTINUE;
         }
 
+        // ── MMT:REJECT — opponent declined our challenge ──────────────────
+        if (strncmp(low, "mmt:reject", 10) == 0 && mp.from != nodeDB->getNodeNum()) {
+            if (terminal_.ready()) {
+                terminal_.receiveNetReject(mp.from);
+            }
+            return ProcessMessage::CONTINUE;
+        }
+
         // ── MMT:ACT:<type>:<index> — opponent's live battle action ────────
         if (strncmp(low, "mmt:act:", 8) == 0 && mp.from != nodeDB->getNodeNum()) {
             uint8_t act = (uint8_t)strtoul(low + 8, nullptr, 10);

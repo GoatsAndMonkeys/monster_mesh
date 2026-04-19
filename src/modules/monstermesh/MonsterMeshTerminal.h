@@ -79,6 +79,8 @@ public:
     void receiveNetChallenge(uint32_t fromNodeId, const char *shortName);
     // Called by module when opponent sends "MMT:ACCEPT:<seed>" DM.
     void receiveNetAccept(uint32_t fromNodeId, uint32_t seed, const Gen1Party &oppParty);
+    // Called by module when opponent sends "MMT:REJECT" DM.
+    void receiveNetReject(uint32_t fromNodeId);
 
     // Public for module to build opponent party from daycare neighbor data.
     void buildAsyncOpponent(const DaycareNeighborPokemon &peer, Gen1Party &out);
@@ -101,8 +103,10 @@ private:
         IN_ROGUE_BATTLE,  // rogue: in a wave battle
         IN_GYM_SELECT,    // LORD: choosing a gym
         IN_GYM_BATTLE,    // LORD: in a gym gauntlet fight
-        IN_NET_BATTLE,    // live PvP: our turn to pick move
-        IN_NET_BATTLE_WAIT, // live PvP: waiting for opponent's action
+        IN_NET_BATTLE,        // live PvP: our turn to pick move
+        IN_NET_BATTLE_WAIT,   // live PvP: waiting for opponent's action
+        IN_NET_CHALLENGE_SENT,// mmt on sent: waiting for opponent Y/N
+        IN_NET_CHALLENGE_WAIT,// received challenge: waiting for our Y/N
     };
 
     static constexpr uint16_t MAX_OUTPUT_LINES = 200;
