@@ -298,15 +298,9 @@ void MonsterMeshEmulator::loadSaveFile(const char *romPath) {
     romPathToSavePath(romPath, savPath, sizeof(savPath));
     Serial.printf("[EMU] loading save: %s (ROM: %s)\n", savPath, romPath);
 
-    // SD shares SPI bus with radio and TFT — must hold spiLock
+    // SD was just initialized by loadROM() — no re-init needed.
+    // Hold spiLock for the open+read so the radio task can't interleave.
     concurrency::LockGuard g(spiLock);
-    SD.end();
-    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-    if (!SD.begin(SDCARD_CS, SPI)) {
-        Serial.println("[EMU] SD reinit failed for save load");
-        return;
-    }
-
     File f = SD.open(savPath, FILE_READ);
     if (!f) {
         Serial.printf("[EMU] no save file: %s\n", savPath);
