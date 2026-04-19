@@ -595,17 +595,32 @@ int32_t MonsterMeshModule::runOnce()
         }
 
 
-        // Mount SD via Arduino SD library — registers VFS at /sd
-        // Must use same SPI bus config as FSCommon.cpp (shared bus with TFT)
-        // Retries handle SPI bus contention with TFT driver
+        // Mount SD — suppress LVGL flush first so SPI.begin() doesn't race
+        // with LGFX DMA on the shared SPI bus.
         snprintf(setupStatusBuf_, sizeof(setupStatusBuf_), "SD attempt %d/%d...", setupRetries_ + 1, MAX_SETUP_RETRIES);
         setupStatus_ = setupStatusBuf_;
+#if HAS_TFT
+        lv_display_t *sdDisp = lv_display_get_default();
+        void *sdSavedCb = sdDisp ? (void *)sdDisp->flush_cb : nullptr;
+        if (sdDisp) {
+            lv_display_set_flush_cb(sdDisp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
+                lv_display_flush_ready(d);
+            });
+            if (sdDisp->refr_timer) lv_timer_pause(sdDisp->refr_timer);
+        }
+#endif
         bool sdOk = false;
         {
             concurrency::LockGuard g(spiLock);
             SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
             sdOk = SD.begin(SDCARD_CS, SPI, 4000000U);
         }
+#if HAS_TFT
+        if (sdDisp && sdSavedCb)
+            lv_display_set_flush_cb(sdDisp, (lv_display_flush_cb_t)sdSavedCb);
+        if (sdDisp && sdDisp->refr_timer) lv_timer_resume(sdDisp->refr_timer);
+        if (sdDisp) lv_obj_invalidate(lv_screen_active());
+#endif
         if (!sdOk) {
             setupRetries_++;
             if (setupRetries_ >= MAX_SETUP_RETRIES) {
@@ -617,7 +632,7 @@ int32_t MonsterMeshModule::runOnce()
                 setupStatus_ = setupStatusBuf_;
                 LOG_WARN("[MonsterMesh] SD.begin() failed, retry %d\n", setupRetries_);
             }
-            return 2000; // retry in 2 seconds
+            return 2000;
         }
         setupStatus_ = "SD OK";
 
@@ -1899,7 +1914,7 @@ void MonsterMeshModule::launchROM(const char *path)
     if (!renderTaskHandle_) {
         xTaskCreatePinnedToCore(
             renderTaskEntry, "monstermesh_render",
-            4096, this, 2, &renderTaskHandle_, 0
+            8192, this, 2, &renderTaskHandle_, 0
         );
     }
 
