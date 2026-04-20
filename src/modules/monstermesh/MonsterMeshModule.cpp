@@ -700,10 +700,8 @@ int32_t MonsterMeshModule::runOnce()
         pendingAutoCheckin_ = true;
     }
 
-    // Deferred auto-daycare check-in. Each SD operation inside daycareAutoCheckIn()
-    // is wrapped in spiLock, which prevents LGFX DMA from running concurrently.
-    // We do NOT pause the LVGL flush timer here — keeping LVGL alive prevents the
-    // task watchdog from firing if SD.begin() is slow on cold boot.
+    // Deferred auto-daycare check-in. Memory-only now (reads savCache_),
+    // so this no longer touches SD — still deferred to keep setup() short.
     if (pendingAutoCheckin_ && !emulatorActive_ && !browserActive_) {
         pendingAutoCheckin_ = false;
         daycareAutoCheckIn();
@@ -2023,6 +2021,10 @@ void MonsterMeshModule::launchROM(const char *path)
             LOG_INFO("[MonsterMesh] saved last ROM path: %s\n", path);
         }
     }
+    // Mirror the ROM path into the LittleFS-side state so the next SAV flush
+    // (Stage 5) can update /monstermesh/last_rom.txt without re-reading SD.
+    strncpy(lastRomPath_, path, sizeof(lastRomPath_) - 1);
+    lastRomPath_[sizeof(lastRomPath_) - 1] = '\0';
 
     // Auto check-in to daycare — SRAM is already loaded from the .sav file,
     // so we can read party data directly without calling emu_.save() (which
@@ -2037,6 +2039,7 @@ void MonsterMeshModule::launchROM(const char *path)
         }
         const char *shortName = getShortName(nodeDB->getNodeNum());
         daycare_.checkIn(sram, shortName, gameName);
+        buildTerminalPartyFromSram(sram);
         daycare_.forceBeacon();
         LOG_INFO("[MonsterMesh] daycare auto-checked in: trainer='%s' party=%d, beacon sent\n",
                  gameName, daycare_.getState().partyCount);
@@ -2206,76 +2209,17 @@ void MonsterMeshModule::loadSavAtBoot()
 void MonsterMeshModule::flushSavToCache() { /* Stage 5 */ }
 void MonsterMeshModule::syncSavToSd()     { /* Stage 6 */ }
 
-// ── Auto check-in: load last .sav from SD without starting emulator ────────
+// ── Auto check-in: read from in-RAM SAV cache (no SD, no emulator) ─────────
 
 void MonsterMeshModule::daycareAutoCheckIn()
 {
-    char romPath[256] = {};
-    char savPath[256];
-    size_t len = 0;
-
-    // Step 1: read last ROM path (small file, quick SPI lock)
-    // Re-init SD inside spiLock so LGFX can't be mid-DMA while we reconfigure the bus.
-    {
-        concurrency::LockGuard g(spiLock);
-        SD.end();
-        SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-        if (!SD.begin(SDCARD_CS, SPI, 4000000U)) {
-            LOG_WARN("[MonsterMesh] auto-daycare: SD re-init failed\n");
-            return;
-        }
-        File lrf = SD.open("/last_rom.txt", FILE_READ);
-        if (!lrf) {
-            LOG_INFO("[MonsterMesh] no /last_rom.txt — skipping auto-daycare\n");
-            return;
-        }
-        len = lrf.readBytes(romPath, sizeof(romPath) - 1);
-        lrf.close();
-    }
-    if (len == 0) return;
-    romPath[len] = '\0';
-    while (len > 0 && (romPath[len-1] == '\n' || romPath[len-1] == '\r' || romPath[len-1] == ' '))
-        romPath[--len] = '\0';
-
-    LOG_INFO("[MonsterMesh] auto-daycare: last ROM = '%s'\n", romPath);
-    MonsterMeshEmulator::romPathToSavePath(romPath, savPath, sizeof(savPath));
-
-    // Step 2: allocate PSRAM buffer (no SPI needed)
-    uint8_t *sram = static_cast<uint8_t *>(ps_malloc(0x8000));
-    if (!sram) {
-        LOG_WARN("[MonsterMesh] auto-daycare: PSRAM alloc failed\n");
-        return;
-    }
-    memset(sram, 0, 0x8000);
-
-    // Step 3: read .sav file (32KB, separate SPI lock + SD re-init)
-    size_t n = 0;
-    {
-        concurrency::LockGuard g(spiLock);
-        SD.end();
-        SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-        if (!SD.begin(SDCARD_CS, SPI, 4000000U)) {
-            LOG_WARN("[MonsterMesh] auto-daycare: SD re-init failed for .sav\n");
-            free(sram);
-            return;
-        }
-        File sf = SD.open(savPath, FILE_READ);
-        if (!sf) {
-            LOG_INFO("[MonsterMesh] no save file '%s' — skipping auto-daycare\n", savPath);
-            free(sram);
-            return;
-        }
-        n = sf.read(sram, 0x8000);
-        sf.close();
-    }
-    LOG_INFO("[MonsterMesh] auto-daycare: loaded %u bytes from %s\n", (unsigned)n, savPath);
-
-    if (n == 0) {
-        free(sram);
+    if (!savCacheValid_ || !savCache_) {
+        LOG_INFO("[MonsterMesh] auto-daycare: no SAV cache — skipping\n");
         return;
     }
 
-    // Read trainer name from SRAM (Gen 1 offset 0x2598)
+    const uint8_t *sram = savCache_;
+
     char gameName[8] = {};
     for (int i = 0; i < 7; i++) {
         uint8_t c = sram[SAV_PLAYER_NAME + i];
@@ -2287,17 +2231,13 @@ void MonsterMeshModule::daycareAutoCheckIn()
     LOG_INFO("[MonsterMesh] auto-daycare: trainer='%s' node='%s'\n", gameName, shortName);
 
     daycare_.checkIn(sram, shortName, gameName);
-
-    // Cache party for terminal before freeing SRAM
     buildTerminalPartyFromSram(sram);
-    free(sram);
 
     if (daycare_.isActive()) {
         const auto &state = daycare_.getState();
         LOG_INFO("[MonsterMesh] auto-daycare: %d pokemon checked in\n", state.partyCount);
         daycare_.forceBeacon();
         daycare_.forceEvent();
-        // DM the first event to the user
         const auto &evt = daycare_.getLastEvent();
         if (evt.message[0]) {
             sendTextDM(nodeDB->getNodeNum(), evt.message);
