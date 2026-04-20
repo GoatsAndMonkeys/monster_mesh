@@ -4,6 +4,8 @@
 #include <SPI.h>
 #include <cstring>
 #include "variant.h"
+#include "SPILock.h"
+#include "concurrency/LockGuard.h"
 
 #define FB_MAX_ENTRIES 64
 #define FB_MAX_PATH 256
@@ -136,10 +138,14 @@ private:
             count_++;
         }
 
+        // Serialize SD access against radio/TFT — the shared SPI bus needs
+        // exclusive ownership across the full reinit + directory walk.
+        concurrency::LockGuard _g(spiLock);
+
         // Re-init SD before scanning — SPI bus state gets corrupted by TFT/LoRa
         SD.end();
         SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-        if (!SD.begin(SDCARD_CS, SPI)) {
+        if (!SD.begin(SDCARD_CS, SPI, 4000000U)) {
             log_w("[FileBrowser] SD reinit failed");
             dirty_ = true;
             return;

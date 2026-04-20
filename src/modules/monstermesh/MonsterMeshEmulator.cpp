@@ -308,11 +308,11 @@ void MonsterMeshEmulator::writeSaveFile(const char *romPath) {
     romPathToSavePath(romPath, savPath, sizeof(savPath));
     Serial.printf("[EMU] writing save: %s (ROM: %s)\n", savPath, romPath);
 
-    // SD shares SPI bus — reinit before access
+    // SD shares SPI bus — reinit before access (4MHz to match other call sites)
     concurrency::LockGuard g(spiLock);
     SD.end();
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-    if (!SD.begin(SDCARD_CS, SPI)) {
+    if (!SD.begin(SDCARD_CS, SPI, 4000000U)) {
         Serial.printf("[EMU] SD reinit failed for save write\n");
         return;
     }
