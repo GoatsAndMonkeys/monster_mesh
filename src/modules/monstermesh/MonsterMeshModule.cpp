@@ -2136,16 +2136,11 @@ void MonsterMeshModule::daycareAutoCheckIn()
     size_t len = 0;
 
     // Step 1: read last ROM path (small file, quick SPI lock)
-    // Re-init SD — LovyanGFX TFT driver may have clobbered SPI bus state
-    // between setup and this deferred tick.
+    // SD is already mounted from setup; restore SPI bus state only (no SD.end/begin
+    // which can hang on cold boot and trigger the watchdog).
     {
         concurrency::LockGuard g(spiLock);
-        SD.end();
         SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-        if (!SD.begin(SDCARD_CS, SPI, 4000000U)) {
-            LOG_WARN("[MonsterMesh] auto-daycare: SD re-init failed\n");
-            return;
-        }
         File lrf = SD.open("/last_rom.txt", FILE_READ);
         if (!lrf) {
             LOG_INFO("[MonsterMesh] no /last_rom.txt — skipping auto-daycare\n");
@@ -2170,17 +2165,11 @@ void MonsterMeshModule::daycareAutoCheckIn()
     }
     memset(sram, 0, 0x8000);
 
-    // Step 3: read .sav file (32KB, separate SPI lock + SD re-init)
+    // Step 3: read .sav file (32KB, separate SPI lock; SD already mounted)
     size_t n = 0;
     {
         concurrency::LockGuard g(spiLock);
-        SD.end();
         SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-        if (!SD.begin(SDCARD_CS, SPI, 4000000U)) {
-            LOG_WARN("[MonsterMesh] auto-daycare: SD re-init failed for .sav\n");
-            free(sram);
-            return;
-        }
         File sf = SD.open(savPath, FILE_READ);
         if (!sf) {
             LOG_INFO("[MonsterMesh] no save file '%s' — skipping auto-daycare\n", savPath);
