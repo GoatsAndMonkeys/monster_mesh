@@ -5,15 +5,12 @@
 #include "LordGyms.h"
 #include "gps/RTC.h"
 #include "graphics/view/TFT/Themes.h"
-#include "NodeDB.h"
-#include "main.h"
 #include <lvgl.h>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
-#include <esp_system.h>
 
 // Cozette 13px pixel font
 LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_13;
@@ -265,11 +262,6 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
             print("mml <name>      cable club link (DM)");
             print("stats / badges / news");
             print("party           view your Pokemon");
-            print("-- admin --");
-            print("nodes           list mesh nodes");
-            print("rmnode !XXXX    remove node by id");
-            print("whoami          show this node id");
-            print("reboot          reboot device");
         }
         printSep();
         return;
@@ -718,56 +710,6 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
         return;
         } // if (slot != 0xFF)
     } // move block
-
-    // ── Admin commands (Meshtastic node-DB / config) ────────────────────────
-
-    if (strcmp(cmd, "nodes") == 0) {
-        if (!nodeDB) { print("nodeDB unavailable"); return; }
-        char line[64];
-        size_t n = nodeDB->getNumMeshNodes();
-        snprintf(line, sizeof(line), "%u nodes:", (unsigned)n);
-        print(line);
-        for (size_t i = 0; i < n && i < 16; ++i) {
-            const auto *m = nodeDB->getMeshNodeByIndex(i);
-            if (!m) continue;
-            const char *sn = m->has_user ? m->user.short_name : "";
-            snprintf(line, sizeof(line), " !%08x %s", (unsigned)m->num, sn);
-            print(line);
-        }
-        if (n > 16) print(" ...");
-        printSep();
-        return;
-    }
-
-    if (strncmp(cmd, "rmnode ", 7) == 0) {
-        if (!nodeDB) { print("nodeDB unavailable"); return; }
-        const char *arg = cmd + 7;
-        if (*arg == '!') arg++;
-        uint32_t num = (uint32_t)strtoul(arg, nullptr, 16);
-        if (num == 0) { print("usage: rmnode !XXXXXXXX"); return; }
-        nodeDB->removeNodeByNum(num);
-        nodeDB->saveToDisk();
-        char line[48];
-        snprintf(line, sizeof(line), "removed !%08x", (unsigned)num);
-        print(line);
-        return;
-    }
-
-    if (strcmp(cmd, "reboot") == 0) {
-        print("rebooting in 2s...");
-        nodeDB->saveToDisk();
-        rebootAtMsec = millis() + 2000;
-        return;
-    }
-
-    if (strcmp(cmd, "whoami") == 0) {
-        if (!nodeDB) { print("nodeDB unavailable"); return; }
-        uint32_t self = nodeDB->getNodeNum();
-        char line[48];
-        snprintf(line, sizeof(line), "!%08x", (unsigned)self);
-        print(line);
-        return;
-    }
 
     print("Unknown command. Type 'help'.");
 }
