@@ -693,7 +693,14 @@ int32_t MonsterMeshModule::runOnce()
         }
 
         // SD ready — stay in Meshtastic UI. User opens MonsterMesh via Tools or mic button.
-        setupStatus_ = "MonsterMesh ready";
+        // Keep the SAV-cache status visible on the boot screen by preserving
+        // whatever loadSavAtBoot wrote into setupStatusBuf_ — otherwise a flash
+        // of "SAV: no last_rom" etc. would be overwritten before the user sees it.
+        if (setupStatusBuf_[0] && strncmp(setupStatusBuf_, "SAV:", 4) == 0) {
+            // already set by loadSavAtBoot — leave as-is
+        } else {
+            setupStatus_ = "MonsterMesh ready";
+        }
         LOG_INFO("[MonsterMesh] SD ready — waiting for user to open MonsterMesh\n");
 
         // Defer auto-daycare to next runOnce() tick — doing 32KB SD read
