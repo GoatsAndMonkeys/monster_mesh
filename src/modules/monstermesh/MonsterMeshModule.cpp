@@ -873,11 +873,23 @@ int32_t MonsterMeshModule::runOnce()
     }
 
     // Deferred save — triggered on emulator exit, done here outside LVGL callback.
-    // flushSavToCache writes through to LittleFS (no SD); Stage 6's syncSavToSd
+    // flushSavToCache writes through to LittleFS (no SD); syncSavToSd below
     // drains pendingSdSavSync_ later when no foreground work is pending.
     if (pendingSave_) {
         pendingSave_ = false;
         flushSavToCache();
+    }
+
+    // Background SD backup. Rate-limited to once every 30s so a burst of saves
+    // doesn't thrash the card. Gated on idle-UI + valid cache; the radio task
+    // still competes via spiLock, but only for the write window itself.
+    if (pendingSdSavSync_ && savCacheValid_ && !emulatorActive_ && !browserActive_) {
+        uint32_t nowMs = millis();
+        if (lastSdSavSyncMs_ == 0 || (nowMs - lastSdSavSyncMs_) > 30000u) {
+            pendingSdSavSync_ = false;
+            lastSdSavSyncMs_ = nowMs;
+            syncSavToSd();
+        }
     }
 
     // Simulated weather — rotates every 3 hours using Unix time as seed.
@@ -2239,7 +2251,37 @@ void MonsterMeshModule::flushSavToCache()
     buildTerminalPartyFromSram(savCache_);
 }
 
-void MonsterMeshModule::syncSavToSd()     { /* Stage 6 */ }
+// Background-drain savCache_ to the SD .sav file so external tools can
+// read it. LittleFS already has the canonical copy — this is best-effort
+// backup. Skipped silently if no last-ROM path is known.
+void MonsterMeshModule::syncSavToSd()
+{
+    if (!savCache_ || !savCacheValid_) return;
+    if (lastRomPath_[0] == '\0') {
+        LOG_INFO("[MonsterMesh] syncSavToSd: no lastRomPath_, skipping\n");
+        return;
+    }
+
+    char savPath[256];
+    MonsterMeshEmulator::romPathToSavePath(lastRomPath_, savPath, sizeof(savPath));
+
+    concurrency::LockGuard g(spiLock);
+    SD.end();
+    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+    if (!SD.begin(SDCARD_CS, SPI, 4000000U)) {
+        LOG_WARN("[MonsterMesh] syncSavToSd: SD re-init failed\n");
+        return;
+    }
+    if (SD.exists(savPath)) SD.remove(savPath);
+    File f = SD.open(savPath, FILE_WRITE);
+    if (!f) {
+        LOG_WARN("[MonsterMesh] syncSavToSd: open '%s' failed\n", savPath);
+        return;
+    }
+    size_t wn = f.write(savCache_, SAV_CACHE_SIZE);
+    f.close();
+    LOG_INFO("[MonsterMesh] syncSavToSd: wrote %u bytes to %s\n", (unsigned)wn, savPath);
+}
 
 // ── Auto check-in: read from in-RAM SAV cache (no SD, no emulator) ─────────
 
