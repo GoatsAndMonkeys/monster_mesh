@@ -130,7 +130,9 @@ void MonsterMeshTerminal::print(const char *text)
     lv_label_set_text(label, text);
     lineCount_++;
 
-    // Auto-scroll to bottom.
+    // Force layout before scroll — scroll_to_view uses the label's
+    // position, which is 0/0 until LVGL lays out the new child.
+    lv_obj_update_layout(outputPanel_);
     lv_obj_scroll_to_view(label, LV_ANIM_OFF);
 }
 
@@ -152,6 +154,7 @@ void MonsterMeshTerminal::printSep()
     lv_label_set_text(label, "--------------------------------");
     lineCount_++;
 
+    lv_obj_update_layout(outputPanel_);
     lv_obj_scroll_to_view(label, LV_ANIM_OFF);
 }
 

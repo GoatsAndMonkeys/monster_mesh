@@ -274,7 +274,7 @@ void apply_style_home_container_style(void)
     lv_style_set_border_side(style, LV_BORDER_SIDE_FULL);
     lv_style_set_bg_color(style, lv_color_hex(THEME(eHomeContainerBg)));
     lv_style_set_shadow_color(style, lv_color_hex(THEME(eHomeContainerShadow)));
-    lv_style_set_text_font(style, &lv_font_cozette_20);
+    lv_style_set_text_font(style, &lv_font_cozette_13);
     lv_style_set_radius(style, 10);
     lv_style_set_text_color(style, lv_color_hex(THEME(eHomeContainerText)));
     lv_style_set_text_line_space(style, 28);
