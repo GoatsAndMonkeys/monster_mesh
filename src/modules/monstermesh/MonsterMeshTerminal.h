@@ -83,6 +83,11 @@ public:
     // Called by module when opponent sends "MMT:REJECT" DM.
     void receiveNetReject(uint32_t fromNodeId);
 
+    // Called by module when receiver replies Y or N to the challenge DM.
+    // Returns true if a challenge was pending and the reply was applied.
+    bool isAwaitingNetChallenge() const { return state_ == State::IN_NET_CHALLENGE_WAIT; }
+    void respondToNetChallenge(bool accept);
+
     // Public for module to build opponent party from daycare neighbor data.
     void buildAsyncOpponent(const DaycareNeighborPokemon &peer, Gen1Party &out);
 

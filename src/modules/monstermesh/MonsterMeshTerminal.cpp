@@ -1384,13 +1384,15 @@ void MonsterMeshTerminal::resolveNetTurn()
 
 void MonsterMeshTerminal::receiveNetChallenge(uint32_t fromNodeId, const char *shortName)
 {
+    // Receiver flow: the challenge arrives as a DM to the user; we track state
+    // here so the DM Y/N reply can be routed back through the same accept/
+    // reject path, but we do NOT print to the terminal so the user isn't
+    // interrupted mid-task. If they do open the terminal while a challenge is
+    // pending, the existing IN_NET_CHALLENGE_WAIT state gates the y/n command.
+    (void)shortName;
     if (state_ == State::READY && savParty_.count > 0) {
         netPartner_ = fromNodeId;
         state_      = State::IN_NET_CHALLENGE_WAIT;
-        char msg[56];
-        snprintf(msg, sizeof(msg), "%s wants a text battle!", shortName);
-        print(msg);
-        print("Type 'y' to accept or 'n' to flee.");
     }
 }
 
@@ -1400,6 +1402,34 @@ void MonsterMeshTerminal::receiveNetReject(uint32_t /*fromNodeId*/)
         state_      = State::READY;
         netPartner_ = 0;
         print("The trainer fled!");
+    }
+}
+
+void MonsterMeshTerminal::respondToNetChallenge(bool accept)
+{
+    if (state_ != State::IN_NET_CHALLENGE_WAIT) return;
+    if (accept) {
+        uint32_t seed = rand32();
+        char acceptMsg[24];
+        snprintf(acceptMsg, sizeof(acceptMsg), "MMT:ACCEPT:%08lX", (unsigned long)seed);
+        pendingDM_ = true;
+        dmTarget_  = netPartner_;
+        strncpy(dmText_, acceptMsg, sizeof(dmText_));
+        Gen1Party oppP = {};
+        for (uint8_t i = 0; i < meshPeerCount_; i++) {
+            if (meshPeers_[i].nodeId == netPartner_) {
+                buildAsyncOpponent(meshPeers_[i], oppP);
+                break;
+            }
+        }
+        startNetBattle(netPartner_, seed, oppP);
+        print("Challenge accepted! Battle starting...");
+    } else {
+        pendingDM_ = true;
+        dmTarget_  = netPartner_;
+        strncpy(dmText_, "MMT:REJECT", sizeof(dmText_));
+        netPartner_ = 0;
+        state_      = State::READY;
     }
 }
 

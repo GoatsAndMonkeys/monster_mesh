@@ -227,10 +227,15 @@ bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
             (txt[1] == 'o' || txt[1] == 'O')) {
             return true;
         }
-        // Single Y/N reply when we are the initiator waiting for a response
-        if (sz == 1 && waitingForAcceptFrom_ != 0 &&
+        // Single Y/N reply — either the emulator-link initiator waiting for an
+        // accept, or the text-battle receiver replying to an MMT challenge DM.
+        if (sz == 1 &&
             (txt[0] == 'Y' || txt[0] == 'y' || txt[0] == 'N' || txt[0] == 'n')) {
-            return true;
+            if (waitingForAcceptFrom_ != 0 ||
+                (terminal_.isAwaitingNetChallenge() &&
+                 terminal_.netPartnerNodeId() == p->from)) {
+                return true;
+            }
         }
         // "fled!" from partner
         if (sz >= 5 && txt[0] == 'f' && txt[1] == 'l' && txt[2] == 'e') {
@@ -368,6 +373,21 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
         // ── Y/N reply: Person 2 sent Y or N DM to Person 1 ───────────────
         if (len == 1 && (txt[0] == 'Y' || txt[0] == 'y' || txt[0] == 'N' || txt[0] == 'n')) {
             bool accepted = (txt[0] == 'Y' || txt[0] == 'y');
+
+            // MMT receiver: we (P2) received a text-battle challenge DM from P1
+            // and are now replying Y/N via DM. Route through the terminal so it
+            // emits MMT:ACCEPT / MMT:REJECT back to P1 and primes the local
+            // battle state — no need to open the terminal first.
+            if (terminal_.isAwaitingNetChallenge() &&
+                terminal_.netPartnerNodeId() == mp.from) {
+                terminal_.respondToNetChallenge(accepted);
+                if (accepted) {
+                    sendTextDM(mp.from,
+                        "Battle starting! Open MonsterMesh Terminal to fight.");
+                }
+                return ProcessMessage::CONTINUE;
+            }
+
             if (waitingForAcceptFrom_ != 0 && mp.from == waitingForAcceptFrom_) {
                 uint32_t partner = waitingForAcceptFrom_;
                 waitingForAcceptFrom_ = 0;
@@ -765,7 +785,7 @@ int32_t MonsterMeshModule::runOnce()
             if (target != 0) {
                 char challengeDM[128];
                 snprintf(challengeDM, sizeof(challengeDM),
-                         "[%s] wants a text battle! Open MonsterMesh Terminal to respond. MMT:ON",
+                         "[%s] wants a text battle! Reply Y or N. MMT:ON",
                          getShortName(nodeDB->getNodeNum()));
                 sendTextDM(target, challengeDM);
             } else {
