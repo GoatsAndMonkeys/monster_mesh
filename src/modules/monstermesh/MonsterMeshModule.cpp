@@ -596,32 +596,17 @@ int32_t MonsterMeshModule::runOnce()
             // ── Ensure MonsterMesh channel exists ────────────────────────────
             ensureMonsterMeshChannel();
 
-            // ── Daycare ─────────────────────────────────────────────────────
-            daycare_.init();
-            daycare_.setSendDm([](uint32_t dest, const char *msg, void *ctx) {
-                auto *self = static_cast<MonsterMeshModule *>(ctx);
-                self->sendTextDM(dest, msg);
-            }, this);
-            daycare_.setBroadcast([](const char *msg, void *ctx) {
-                auto *self = static_cast<MonsterMeshModule *>(ctx);
-                // Broadcast on primary channel
-                self->sendTextDM(NODENUM_BROADCAST, msg);
-            }, this);
-            daycare_.setSendBeacon([](const DaycareBeacon &beaconIn, void *ctx) {
-                auto *self = static_cast<MonsterMeshModule *>(ctx);
-                // Fill nodeId and send as binary PRIVATE_APP packet
-                DaycareBeacon beacon = beaconIn;
-                beacon.nodeId = nodeDB->getNodeNum();
-                meshtastic_MeshPacket *p = router->allocForSending();
-                p->to = NODENUM_BROADCAST;
-                p->channel = channels.getPrimaryIndex();
-                p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
-                size_t sz = sizeof(DaycareBeacon);
-                if (sz > sizeof(p->decoded.payload.bytes)) sz = sizeof(p->decoded.payload.bytes);
-                memcpy(p->decoded.payload.bytes, &beacon, sz);
-                p->decoded.payload.size = sz;
-                service->sendToMesh(p);
-            }, this);
+            // ── Daycare DISABLED for emulator-stability ─────────────────
+            // The daycare subsystem is what drove every Meshtastic-side SD
+            // read (boot-time last_rom.txt + .sav, periodic backup writes)
+            // and every beacon broadcast. For this branch we want the
+            // emulator path alone with no extra SD/LoRa traffic, so all
+            // daycare init is skipped. daycareAutoCheckIn is likewise
+            // gated below. The daycare_ member still exists so code that
+            // reads/writes its state compiles, it just never activates.
+            //
+            // If this branch proves stable, the daycare code can come
+            // back in stages with every SD and beacon path audited.
         }
 
 
@@ -690,15 +675,10 @@ int32_t MonsterMeshModule::runOnce()
         pendingAutoCheckin_ = true;
     }
 
-    // Deferred auto-daycare check-in. Each SD operation inside daycareAutoCheckIn()
-    // is wrapped in spiLock, which prevents LGFX DMA from running concurrently.
-    // We do NOT pause the LVGL flush timer here — keeping LVGL alive prevents the
-    // task watchdog from firing if SD.begin() is slow on cold boot.
-    if (pendingAutoCheckin_ && !emulatorActive_ && !browserActive_) {
-        pendingAutoCheckin_ = false;
-        daycareAutoCheckIn();
-        daycareCheckinDone_ = true;
-    }
+    // Daycare auto-checkin disabled on emulator-stability branch — the SAV
+    // read it did at boot was the main source of cold-boot SD races.
+    // Terminal party loading now only happens when the user launches a
+    // ROM (emu_.cartRam_ is the source of truth there).
 
     // Deferred terminal init — LVGL screen objects may not exist at setupDone_ time.
 #if HAS_TFT
