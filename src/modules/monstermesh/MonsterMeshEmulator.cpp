@@ -6,6 +6,7 @@
 #include <SD.h>
 #include <stdio.h>
 #include <sys/stat.h>
+#include "MonsterMeshSerial.h"
 
 // peanut_gb.h is a single-header library with all function bodies inline.
 // It MUST only be included in this one translation unit.
@@ -25,7 +26,7 @@ static enum gb_serial_rx_ret_e pm_serialRx(struct gb_s *gb, uint8_t *rx);
 // peanut_gb error callback — must not return (called on invalid opcode / bad read)
 static void pm_gbError(struct gb_s *gb, const enum gb_error_e err, const uint16_t addr)
 {
-    Serial.printf("[EMU] FATAL gb_error: err=%d addr=0x%04X\n", (int)err, addr);
+    MMSer.printf("[EMU] FATAL gb_error: err=%d addr=0x%04X\n", (int)err, addr);
     while (true) vTaskDelay(portMAX_DELAY);
 }
 
@@ -44,7 +45,7 @@ bool MonsterMeshEmulator::begin(const char *romPath) {
 
     gb_ = static_cast<struct gb_s *>(ps_malloc(sizeof(struct gb_s)));
     if (!gb_) {
-        Serial.printf("[EMU] PSRAM alloc failed for gb_s (free=%u)\n", (unsigned)ESP.getFreePsram());
+        MMSer.printf("[EMU] PSRAM alloc failed for gb_s (free=%u)\n", (unsigned)ESP.getFreePsram());
         return false;
     }
     memset(gb_, 0, sizeof(struct gb_s));
@@ -61,7 +62,7 @@ bool MonsterMeshEmulator::begin(const char *romPath) {
         this);
 
     if (err != GB_INIT_NO_ERROR) {
-        Serial.printf("[EMU] gb_init error: %d\n", (int)err);
+        MMSer.printf("[EMU] gb_init error: %d\n", (int)err);
         free(gb_); gb_ = nullptr;
         return false;
     }
@@ -74,14 +75,14 @@ bool MonsterMeshEmulator::begin(const char *romPath) {
     if (!audio_) {
         audio_ = new MonsterMeshAudio();
         if (!audio_->begin()) {
-            Serial.println("[EMU] Audio init failed — continuing without sound");
+            MMSer.println("[EMU] Audio init failed — continuing without sound");
             delete audio_;
             audio_ = nullptr;
         }
     }
 
     running_ = true;
-    Serial.printf("[EMU] started — ROM: %s (%u bytes)\n", romPath, (unsigned)romSize_);
+    MMSer.printf("[EMU] started — ROM: %s (%u bytes)\n", romPath, (unsigned)romSize_);
     return true;
 }
 
@@ -201,7 +202,7 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
     if (strncmp(path, "/sd/", 4) == 0) sdPath = path + 3;  // "/sd/foo" → "/foo"
     if (strncmp(path, "/sd", 3) == 0 && path[3] == '\0') sdPath = "/";
 
-    Serial.printf("[EMU] loadROM: path='%s' sdPath='%s'\n", path, sdPath);
+    MMSer.printf("[EMU] loadROM: path='%s' sdPath='%s'\n", path, sdPath);
 
     // Free previous ROM if reloading
     if (romData_) { free(romData_); romData_ = nullptr; romSize_ = 0; }
@@ -213,16 +214,16 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
     // Avoid SD.end()/SPI.begin()/SD.begin() here: the map tile loader accesses SD
     // outside spiLock, so tearing down the bus races with it and hangs SD.begin().
     File f = SD.open(sdPath, FILE_READ);
-    Serial.printf("[EMU] SD.open('%s') = %d\n", sdPath, (int)(bool)f);
+    MMSer.printf("[EMU] SD.open('%s') = %d\n", sdPath, (int)(bool)f);
     if (!f) {
         // Try with original path (e.g. without /sd strip)
         f = SD.open(path, FILE_READ);
-        Serial.printf("[EMU] SD.open('%s') = %d\n", path, (int)(bool)f);
+        MMSer.printf("[EMU] SD.open('%s') = %d\n", path, (int)(bool)f);
     }
     if (!f) {
         // Try directory iteration as last resort
         File dir = SD.open("/");
-        Serial.printf("[EMU] SD.open('/') dir = %d isDir=%d\n", (int)(bool)dir, dir ? (int)dir.isDirectory() : -1);
+        MMSer.printf("[EMU] SD.open('/') dir = %d isDir=%d\n", (int)(bool)dir, dir ? (int)dir.isDirectory() : -1);
         if (dir && dir.isDirectory()) {
             const char *targetName = strrchr(sdPath, '/');
             targetName = targetName ? targetName + 1 : sdPath;
@@ -231,10 +232,10 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
                 const char *ename = entry.name();
                 const char *slash = strrchr(ename, '/');
                 const char *fname = slash ? slash + 1 : ename;
-                Serial.printf("[EMU] dir entry: '%s'\n", fname);
+                MMSer.printf("[EMU] dir entry: '%s'\n", fname);
                 if (!entry.isDirectory() && strcasecmp(fname, targetName) == 0) {
                     f = entry;
-                    Serial.printf("[EMU] Found match!\n");
+                    MMSer.printf("[EMU] Found match!\n");
                     break;
                 }
                 entry.close();
@@ -244,30 +245,30 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
         }
     }
     if (!f) {
-        Serial.printf("[EMU] All methods failed\n");
+        MMSer.printf("[EMU] All methods failed\n");
         return false;
     }
     romSize_ = f.size();
-    Serial.printf("[EMU] ROM file opened: size=%u\n", (unsigned)romSize_);
+    MMSer.printf("[EMU] ROM file opened: size=%u\n", (unsigned)romSize_);
     if (romSize_ == 0 || romSize_ > 1024 * 1024) {
         f.close();
         return false;
     }
     romData_ = static_cast<uint8_t *>(ps_malloc(romSize_));
     if (!romData_) {
-        Serial.printf("[EMU] PSRAM alloc failed (%u bytes, free=%u)\n",
+        MMSer.printf("[EMU] PSRAM alloc failed (%u bytes, free=%u)\n",
                       (unsigned)romSize_, (unsigned)ESP.getFreePsram());
         f.close();
         return false;
     }
     size_t n = f.read(romData_, romSize_);
     f.close();
-    Serial.printf("[EMU] ROM read: %u / %u bytes\n", (unsigned)n, (unsigned)romSize_);
+    MMSer.printf("[EMU] ROM read: %u / %u bytes\n", (unsigned)n, (unsigned)romSize_);
     if (n != romSize_) {
         free(romData_); romData_ = nullptr;
         return false;
     }
-    Serial.printf("[EMU] ROM loaded OK: %u bytes\n", (unsigned)romSize_);
+    MMSer.printf("[EMU] ROM loaded OK: %u bytes\n", (unsigned)romSize_);
     return true;
 }
 
@@ -288,38 +289,38 @@ void MonsterMeshEmulator::romPathToSavePath(const char *romPath, char *out, size
 void MonsterMeshEmulator::loadSaveFile(const char *romPath) {
     char savPath[256];
     romPathToSavePath(romPath, savPath, sizeof(savPath));
-    Serial.printf("[EMU] loading save: %s (ROM: %s)\n", savPath, romPath);
+    MMSer.printf("[EMU] loading save: %s (ROM: %s)\n", savPath, romPath);
 
     // SD was just initialized by loadROM() — no re-init needed.
     // Hold spiLock for the open+read so the radio task can't interleave.
     concurrency::LockGuard g(spiLock);
     File f = SD.open(savPath, FILE_READ);
     if (!f) {
-        Serial.printf("[EMU] no save file: %s\n", savPath);
+        MMSer.printf("[EMU] no save file: %s\n", savPath);
         return;
     }
     size_t n = f.read(cartRam_, sizeof(cartRam_));
     f.close();
-    Serial.printf("[EMU] save loaded: %s (%u bytes)\n", savPath, (unsigned)n);
+    MMSer.printf("[EMU] save loaded: %s (%u bytes)\n", savPath, (unsigned)n);
 }
 
 void MonsterMeshEmulator::writeSaveFile(const char *romPath) {
     char savPath[256];
     romPathToSavePath(romPath, savPath, sizeof(savPath));
-    Serial.printf("[EMU] writing save: %s (ROM: %s)\n", savPath, romPath);
+    MMSer.printf("[EMU] writing save: %s (ROM: %s)\n", savPath, romPath);
 
     // SD shares SPI bus — reinit before access (4MHz to match other call sites)
     concurrency::LockGuard g(spiLock);
     SD.end();
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
     if (!SD.begin(SDCARD_CS, SPI, 4000000U)) {
-        Serial.printf("[EMU] SD reinit failed for save write\n");
+        MMSer.printf("[EMU] SD reinit failed for save write\n");
         return;
     }
 
     File f = SD.open(savPath, FILE_WRITE);
-    if (!f) { Serial.printf("[EMU] save write failed: %s\n", savPath); return; }
+    if (!f) { MMSer.printf("[EMU] save write failed: %s\n", savPath); return; }
     size_t written = f.write(cartRam_, sizeof(cartRam_));
     f.close();
-    Serial.printf("[EMU] save written: %s (%u bytes)\n", savPath, (unsigned)written);
+    MMSer.printf("[EMU] save written: %s (%u bytes)\n", savPath, (unsigned)written);
 }

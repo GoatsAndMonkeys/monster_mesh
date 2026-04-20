@@ -1,6 +1,7 @@
 #include "MonsterMeshBattleShim.h"
 #include "MonsterMeshLobby.h"
 #include <string.h>
+#include "MonsterMeshSerial.h"
 
 MonsterMeshBattleShim::MonsterMeshBattleShim(MeshtasticTransport &transport)
     : transport_(transport) {}
@@ -14,11 +15,11 @@ bool MonsterMeshBattleShim::begin() {
     txQ_ = xQueueCreate(QUEUE_DEPTH, sizeof(uint8_t));
     rxQ_ = xQueueCreate(QUEUE_DEPTH, sizeof(uint8_t));
     if (!txQ_ || !rxQ_) {
-        Serial.println("[SHIM] queue alloc failed");
+        MMSer.println("[SHIM] queue alloc failed");
         return false;
     }
     lastBatchMs_ = millis();
-    Serial.printf("[SHIM] started  nodeId=0x%08X\n", (unsigned)transport_.nodeId());
+    MMSer.printf("[SHIM] started  nodeId=0x%08X\n", (unsigned)transport_.nodeId());
     return true;
 }
 
@@ -28,11 +29,11 @@ void MonsterMeshBattleShim::onSerialTx(uint8_t byte) {
     if (state_ == State::IDLE) {
         state_ = State::ADVERTISING;
         lastRequestMs_ = 0;
-        Serial.println("[SHIM] game wants link -> ADVERTISING");
+        MMSer.println("[SHIM] game wants link -> ADVERTISING");
     }
     if (state_ == State::CONNECTED) {
         state_ = State::IN_BATTLE;
-        Serial.println("[SHIM] serial tx while CONNECTED -> IN_BATTLE");
+        MMSer.println("[SHIM] serial tx while CONNECTED -> IN_BATTLE");
     }
     if (state_ == State::IN_BATTLE) {
         xQueueSend(txQ_, &byte, 0);
@@ -58,7 +59,7 @@ void MonsterMeshBattleShim::pairWith(uint32_t remoteNodeId) {
     lastPacketMs_ = millis();
 
     state_ = State::CONNECTED;
-    Serial.printf("[SHIM] paired with 0x%08X  role=%s  sid=0x%04X\n",
+    MMSer.printf("[SHIM] paired with 0x%08X  role=%s  sid=0x%04X\n",
                   (unsigned)remoteId_,
                   isMaster_ ? "MASTER" : "SLAVE",
                   sessionId_);
@@ -73,7 +74,7 @@ void MonsterMeshBattleShim::cancel() {
     xQueueReset(rxQ_);
     sessionId_ = 0;
     remoteId_  = 0;
-    Serial.println("[SHIM] cancelled");
+    MMSer.println("[SHIM] cancelled");
 }
 
 // ── tick() — called from emulator task each frame ───────────────────────────
@@ -97,7 +98,7 @@ void MonsterMeshBattleShim::tick() {
         case State::CONNECTED:
             if (uxQueueMessagesWaiting(txQ_) > 0) {
                 state_ = State::IN_BATTLE;
-                Serial.println("[SHIM] serial relay -> IN_BATTLE");
+                MMSer.println("[SHIM] serial relay -> IN_BATTLE");
             }
             break;
 
@@ -107,7 +108,7 @@ void MonsterMeshBattleShim::tick() {
                 lastBatchMs_ = now;
             }
             if (lastPacketMs_ && (now - lastPacketMs_ > BATTLE_TIMEOUT_MS)) {
-                Serial.printf("[SHIM] timeout: now=%u lastPkt=%u diff=%u limit=%u\n",
+                MMSer.printf("[SHIM] timeout: now=%u lastPkt=%u diff=%u limit=%u\n",
                               (unsigned)now, (unsigned)lastPacketMs_,
                               (unsigned)(now - lastPacketMs_),
                               (unsigned)BATTLE_TIMEOUT_MS);
@@ -123,7 +124,7 @@ void MonsterMeshBattleShim::tick() {
     if (state_ == State::DONE && doneAtMs_ &&
         (now - doneAtMs_ > DONE_LINGER_MS)) {
         cancel();
-        Serial.println("[SHIM] auto-reset -> IDLE");
+        MMSer.println("[SHIM] auto-reset -> IDLE");
     }
 }
 
@@ -286,7 +287,7 @@ void MonsterMeshBattleShim::handlePacket(const uint8_t *buf, size_t len) {
 
         case PktType::BATTLE_CANCEL:
             if (pkt.sessionId() != sessionId_ && sessionId_ != 0) break;
-            Serial.println("[SHIM] <- CANCEL");
+            MMSer.println("[SHIM] <- CANCEL");
             state_ = State::DONE;
             doneAtMs_ = millis();
             break;
@@ -320,7 +321,7 @@ void MonsterMeshBattleShim::handleSerialData(const BattlePacket &pkt, uint8_t pa
 
     if (state_ == State::CONNECTED) {
         state_ = State::IN_BATTLE;
-        Serial.println("[SHIM] first SERIAL_DATA -> IN_BATTLE");
+        MMSer.println("[SHIM] first SERIAL_DATA -> IN_BATTLE");
     }
 
     for (uint8_t i = 0; i < count; i++) {

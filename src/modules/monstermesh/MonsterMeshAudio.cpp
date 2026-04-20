@@ -1,5 +1,6 @@
 #include "MonsterMeshAudio.h"
 #include "variant.h"
+#include "MonsterMeshSerial.h"
 
 MonsterMeshAudio *MonsterMeshAudio::instance_ = nullptr;
 
@@ -44,12 +45,12 @@ bool MonsterMeshAudio::begin() {
     i2s_port_t port = I2S_NUM_0;
     esp_err_t err = i2s_driver_install(port, &i2s_config, 0, NULL);
     if (err != ESP_OK) {
-        Serial.printf("[AUDIO] I2S_NUM_0 unavailable (%d), trying NUM_1\n", err);
+        MMSer.printf("[AUDIO] I2S_NUM_0 unavailable (%d), trying NUM_1\n", err);
         port = I2S_NUM_1;
         err = i2s_driver_install(port, &i2s_config, 0, NULL);
     }
     if (err != ESP_OK) {
-        Serial.printf("[AUDIO] i2s_driver_install failed: %d\n", err);
+        MMSer.printf("[AUDIO] i2s_driver_install failed: %d\n", err);
         return false;
     }
     port_ = port;
@@ -66,7 +67,7 @@ bool MonsterMeshAudio::begin() {
 
     err = i2s_set_pin(port_, &pin_config);
     if (err != ESP_OK) {
-        Serial.printf("[AUDIO] i2s_set_pin failed: %d\n", err);
+        MMSer.printf("[AUDIO] i2s_set_pin failed: %d\n", err);
         i2s_driver_uninstall(port_);
         return false;
     }
@@ -74,7 +75,7 @@ bool MonsterMeshAudio::begin() {
     i2s_zero_dma_buffer(port_);
 
     running_ = true;
-    Serial.printf("[AUDIO] started on I2S_NUM_%d: %dHz, 16-bit stereo\n",
+    MMSer.printf("[AUDIO] started on I2S_NUM_%d: %dHz, 16-bit stereo\n",
                   (int)port_, AUDIO_SAMPLE_RATE);
     return true;
 }
@@ -85,7 +86,7 @@ void MonsterMeshAudio::stop() {
     i2s_zero_dma_buffer(port_);
     i2s_driver_uninstall(port_);
     instance_ = nullptr;
-    Serial.println("[AUDIO] stopped");
+    MMSer.println("[AUDIO] stopped");
 }
 
 void MonsterMeshAudio::processFrame() {
