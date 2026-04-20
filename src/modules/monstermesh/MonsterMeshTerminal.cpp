@@ -5,6 +5,7 @@
 #include "LordGyms.h"
 #include "gps/RTC.h"
 #include "graphics/view/TFT/Themes.h"
+#include "NodeDB.h"
 #include <lvgl.h>
 #include <cstring>
 #include <cstdio>
@@ -193,215 +194,20 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
         low[li++] = (*p >= 'A' && *p <= 'Z') ? *p + 32 : *p;
     low[li] = '\0';
 
-    // ── Y/N response to incoming text battle challenge ────────────────────────
-    if (state_ == State::IN_NET_CHALLENGE_WAIT) {
-        bool yes = (norm[0] == 'y');
-        bool no  = (norm[0] == 'n');
-        if (yes || no) {
-            if (yes) {
-                uint32_t seed = rand32();
-                char accept[24];
-                snprintf(accept, sizeof(accept), "MMT:ACCEPT:%08lX", (unsigned long)seed);
-                pendingDM_ = true;
-                dmTarget_  = netPartner_;
-                strncpy(dmText_, accept, sizeof(dmText_));
-                Gen1Party oppP = {};
-                for (uint8_t i = 0; i < meshPeerCount_; i++) {
-                    if (meshPeers_[i].nodeId == netPartner_) {
-                        buildAsyncOpponent(meshPeers_[i], oppP);
-                        break;
-                    }
-                }
-                startNetBattle(netPartner_, seed, oppP);
-                print("Challenge accepted! Battle starting...");
-            } else {
-                pendingDM_ = true;
-                dmTarget_  = netPartner_;
-                strncpy(dmText_, "MMT:REJECT", sizeof(dmText_));
-                netPartner_ = 0;
-                state_      = State::READY;
-                print("You fled!");
-            }
-            return;
-        }
-        print("Type 'y' to accept or 'n' to decline.");
-        return;
-    }
+    // ── Emulator-stability build: minimal debug command set ────────────────
+    //
+    // Everything else (gym / rogue / explore / fight / mmt / battle / move
+    // keys) has been stripped on this branch. Keep help, party, sysinfo,
+    // whoami, nodes, and mml so the emulator + link-cable path can still
+    // be driven from the terminal.
 
     if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
-        bool inBattle = (state_ == State::IN_BATTLE   || state_ == State::IN_RUN_BATTLE ||
-                         state_ == State::IN_ROGUE_BATTLE || state_ == State::IN_GYM_BATTLE ||
-                         state_ == State::IN_NET_BATTLE   || state_ == State::IN_NET_BATTLE_WAIT);
-        bool inRun    = (state_ == State::IN_RUN);
-        bool inRogue  = (state_ == State::IN_ROGUE);
-        if (inBattle) {
-            print("1/W 2/E 3/R 4/S  use move");
-            print("pick N          switch Pokemon");
-            print("status          show HP");
-            print("quit            forfeit");
-        } else if (inRun || inRogue) {
-            print("fight           start next wave");
-            print("party           show HP");
-            print("home            leave");
-        } else if (state_ == State::IN_NET_CHALLENGE_WAIT) {
-            print("y               accept battle");
-            print("n               flee");
-        } else if (state_ == State::IN_NET_CHALLENGE_SENT) {
-            print("Waiting for opponent response...");
-        } else {
-            print("gym list        list Kanto gyms");
-            print("gym go          challenge next gym");
-            print("explore         daily wild route");
-            print("rogue           unlimited roguelike");
-            print("fight list      show nearby trainers");
-            print("fight <name>    async battle");
-            print("mmt <name>      live PvP challenge (DM)");
-            print("mml <name>      cable club link (DM)");
-            print("stats / badges / news");
-            print("party           view your Pokemon");
-        }
-        printSep();
-        return;
-    }
-
-    // ── LORD commands ────────────────────────────────────────────────────────
-
-    if (strcmp(cmd, "gym") == 0 || strcmp(cmd, "gym list") == 0) {
-        if (state_ == State::IN_BATTLE || state_ == State::IN_RUN_BATTLE ||
-            state_ == State::IN_GYM_BATTLE) {
-            print("Finish your current battle first.");
-            return;
-        }
-        if (savParty_.count == 0) {
-            print("Load a Pokemon save first.");
-            return;
-        }
-        showGymSelect();
-        return;
-    }
-
-    if (strcmp(cmd, "gym go") == 0) {
-        if (state_ == State::IN_BATTLE || state_ == State::IN_RUN_BATTLE ||
-            state_ == State::IN_GYM_BATTLE) {
-            print("Finish your current battle first.");
-            return;
-        }
-        if (savParty_.count == 0) {
-            print("Load a Pokemon save first.");
-            return;
-        }
-        lordEnsureLoaded();
-        // Find first unlocked gym without a badge
-        int8_t next = -1;
-        for (uint8_t i = 0; i < LORD_GYM_COUNT; ++i) {
-            if (lordGymUnlocked(lord_, i) && !lordHasBadge(lord_, i)) {
-                next = (int8_t)i;
-                break;
-            }
-        }
-        if (next < 0) {
-            print("You've conquered all 8 gyms!");
-            return;
-        }
-        startGymGauntlet((uint8_t)next);
-        return;
-    }
-
-    if (strncmp(cmd, "gym ", 4) == 0) {
-        if (state_ == State::IN_BATTLE || state_ == State::IN_RUN_BATTLE ||
-            state_ == State::IN_GYM_BATTLE) {
-            print("Finish your current battle first.");
-            return;
-        }
-        if (savParty_.count == 0) {
-            print("Load a Pokemon save first.");
-            return;
-        }
-        int g = atoi(cmd + 4);
-        if (g < 1 || g > 8) { print("Usage: gym 1..8"); return; }
-        startGymGauntlet((uint8_t)(g - 1));
-        return;
-    }
-
-    if (strcmp(cmd, "explore") == 0) {
-        if (savParty_.count == 0) {
-            print("Load a Pokemon save first.");
-            return;
-        }
-        if (state_ == State::IN_BATTLE || state_ == State::IN_RUN_BATTLE ||
-            state_ == State::IN_GYM_BATTLE) {
-            print("Finish your current battle first.");
-            return;
-        }
-        lordEnsureLoaded();
-        lordApplyDailyReset(lord_, getTime(), tzOffsetHours_);
-        if (!lord_.exploreUnlimited && lord_.exploreRunsToday >= 1) {
-            print("You're exhausted. Come back tomorrow.");
-            return;
-        }
-        lord_.exploreRunsToday++;
-        lordSave(lord_);
-        runWildOnly_ = true;
-        lordResetRunStats(currentRun_);
-        startRun();
-        return;
-    }
-
-    if (strcmp(cmd, "rogue") == 0) {
-        if (savParty_.count == 0) { print("Load a Pokemon save first."); return; }
-        if (state_ == State::IN_BATTLE || state_ == State::IN_RUN_BATTLE ||
-            state_ == State::IN_ROGUE_BATTLE || state_ == State::IN_GYM_BATTLE) {
-            print("Finish your current battle first.");
-            return;
-        }
-        startRogue();
-        return;
-    }
-
-    if (strcmp(cmd, "home") == 0) {
-        if (state_ == State::IN_RUN || state_ == State::IN_RUN_BATTLE) {
-            if (runWildOnly_) {
-                lordEnsureLoaded();
-                lordOnRunEnd(lord_, currentRun_);
-                lordSave(lord_);
-                runWildOnly_ = false;
-            }
-            runActive_ = false;
-            state_ = State::READY;
-            print("You head home to rest.");
-            printSep();
-        } else if (state_ == State::IN_ROGUE || state_ == State::IN_ROGUE_BATTLE) {
-            rogueActive_ = false;
-            state_ = State::READY;
-            char msg[48];
-            snprintf(msg, sizeof(msg), "Rogue run ended at wave %u.", (unsigned)rogueWave_);
-            print(msg);
-            printSep();
-        } else {
-            print("You're already in town.");
-        }
-        return;
-    }
-
-    if (strcmp(cmd, "stats") == 0)       { showStats();       return; }
-    if (strcmp(cmd, "badges") == 0)      { showBadges();      return; }
-    if (strcmp(cmd, "news") == 0)        { showNews();        return; }
-    if (strcmp(cmd, "leaderboard") == 0) { showLeaderboard(); return; }
-
-    if (strcmp(cmd, "sysinfo") == 0) {
-        char buf[64];
-        uint32_t freeInternal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-        uint32_t freePsram    = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-        uint32_t totPsram     = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
-        uint32_t upSec        = (uint32_t)(esp_timer_get_time() / 1000000ULL);
-        uint32_t h = upSec / 3600, m = (upSec % 3600) / 60, s = upSec % 60;
-        print("-- System --");
-        snprintf(buf, sizeof(buf), "RAM free:  %u KB", freeInternal/1024);
-        print(buf);
-        snprintf(buf, sizeof(buf), "PSRAM free: %u/%u KB", freePsram/1024, totPsram/1024);
-        print(buf);
-        snprintf(buf, sizeof(buf), "Up: %uh%um%us  Peers: %u", h, m, s, (unsigned)meshPeerCount_);
-        print(buf);
+        print("help            this list");
+        print("party           show your Pokemon");
+        print("sysinfo         RAM / PSRAM / uptime");
+        print("whoami          this node\'s id");
+        print("nodes           mesh node list");
+        print("mml <name>      cable club link invite");
         printSep();
         return;
     }
@@ -411,304 +217,85 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
         return;
     }
 
-    if (strncmp(cmd, "pick ", 5) == 0 || strncmp(cmd, "pick", 4) == 0) {
-        const char *arg = cmd + 4;
-        while (*arg == ' ') ++arg;
-        int slot = atoi(arg);
-        if (slot < 1 || slot > 6) {
-            print("Usage: pick 1..6");
-            return;
-        }
-        pickPokemon((uint8_t)(slot - 1));
+    if (strcmp(cmd, "sysinfo") == 0) {
+        char buf[64];
+        uint32_t freeInternal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        uint32_t freePsram    = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        uint32_t totPsram     = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+        uint32_t upSec        = (uint32_t)(esp_timer_get_time() / 1000000ULL);
+        uint32_t h = upSec / 3600, m = (upSec % 3600) / 60, s = upSec % 60;
+        print("-- System --");
+        snprintf(buf, sizeof(buf), "RAM free:  %u KB", (unsigned)(freeInternal/1024));
+        print(buf);
+        snprintf(buf, sizeof(buf), "PSRAM free: %u/%u KB",
+                 (unsigned)(freePsram/1024), (unsigned)(totPsram/1024));
+        print(buf);
+        snprintf(buf, sizeof(buf), "Up: %uh%um%us",
+                 (unsigned)h, (unsigned)m, (unsigned)s);
+        print(buf);
+        printSep();
         return;
     }
 
-    // ── mmt <name> — targeted live PvP text battle challenge ────────────────
-    if (strncmp(cmd, "mmt ", 4) == 0) {
-        const char *name = cmd + 4;
-        if (state_ == State::IN_NET_CHALLENGE_SENT) {
-            print("Already waiting for a response. Stand by...");
-            return;
+    if (strcmp(cmd, "whoami") == 0) {
+        if (!nodeDB) { print("nodeDB unavailable"); return; }
+        char line[32];
+        snprintf(line, sizeof(line), "!%08x", (unsigned)nodeDB->getNodeNum());
+        print(line);
+        return;
+    }
+
+    if (strcmp(cmd, "nodes") == 0) {
+        if (!nodeDB) { print("nodeDB unavailable"); return; }
+        size_t n = nodeDB->getNumMeshNodes();
+        char line[64];
+        snprintf(line, sizeof(line), "%u nodes:", (unsigned)n);
+        print(line);
+        for (size_t i = 0; i < n && i < 16; ++i) {
+            const auto *m = nodeDB->getMeshNodeByIndex(i);
+            if (!m) continue;
+            const char *sn = m->has_user ? m->user.short_name : "";
+            snprintf(line, sizeof(line), " !%08x %s", (unsigned)m->num, sn);
+            print(line);
         }
-        if (state_ != State::READY) {
-            const char *what =
-                (state_ == State::IN_NET_CHALLENGE_WAIT) ? "pending challenge - type 'y' or 'n'" :
-                (state_ == State::IN_NET_BATTLE || state_ == State::IN_NET_BATTLE_WAIT) ? "in a live battle (type 'cancel')" :
-                (state_ == State::IN_BATTLE)      ? "in battle (type 'quit')" :
-                (state_ == State::IN_RUN || state_ == State::IN_RUN_BATTLE)   ? "on a route (type 'home')" :
-                (state_ == State::IN_ROGUE || state_ == State::IN_ROGUE_BATTLE) ? "in rogue mode (type 'quit')" :
-                (state_ == State::IN_GYM_SELECT || state_ == State::IN_GYM_BATTLE) ? "at a gym (type 'quit')" :
-                "busy";
-            char msg[64];
-            snprintf(msg, sizeof(msg), "Still %s.", what);
+        if (n > 16) print(" ...");
+        printSep();
+        return;
+    }
+
+    // ── mml <name> — cable club link invite. Peer lookup goes through
+    // Meshtastic's nodeDB (not daycare, which is disabled on this branch).
+    if (strncmp(cmd, "mml ", 4) == 0) {
+        const char *name = cmd + 4;
+        if (!nodeDB) { print("nodeDB unavailable"); return; }
+        uint32_t targetId = 0;
+        size_t n = nodeDB->getNumMeshNodes();
+        for (size_t i = 0; i < n; ++i) {
+            const auto *m = nodeDB->getMeshNodeByIndex(i);
+            if (!m || !m->has_user) continue;
+            if (strncasecmp(m->user.short_name, name, 4) == 0 ||
+                strncasecmp(m->user.long_name,  name, 10) == 0) {
+                targetId = m->num;
+                break;
+            }
+        }
+        if (targetId == 0) {
+            char msg[48];
+            snprintf(msg, sizeof(msg), "Trainer \'%.10s\' not in range.", name);
             print(msg);
             return;
         }
-        if (savParty_.count == 0) { print("Load a save first."); return; }
-        // Find target peer by short name
-        uint32_t targetId = 0;
-        for (uint8_t i = 0; i < meshPeerCount_; i++) {
-            if (strncasecmp(meshPeers_[i].shortName, name, 4) == 0 ||
-                strncasecmp(meshPeers_[i].gameName,  name, 7) == 0) {
-                targetId = meshPeers_[i].nodeId;
-                break;
-            }
-        }
-        if (targetId == 0) {
-            if (meshPeerCount_ == 0) print("No trainers in range.");
-            else { char msg[48]; snprintf(msg, sizeof(msg), "Trainer '%s' not in range.", name); print(msg); }
-            return;
-        }
-        pendingNetChallenge_ = true;
-        pendingNetChallengeTarget_ = targetId;
-        netPartner_ = 0;
-        state_ = State::IN_NET_CHALLENGE_SENT;
-        char msg[32];
-        snprintf(msg, sizeof(msg), "Challenge sent to %.6s!", name);
-        print(msg);
-        print("Waiting for response...");
-        return;
-    }
-
-    // ── mml <name> — cable club link invite ─────────────────────────────────
-    if (strncmp(cmd, "mml ", 4) == 0) {
-        const char *name = cmd + 4;
-        uint32_t targetId = 0;
-        for (uint8_t i = 0; i < meshPeerCount_; i++) {
-            if (strncasecmp(meshPeers_[i].shortName, name, 4) == 0 ||
-                strncasecmp(meshPeers_[i].gameName,  name, 7) == 0) {
-                targetId = meshPeers_[i].nodeId;
-                break;
-            }
-        }
-        if (targetId == 0) {
-            if (meshPeerCount_ == 0) print("No trainers in range.");
-            else { char msg[48]; snprintf(msg, sizeof(msg), "Trainer '%s' not in range.", name); print(msg); }
-            return;
-        }
-        // Queue DM to target: human-readable + protocol trigger
         pendingDM_ = true;
         dmTarget_  = targetId;
         const char *me = localShortName_[0] ? localShortName_ : "???";
-        snprintf(dmText_, sizeof(dmText_), "[%.4s] invites Cable Club! Go to Cable Club. mmc on", me);
-        char msg[32];
-        snprintf(msg, sizeof(msg), "Cable Club invite sent to %.6s.", name);
+        snprintf(dmText_, sizeof(dmText_),
+                 "[%.4s] invites Cable Club! Go to Cable Club. mmc on", me);
+        char msg[48];
+        snprintf(msg, sizeof(msg), "Cable Club invite sent to %.10s.", name);
         print(msg);
         return;
     }
 
-    // ── fight list — show nearby trainers ────────────────────────────────────
-    if (strcmp(cmd, "fight list") == 0) {
-        if (meshPeerCount_ == 0) { print("No trainers nearby."); return; }
-        print("Nearby trainers:");
-        for (uint8_t i = 0; i < meshPeerCount_; i++) {
-            const DaycareNeighborPokemon &p = meshPeers_[i];
-            char line[48];
-            snprintf(line, sizeof(line), "  %s  (%s L%u)",
-                     p.shortName, p.nickname[0] ? p.nickname : "???", p.level);
-            print(line);
-        }
-        return;
-    }
-
-    // ── fight <name> — async battle vs neighbor beacon party ─────────────────
-    if (strncmp(cmd, "fight ", 6) == 0) {
-        if (savParty_.count == 0) { print("Load a save first."); return; }
-        if (state_ != State::READY) {
-            const char *what =
-                (state_ == State::IN_NET_CHALLENGE_SENT) ? "waiting for challenge response (type 'cancel')" :
-                (state_ == State::IN_NET_CHALLENGE_WAIT) ? "pending challenge - type 'y' or 'n'" :
-                (state_ == State::IN_NET_BATTLE || state_ == State::IN_NET_BATTLE_WAIT) ? "in a live battle (type 'cancel')" :
-                (state_ == State::IN_BATTLE)      ? "in battle (type 'quit')" :
-                (state_ == State::IN_RUN || state_ == State::IN_RUN_BATTLE)   ? "on a route (type 'home')" :
-                (state_ == State::IN_ROGUE || state_ == State::IN_ROGUE_BATTLE) ? "in rogue mode (type 'quit')" :
-                (state_ == State::IN_GYM_SELECT || state_ == State::IN_GYM_BATTLE) ? "at a gym (type 'quit')" :
-                "busy";
-            char msg[64];
-            snprintf(msg, sizeof(msg), "Still %s.", what);
-            print(msg);
-            return;
-        }
-        const char *name = cmd + 6;
-        bool found = false;
-        for (uint8_t i = 0; i < meshPeerCount_; i++) {
-            const DaycareNeighborPokemon &p = meshPeers_[i];
-            if (strncasecmp(p.shortName, name, 4) == 0 ||
-                strncasecmp(p.gameName,  name, 7) == 0 ||
-                strncasecmp(p.nickname,  name, 10) == 0) {
-                buildAsyncOpponent(p, oppParty_);
-                asyncOpponentNodeId_ = p.nodeId;
-                strncpy(asyncOpponentName_, p.shortName, sizeof(asyncOpponentName_) - 1);
-
-                // Heal a copy of our party for the fight
-                Gen1Party myParty = savParty_;
-                for (uint8_t j = 0; j < myParty.count; j++) {
-                    setBe16(myParty.mons[j].hp, be16(myParty.mons[j].maxHp));
-                    myParty.mons[j].status = 0;
-                    for (int k = 0; k < 4; k++) {
-                        const Gen1MoveData *mv = gen1Move(myParty.mons[j].moves[k]);
-                        if (mv) myParty.mons[j].pp[k] = mv->pp;
-                    }
-                }
-
-                engine_.start(myParty, oppParty_, rand32(), 1);
-                char msg[48];
-                snprintf(msg, sizeof(msg), "Challenging %s!", p.shortName);
-                print(msg);
-                describeBattleStatus();
-                print("Use 1..4 to attack.");
-                state_ = State::IN_BATTLE;
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            if (meshPeerCount_ == 0)
-                print("No mesh trainers nearby.");
-            else {
-                char msg[48];
-                snprintf(msg, sizeof(msg), "Trainer '%s' not found nearby.", name);
-                print(msg);
-            }
-        }
-        return;
-    }
-
-    if (strcmp(cmd, "fight") == 0) {
-        if (state_ == State::IN_RUN) {
-            startRunWave();
-            return;
-        }
-        if (state_ == State::IN_ROGUE) {
-            startRogueWave();
-            return;
-        }
-        if (state_ == State::IN_GYM_SELECT) {
-            startGymFight();
-            return;
-        }
-        if (state_ != State::READY) {
-            if (savParty_.count == 0)
-                print("No party loaded. Waiting for SAV...");
-            else if (chosenSlot_ == 0xFF)
-                print("Pick a Pokemon first: pick 1..6");
-            else
-                print("Already in battle.");
-            return;
-        }
-        startBattle();
-        return;
-    }
-
-    if (strcmp(cmd, "status") == 0) {
-        if (state_ == State::IN_BATTLE)
-            describeBattleStatus();
-        else if (state_ == State::READY) {
-            char buf[64];
-            Gen1Pokemon &p = savParty_.mons[chosenSlot_];
-            snprintf(buf, sizeof(buf), "Ready: %.10s L%u",
-                     (const char *)savParty_.nicknames[chosenSlot_],
-                     (unsigned)p.level);
-            print(buf);
-        } else {
-            print("No Pokemon selected. Type 'party'.");
-        }
-        return;
-    }
-
-    if (strcmp(cmd, "quit") == 0 || strcmp(cmd, "cancel") == 0) {
-        if (state_ == State::IN_BATTLE || state_ == State::IN_RUN_BATTLE ||
-            state_ == State::IN_ROGUE_BATTLE) {
-            runActive_ = false;
-            rogueActive_ = false;
-            state_ = State::READY;
-            print("Battle forfeited.");
-            printSep();
-        } else if (state_ == State::IN_RUN) {
-            runActive_ = false;
-            state_ = State::READY;
-            print("Run abandoned.");
-            printSep();
-        } else if (state_ == State::IN_ROGUE) {
-            rogueActive_ = false;
-            state_ = State::READY;
-            print("Rogue run abandoned.");
-            printSep();
-        } else if (state_ == State::IN_GYM_BATTLE || state_ == State::IN_GYM_SELECT) {
-            state_ = State::READY;
-            currentGymIdx_ = 0xFF;
-            print("Gym challenge abandoned.");
-            printSep();
-        } else if (state_ == State::IN_NET_CHALLENGE_SENT) {
-            state_ = State::READY;
-            netPartner_ = 0;
-            pendingNetChallenge_ = false;
-            print("Challenge cancelled.");
-        } else if (state_ == State::IN_NET_CHALLENGE_WAIT) {
-            pendingDM_ = true; dmTarget_ = netPartner_;
-            strncpy(dmText_, "MMT:REJECT", sizeof(dmText_));
-            state_ = State::READY;
-            netPartner_ = 0;
-            print("You fled.");
-        } else if (state_ == State::IN_NET_BATTLE || state_ == State::IN_NET_BATTLE_WAIT) {
-            state_ = State::READY;
-            netPartner_ = 0;
-            print("Net battle ended.");
-        } else {
-            print("Nothing to cancel.");
-        }
-        return;
-    }
-
-    // Move: 1/W  2/E  3/R  4/S  (letter aliases avoid SYM key)
-    {
-        uint8_t slot = 0xFF;
-        char c = cmd[0];
-        if ((c >= '1' && c <= '4') && (cmd[1] == 0 || cmd[1] == ' '))
-            slot = (uint8_t)(c - '1');
-        else if ((c == 'w' || c == 'W') && (cmd[1] == 0)) slot = 0;
-        else if ((c == 'e' || c == 'E') && (cmd[1] == 0)) slot = 1;
-        else if ((c == 'r' || c == 'R') && (cmd[1] == 0)) slot = 2;
-        else if ((c == 's' || c == 'S') && (cmd[1] == 0)) slot = 3;
-
-        if (slot != 0xFF) {
-        if (state_ == State::IN_NET_BATTLE) {
-            // Live PvP — store action, transition to wait
-            const auto &mine = engine_.party(0);
-            const auto &m = mine.mons[mine.active];
-            if (m.moves[slot] == 0) { print("Empty move slot."); return; }
-            if (m.pp[slot] == 0)    { print("No PP left."); return; }
-            netMyAction_ = 0;
-            netMyIndex_  = slot;
-            if (netActionReady_) {
-                resolveNetTurn();
-            } else {
-                state_ = State::IN_NET_BATTLE_WAIT;
-                print("Move chosen. Waiting for opponent...");
-            }
-            return;
-        }
-        if (state_ != State::IN_BATTLE && state_ != State::IN_RUN_BATTLE &&
-            state_ != State::IN_ROGUE_BATTLE && state_ != State::IN_GYM_BATTLE) {
-            print("Not in battle. Type 'fight'.");
-            return;
-        }
-        const auto &mine = engine_.party(0);
-        const auto &m = mine.mons[mine.active];
-        if (m.moves[slot] == 0) {
-            print("Empty move slot.");
-            return;
-        }
-        if (m.pp[slot] == 0) {
-            print("No PP left.");
-            return;
-        }
-        resolvePlayerAction(0, slot);
-        return;
-        } // if (slot != 0xFF)
-    } // move block
-
-    print("Unknown command. Type 'help'.");
 }
 
 // ── Game logic ──────────────────────────────────────────────────────────────
