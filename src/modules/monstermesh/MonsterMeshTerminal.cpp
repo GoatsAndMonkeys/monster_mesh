@@ -1384,15 +1384,17 @@ void MonsterMeshTerminal::resolveNetTurn()
 
 void MonsterMeshTerminal::receiveNetChallenge(uint32_t fromNodeId, const char *shortName)
 {
-    // Receiver flow: the challenge arrives as a DM to the user; we track state
-    // here so the DM Y/N reply can be routed back through the same accept/
-    // reject path, but we do NOT print to the terminal so the user isn't
-    // interrupted mid-task. If they do open the terminal while a challenge is
-    // pending, the existing IN_NET_CHALLENGE_WAIT state gates the y/n command.
-    (void)shortName;
+    // Receiver flow: the challenge arrives as a DM (that's the primary
+    // notification) and the terminal logs it so the user has a trail if they
+    // do open the terminal. The Y/N reply can come via either the terminal
+    // y/n command or a single-char Y/N DM.
     if (state_ == State::READY && savParty_.count > 0) {
         netPartner_ = fromNodeId;
         state_      = State::IN_NET_CHALLENGE_WAIT;
+        char msg[64];
+        snprintf(msg, sizeof(msg), "%s wants a text battle!", shortName);
+        print(msg);
+        print("Reply Y or N via DM, or type y/n here.");
     }
 }
 

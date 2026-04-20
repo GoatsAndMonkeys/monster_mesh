@@ -1,5 +1,6 @@
 #include "MonsterMeshEmulator.h"
 #include "MonsterMeshAudio.h"
+#include "RomCache.h"
 #include "SPILock.h"
 #include "variant.h"
 #include <SPI.h>
@@ -206,6 +207,30 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
     // Free previous ROM if reloading
     if (romData_) { free(romData_); romData_ = nullptr; romSize_ = 0; }
 
+    // Fast path: LittleFS ROM cache. If the last-launched ROM matches this
+    // path, read from internal flash — no SPI contention with radio/TFT.
+    {
+        uint8_t *tmp = static_cast<uint8_t *>(ps_malloc(ROM_CACHE_MAX));
+        if (tmp) {
+            size_t got = 0;
+            if (romCacheLoad(sdPath, tmp, ROM_CACHE_MAX, &got) && got > 0) {
+                // Shrink to fit.
+                romData_ = static_cast<uint8_t *>(ps_malloc(got));
+                if (romData_) {
+                    memcpy(romData_, tmp, got);
+                    free(tmp);
+                    romSize_ = got;
+                    Serial.printf("[EMU] ROM loaded from LittleFS cache: %u bytes\n",
+                                  (unsigned)got);
+                    return true;
+                }
+                // alloc failed for final buffer — keep tmp so next block can
+                // reuse it (but we still need SD path; just free and continue)
+            }
+            free(tmp);
+        }
+    }
+
     // SD shares SPI bus with radio — hold spiLock for the duration
     concurrency::LockGuard g(spiLock);
 
@@ -260,14 +285,36 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
         f.close();
         return false;
     }
-    size_t n = f.read(romData_, romSize_);
+    // Chunked read so spiLock can be released briefly between chunks and
+    // the radio task can transmit its pending packets. A monolithic 1 MB
+    // read held spiLock long enough that TX IRQ windows were missed and
+    // RadioLib's watchdog occasionally rebooted during launch.
+    constexpr size_t CHUNK = 32 * 1024;
+    size_t n = 0;
+    while (n < romSize_) {
+        size_t want = (romSize_ - n) < CHUNK ? (romSize_ - n) : CHUNK;
+        size_t got  = f.read(romData_ + n, want);
+        if (got == 0) break;
+        n += got;
+        spiLock->unlock();
+        vTaskDelay(1);
+        spiLock->lock();
+    }
     f.close();
-    Serial.printf("[EMU] ROM read: %u / %u bytes\n", (unsigned)n, (unsigned)romSize_);
+    Serial.printf("[EMU] ROM read: %u / %u bytes (chunked)\n", (unsigned)n, (unsigned)romSize_);
     if (n != romSize_) {
         free(romData_); romData_ = nullptr;
         return false;
     }
     Serial.printf("[EMU] ROM loaded OK: %u bytes\n", (unsigned)romSize_);
+
+    // Mirror into LittleFS so next launch hits the fast path. Best-effort —
+    // if this fails we just reload from SD next time.
+    if (romCacheStore(sdPath, romData_, romSize_)) {
+        Serial.printf("[EMU] ROM cached to LittleFS (%u bytes)\n", (unsigned)romSize_);
+    } else {
+        Serial.printf("[EMU] ROM cache write failed\n");
+    }
     return true;
 }
 
