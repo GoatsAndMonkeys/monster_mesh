@@ -644,7 +644,17 @@ int32_t MonsterMeshModule::runOnce()
         {
             concurrency::LockGuard g(spiLock);
             SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+            // On cold boot the card may still be powering up — some brands
+            // (notably Lexar 32GB) need a settle window before they ACK.
+            if (setupRetries_ == 0) delay(500);
+            // Try the fast path first; fall back to 400kHz for cards that
+            // refuse the 4MHz handshake on first attempt.
             sdOk = SD.begin(SDCARD_CS, SPI, 4000000U);
+            if (!sdOk) {
+                LOG_WARN("[MonsterMesh] SD.begin@4MHz failed, retrying @400kHz\n");
+                SD.end();
+                sdOk = SD.begin(SDCARD_CS, SPI, 400000U);
+            }
         }
 
         // While LVGL is still paused, load the SAV into LittleFS cache.
@@ -672,7 +682,7 @@ int32_t MonsterMeshModule::runOnce()
                 setupStatus_ = setupStatusBuf_;
                 LOG_WARN("[MonsterMesh] SD.begin() failed, retry %d\n", setupRetries_);
             }
-            return 2000;
+            return 750;
         }
         // setupStatus_ was set by loadSavAtBoot per-branch ("SAV: LittleFS",
         // "SAV: no last_rom", etc). Don't overwrite it here.
