@@ -219,6 +219,10 @@ bool TFTView_320x240::setupUIConfig(const meshtastic_DeviceUIConfig &uiconfig)
         db.uiConfig.version = 1;
         db.uiConfig.screen_brightness = 153;
         db.uiConfig.screen_timeout = 30;
+        // MonsterMesh default theme: Game Boy Pocket (enum index 4, matches
+        // dropdown position "Pocket"). Dropdown order in screens.c:
+        // Dark(0) Light(1) DMG(2) GBC(3) Pocket(4) PokeBlue(5) PokeRed(6).
+        db.uiConfig.theme = (meshtastic_Theme)4;
         controller->storeUIConfig(db.uiConfig);
     }
 
