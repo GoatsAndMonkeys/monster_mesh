@@ -260,9 +260,23 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
         f.close();
         return false;
     }
-    size_t n = f.read(romData_, romSize_);
+    // Chunked read: release spiLock briefly between 32 KB chunks so the
+    // radio task can grab the bus and service its TX queue. A monolithic
+    // 1 MB read held spiLock long enough to miss TX IRQ windows and
+    // occasionally trip RadioLib's watchdog into a reboot mid-launch.
+    constexpr size_t CHUNK = 32 * 1024;
+    size_t n = 0;
+    while (n < romSize_) {
+        size_t want = (romSize_ - n) < CHUNK ? (romSize_ - n) : CHUNK;
+        size_t got  = f.read(romData_ + n, want);
+        if (got == 0) break;
+        n += got;
+        spiLock->unlock();
+        vTaskDelay(1);
+        spiLock->lock();
+    }
     f.close();
-    Serial.printf("[EMU] ROM read: %u / %u bytes\n", (unsigned)n, (unsigned)romSize_);
+    Serial.printf("[EMU] ROM read: %u / %u bytes (chunked)\n", (unsigned)n, (unsigned)romSize_);
     if (n != romSize_) {
         free(romData_); romData_ = nullptr;
         return false;
