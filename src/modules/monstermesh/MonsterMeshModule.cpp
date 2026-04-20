@@ -690,29 +690,14 @@ int32_t MonsterMeshModule::runOnce()
         pendingAutoCheckin_ = true;
     }
 
-    // Deferred auto-daycare check-in — suppress LVGL flush first so SD.end()
-    // inside daycareAutoCheckIn() doesn't collide with LGFX DMA on the shared SPI bus.
+    // Deferred auto-daycare check-in. Each SD operation inside daycareAutoCheckIn()
+    // is wrapped in spiLock, which prevents LGFX DMA from running concurrently.
+    // We do NOT pause the LVGL flush timer here — keeping LVGL alive prevents the
+    // task watchdog from firing if SD.begin() is slow on cold boot.
     if (pendingAutoCheckin_ && !emulatorActive_ && !browserActive_) {
         pendingAutoCheckin_ = false;
-#if HAS_TFT
-        lv_display_t *dcDisp = lv_display_get_default();
-        void *dcSavedCb = dcDisp ? (void *)dcDisp->flush_cb : nullptr;
-        if (dcDisp) {
-            lv_display_set_flush_cb(dcDisp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
-                lv_display_flush_ready(d);
-            });
-            if (dcDisp->refr_timer) lv_timer_pause(dcDisp->refr_timer);
-        }
-#endif
         daycareAutoCheckIn();
         daycareCheckinDone_ = true;
-#if HAS_TFT
-        if (dcDisp && dcSavedCb) {
-            lv_display_set_flush_cb(dcDisp, (lv_display_flush_cb_t)dcSavedCb);
-        }
-        if (dcDisp && dcDisp->refr_timer) lv_timer_resume(dcDisp->refr_timer);
-        if (dcDisp) lv_obj_invalidate(lv_screen_active());
-#endif
     }
 
     // Deferred terminal init — LVGL screen objects may not exist at setupDone_ time.
@@ -2136,11 +2121,15 @@ void MonsterMeshModule::daycareAutoCheckIn()
     size_t len = 0;
 
     // Step 1: read last ROM path (small file, quick SPI lock)
-    // SD is already mounted from setup; restore SPI bus state only (no SD.end/begin
-    // which can hang on cold boot and trigger the watchdog).
+    // Re-init SD inside spiLock so LGFX can't be mid-DMA while we reconfigure the bus.
     {
         concurrency::LockGuard g(spiLock);
+        SD.end();
         SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+        if (!SD.begin(SDCARD_CS, SPI, 4000000U)) {
+            LOG_WARN("[MonsterMesh] auto-daycare: SD re-init failed\n");
+            return;
+        }
         File lrf = SD.open("/last_rom.txt", FILE_READ);
         if (!lrf) {
             LOG_INFO("[MonsterMesh] no /last_rom.txt — skipping auto-daycare\n");
@@ -2165,11 +2154,17 @@ void MonsterMeshModule::daycareAutoCheckIn()
     }
     memset(sram, 0, 0x8000);
 
-    // Step 3: read .sav file (32KB, separate SPI lock; SD already mounted)
+    // Step 3: read .sav file (32KB, separate SPI lock + SD re-init)
     size_t n = 0;
     {
         concurrency::LockGuard g(spiLock);
+        SD.end();
         SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+        if (!SD.begin(SDCARD_CS, SPI, 4000000U)) {
+            LOG_WARN("[MonsterMesh] auto-daycare: SD re-init failed for .sav\n");
+            free(sram);
+            return;
+        }
         File sf = SD.open(savPath, FILE_READ);
         if (!sf) {
             LOG_INFO("[MonsterMesh] no save file '%s' — skipping auto-daycare\n", savPath);
