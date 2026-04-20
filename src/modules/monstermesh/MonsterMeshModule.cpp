@@ -21,7 +21,6 @@
 #include "PokemonData.h"
 #include "Gen1Species.h"
 #include "SavCache.h"
-#include "MonsterMeshSerial.h"
 // DaycareSavPatcher.h included via PokemonDaycare.h (in MonsterMeshModule.h)
 
 // LovyanGFX is available on T-Deck in both t-deck and t-deck-tft builds
@@ -582,11 +581,6 @@ int32_t MonsterMeshModule::runOnce()
 
         // ── One-time subsystem init (guarded so retries don't re-init) ────────
         if (setupRetries_ == 0) {
-            // Restore persisted "serial quiet" state (controls whether
-            // direct Serial.print calls in the MM modules fire, so the
-            // external Meshtastic CLI can drive the device when quiet).
-            mmSerialLoadPersisted();
-
             // ── Transport ────────────────────────────────────────────────────
             transport_.begin();
             transport_.setNodeId(nodeDB->getNodeNum());

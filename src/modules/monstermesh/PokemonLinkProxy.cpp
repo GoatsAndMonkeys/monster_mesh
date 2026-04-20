@@ -2,7 +2,6 @@
 #include "MeshtasticTransport.h"
 #include "MonsterMeshEmulator.h"
 #include <string.h>
-#include "MonsterMeshSerial.h"
 
 // ── Gen 1 Cable Club protocol constants ──────────────────────────────────────
 static constexpr uint8_t PKMN_MASTER    = 0x01;  // master role byte
@@ -70,7 +69,7 @@ void PokemonLinkProxy::transitionTo(Phase p) {
         "TRADE_DATA_END", "TRADE_PATCH_HEADER", "TRADE_PATCH_DATA",
         "TRADE_SELECT", "TRADE_CONFIRM", "TRADE_DONE", "BATTLE"
     };
-    MMSer.printf("[PROXY] %s -> %s\n",
+    Serial.printf("[PROXY] %s -> %s\n",
                   names[(int)phase_], names[(int)p]);
     phase_ = p;
 }
@@ -262,7 +261,7 @@ void PokemonLinkProxy::onGbTx(uint8_t byte) {
     case Phase::TRADE_SELECT: {
         uint8_t pl[1] = { byte };
         sendPacket(PktType::TRADE_SELECT, pl, 1);
-        MMSer.printf("[PROXY] -> TRADE_SELECT 0x%02X\n", byte);
+        Serial.printf("[PROXY] -> TRADE_SELECT 0x%02X\n", byte);
         ready = false;  // getResponse() returns remote's selection when it arrives
         break;
     }
@@ -271,7 +270,7 @@ void PokemonLinkProxy::onGbTx(uint8_t byte) {
     case Phase::TRADE_CONFIRM: {
         uint8_t pl[1] = { byte };
         sendPacket(PktType::TRADE_CONFIRM, pl, 1);
-        MMSer.printf("[PROXY] -> TRADE_CONFIRM 0x%02X\n", byte);
+        Serial.printf("[PROXY] -> TRADE_CONFIRM 0x%02X\n", byte);
         ready = false;
         break;
     }
@@ -368,7 +367,7 @@ void PokemonLinkProxy::onRemotePacket(PktType type, const uint8_t *payload,
     switch (type) {
 
     case PktType::TRADE_READY:
-        MMSer.println("[PROXY] <- TRADE_READY");
+        Serial.println("[PROXY] <- TRADE_READY");
         // No action needed beyond receiving; actual unstall requires the data.
         break;
 
@@ -384,11 +383,11 @@ void PokemonLinkProxy::onRemotePacket(PktType type, const uint8_t *payload,
         }
         memcpy(remoteTradeBlock_ + offset, payload + 2, dataLen);
         tradeFragMask_ |= (1 << fragIdx);
-        MMSer.printf("[PROXY] <- TRADE_BLOCK_PART frag=%d/%d (%d bytes)\n",
+        Serial.printf("[PROXY] <- TRADE_BLOCK_PART frag=%d/%d (%d bytes)\n",
                       fragIdx + 1, totalFrags, dataLen);
         uint8_t allMask = (1 << totalFrags) - 1;
         if ((tradeFragMask_ & allMask) == allMask) {
-            MMSer.println("[PROXY] remote trade block complete");
+            Serial.println("[PROXY] remote trade block complete");
             checkUnstall();
         }
         break;
@@ -406,11 +405,11 @@ void PokemonLinkProxy::onRemotePacket(PktType type, const uint8_t *payload,
         }
         memcpy(remotePatchList_ + offset, payload + 2, dataLen);
         patchFragMask_ |= (1 << fragIdx);
-        MMSer.printf("[PROXY] <- PATCH_LIST_PART frag=%d/%d (%d bytes)\n",
+        Serial.printf("[PROXY] <- PATCH_LIST_PART frag=%d/%d (%d bytes)\n",
                       fragIdx + 1, totalFrags, dataLen);
         uint8_t allMask = (1 << totalFrags) - 1;
         if ((patchFragMask_ & allMask) == allMask) {
-            MMSer.println("[PROXY] remote patch list complete");
+            Serial.println("[PROXY] remote patch list complete");
             remotePatchReady_ = true;
             checkUnstall();
         }
@@ -421,7 +420,7 @@ void PokemonLinkProxy::onRemotePacket(PktType type, const uint8_t *payload,
         if (payloadLen >= 1) {
             remoteSelect_      = payload[0];
             remoteSelectReady_ = true;
-            MMSer.printf("[PROXY] <- TRADE_SELECT 0x%02X\n", remoteSelect_);
+            Serial.printf("[PROXY] <- TRADE_SELECT 0x%02X\n", remoteSelect_);
         }
         break;
 
@@ -429,7 +428,7 @@ void PokemonLinkProxy::onRemotePacket(PktType type, const uint8_t *payload,
         if (payloadLen >= 1) {
             remoteConfirm_      = payload[0];
             remoteConfirmReady_ = true;
-            MMSer.printf("[PROXY] <- TRADE_CONFIRM 0x%02X\n", remoteConfirm_);
+            Serial.printf("[PROXY] <- TRADE_CONFIRM 0x%02X\n", remoteConfirm_);
         }
         break;
 
@@ -455,7 +454,7 @@ void PokemonLinkProxy::checkUnstall() {
 
 void PokemonLinkProxy::readLocalTradeBlock() {
     emulator_.readWRAMRange(WRAM_TRADE_BLOCK, localTradeBlock_, TRADE_BLOCK_SIZE);
-    MMSer.printf("[PROXY] read trade block from WRAM 0x%04X (%d bytes)\n",
+    Serial.printf("[PROXY] read trade block from WRAM 0x%04X (%d bytes)\n",
                   WRAM_TRADE_BLOCK, TRADE_BLOCK_SIZE);
 }
 
@@ -491,7 +490,7 @@ void PokemonLinkProxy::buildAndPatchLocalBlock() {
     // Pad to PATCH_LIST_SIZE
     while ((uint16_t)(p - localPatchList_) < PATCH_LIST_SIZE) *p++ = 0x00;
 
-    MMSer.printf("[PROXY] patch list: %d entries\n",
+    Serial.printf("[PROXY] patch list: %d entries\n",
                   (int)(p - localPatchList_));
 }
 
@@ -516,7 +515,7 @@ void PokemonLinkProxy::applyRemotePatchList() {
         if (idx < TRADE_BLOCK_SIZE) remoteTradeBlock_[idx] = 0xFE;
     }
 
-    MMSer.println("[PROXY] applied remote patch list");
+    Serial.println("[PROXY] applied remote patch list");
 }
 
 // ── Network send helpers ──────────────────────────────────────────────────────
@@ -537,7 +536,7 @@ void PokemonLinkProxy::sendPacket(PktType type, const uint8_t *payload,
 
 void PokemonLinkProxy::sendTradeReady() {
     sendPacket(PktType::TRADE_READY, nullptr, 0);
-    MMSer.println("[PROXY] -> TRADE_READY");
+    Serial.println("[PROXY] -> TRADE_READY");
 }
 
 void PokemonLinkProxy::sendTradeBlockFragments() {
@@ -552,7 +551,7 @@ void PokemonLinkProxy::sendTradeBlockFragments() {
         pl[1] = TRADE_TOTAL_FRAGS;
         memcpy(pl + 2, localTradeBlock_ + offset, dataLen);
         sendPacket(PktType::TRADE_BLOCK_PART, pl, 2 + dataLen);
-        MMSer.printf("[PROXY] -> TRADE_BLOCK_PART frag=%d/%d (%d bytes)\n",
+        Serial.printf("[PROXY] -> TRADE_BLOCK_PART frag=%d/%d (%d bytes)\n",
                       i + 1, TRADE_TOTAL_FRAGS, dataLen);
         offset = end;
     }
@@ -570,7 +569,7 @@ void PokemonLinkProxy::sendPatchListFragments() {
         pl[1] = PATCH_TOTAL_FRAGS;
         memcpy(pl + 2, localPatchList_ + offset, dataLen);
         sendPacket(PktType::PATCH_LIST_PART, pl, 2 + dataLen);
-        MMSer.printf("[PROXY] -> PATCH_LIST_PART frag=%d/%d (%d bytes)\n",
+        Serial.printf("[PROXY] -> PATCH_LIST_PART frag=%d/%d (%d bytes)\n",
                       i + 1, PATCH_TOTAL_FRAGS, dataLen);
         offset = end;
     }

@@ -7,7 +7,6 @@
 #include "graphics/view/TFT/Themes.h"
 #include "NodeDB.h"
 #include "main.h"
-#include "MonsterMeshSerial.h"
 #include <lvgl.h>
 #include <cstring>
 #include <cstdio>
@@ -271,7 +270,6 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
             print("rmnode !XXXX    remove node by id");
             print("whoami          show this node id");
             print("reboot          reboot device");
-            print("quiet on|off    mute serial for admin CLI");
         }
         printSep();
         return;
@@ -759,22 +757,6 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
         print("rebooting in 2s...");
         nodeDB->saveToDisk();
         rebootAtMsec = millis() + 2000;
-        return;
-    }
-
-    if (strncmp(cmd, "quiet", 5) == 0) {
-        const char *arg = cmd + 5;
-        while (*arg == ' ') arg++;
-        if (strcmp(arg, "on") == 0) {
-            mmSerialSetQuiet(true);
-            print("serial quiet: ON (external CLI can connect)");
-        } else if (strcmp(arg, "off") == 0) {
-            mmSerialSetQuiet(false);
-            print("serial quiet: OFF (debug logs resume)");
-        } else {
-            print(g_mmSerialQuiet ? "serial quiet: ON" : "serial quiet: OFF");
-            print("usage: quiet on | quiet off");
-        }
         return;
     }
 
