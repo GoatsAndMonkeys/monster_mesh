@@ -732,7 +732,12 @@ void MonsterMeshTerminal::showParty()
         const Gen1Pokemon &p = src.mons[i];
         uint8_t lvl = p.level ? p.level : p.boxLevel;
         const char *marker = (!inRun && !inRogue && i == chosenSlot_) ? "*" : "";
-        snprintf(buf, sizeof(buf), " %u) %.10s L%u %u/%u HP %s",
+        // Padded widths so columns line up regardless of nickname length.
+        // Cozette is monospace, so N pad chars = N column widths on screen.
+        //  %-10.10s nickname pad + truncate to 10
+        //  %-3u     level, left-justified in 3 cols
+        //  %3u/%3u  HP and maxHP, right-justified in 3 cols each
+        snprintf(buf, sizeof(buf), " %u) %-10.10s L%-3u %3u/%3u HP %s",
                  (unsigned)(i + 1),
                  (const char *)src.nicknames[i],
                  (unsigned)lvl,
