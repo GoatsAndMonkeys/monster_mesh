@@ -1278,7 +1278,13 @@ void MonsterMeshTerminal::buildAsyncOpponent(const DaycareNeighborPokemon &peer,
     }
     for (uint8_t i = 0; i < n; i++) {
         uint8_t moves[4] = {};
-        pickMovesForSpecies(peer.party[i].species, moves);
+        bool hasRealMoves = peer.party[i].moves[0] != 0 || peer.party[i].moves[1] != 0 ||
+                            peer.party[i].moves[2] != 0 || peer.party[i].moves[3] != 0;
+        if (hasRealMoves) {
+            for (int m = 0; m < 4; m++) moves[m] = peer.party[i].moves[m];
+        } else {
+            pickMovesForSpecies(peer.party[i].species, moves);
+        }
         Gen1BattleEngine::BattlePoke dummy{};
         writeBattlePokeToSave(out, i, peer.party[i].species, peer.party[i].level,
                               moves, dummy, 0x88, peer.party[i].nickname);
