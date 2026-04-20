@@ -674,7 +674,8 @@ int32_t MonsterMeshModule::runOnce()
             }
             return 2000;
         }
-        setupStatus_ = savCacheValid_ ? "SAV cached" : "SD OK";
+        // setupStatus_ was set by loadSavAtBoot per-branch ("SAV: LittleFS",
+        // "SAV: no last_rom", etc). Don't overwrite it here.
 
         // Register scanline callback (used once a ROM is loaded)
         emu_.setScanlineCallback(scanlineCallback, this);
@@ -2173,6 +2174,8 @@ void MonsterMeshModule::loadSavAtBoot()
         savCacheValid_ = true;
         LOG_INFO("[MonsterMesh] SAV cache loaded from LittleFS (lastRom='%s')\n",
                  lastRomPath_[0] ? lastRomPath_ : "(none)");
+        snprintf(setupStatusBuf_, sizeof(setupStatusBuf_), "SAV: LittleFS");
+        setupStatus_ = setupStatusBuf_;
         return;
     }
 
@@ -2186,6 +2189,8 @@ void MonsterMeshModule::loadSavAtBoot()
         File lrf = SD.open("/last_rom.txt", FILE_READ);
         if (!lrf) {
             LOG_INFO("[MonsterMesh] no /last_rom.txt yet — SAV cache empty\n");
+            snprintf(setupStatusBuf_, sizeof(setupStatusBuf_), "SAV: no last_rom");
+            setupStatus_ = setupStatusBuf_;
             return;
         }
         size_t n = lrf.readBytes(romPath, sizeof(romPath) - 1);
@@ -2194,10 +2199,15 @@ void MonsterMeshModule::loadSavAtBoot()
         while (n > 0 && (romPath[n-1] == '\n' || romPath[n-1] == '\r' || romPath[n-1] == ' '))
             romPath[--n] = '\0';
     }
-    if (!romPath[0]) return;
+    if (!romPath[0]) {
+        snprintf(setupStatusBuf_, sizeof(setupStatusBuf_), "SAV: empty last_rom");
+        setupStatus_ = setupStatusBuf_;
+        return;
+    }
 
     char savPath[256];
     MonsterMeshEmulator::romPathToSavePath(romPath, savPath, sizeof(savPath));
+    LOG_INFO("[MonsterMesh] boot SAV migration: rom='%s' → sav='%s'\n", romPath, savPath);
 
     size_t got = 0;
     {
@@ -2205,12 +2215,18 @@ void MonsterMeshModule::loadSavAtBoot()
         File sf = SD.open(savPath, FILE_READ);
         if (!sf) {
             LOG_INFO("[MonsterMesh] no SAV at '%s' — cache empty\n", savPath);
+            snprintf(setupStatusBuf_, sizeof(setupStatusBuf_), "SAV: no .sav file");
+            setupStatus_ = setupStatusBuf_;
             return;
         }
         got = sf.read(savCache_, SAV_CACHE_SIZE);
         sf.close();
     }
-    if (got == 0) return;
+    if (got == 0) {
+        snprintf(setupStatusBuf_, sizeof(setupStatusBuf_), "SAV: empty .sav");
+        setupStatus_ = setupStatusBuf_;
+        return;
+    }
 
     strncpy(lastRomPath_, romPath, sizeof(lastRomPath_) - 1);
     lastRomPath_[sizeof(lastRomPath_) - 1] = '\0';
@@ -2221,8 +2237,12 @@ void MonsterMeshModule::loadSavAtBoot()
     // Mirror into LittleFS so next boot takes the fast path.
     if (savCacheStore(savCache_, SAV_CACHE_SIZE, lastRomPath_)) {
         LOG_INFO("[MonsterMesh] SAV written to LittleFS /monstermesh/sav.bin\n");
+        snprintf(setupStatusBuf_, sizeof(setupStatusBuf_), "SAV: migrated (%u)", (unsigned)got);
+        setupStatus_ = setupStatusBuf_;
     } else {
         LOG_WARN("[MonsterMesh] LittleFS write failed — SAV will re-migrate next boot\n");
+        snprintf(setupStatusBuf_, sizeof(setupStatusBuf_), "SAV: SD only (%u)", (unsigned)got);
+        setupStatus_ = setupStatusBuf_;
     }
 }
 
