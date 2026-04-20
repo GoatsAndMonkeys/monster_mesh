@@ -3,6 +3,9 @@
 #include "graphics/view/TFT/Themes.h"
 #include "stdint.h"
 
+LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_13;
+LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_20;
+
 // ── Pixel palette definitions (7 shades each: 4 base + 3 interpolated) ──────
 
 // A) Classic DMG LCD — the iconic yellow-green Game Boy screen
@@ -271,11 +274,10 @@ void apply_style_home_container_style(void)
     lv_style_set_border_side(style, LV_BORDER_SIDE_FULL);
     lv_style_set_bg_color(style, lv_color_hex(THEME(eHomeContainerBg)));
     lv_style_set_shadow_color(style, lv_color_hex(THEME(eHomeContainerShadow)));
-    lv_style_set_text_font(style, isGreen() ? &lv_font_cozette_13 : &ui_font_montserrat_16);
+    lv_style_set_text_font(style, &lv_font_cozette_20);
     lv_style_set_radius(style, 10);
     lv_style_set_text_color(style, lv_color_hex(THEME(eHomeContainerText)));
-    if (isGreen())
-        lv_style_set_text_line_space(style, 28);
+    lv_style_set_text_line_space(style, 28);
 };
 void apply_style_settings_panel_style(void)
 {
@@ -291,10 +293,9 @@ void apply_style_node_panel_style(void)
     lv_style_t *style = get_style_node_panel_style_MAIN_DEFAULT();
     lv_style_set_bg_color(style, lv_color_hex(THEME(eNodePanelBg)));
     lv_style_set_border_color(style, lv_color_hex(THEME(eNodePanelBorder)));
-    lv_style_set_text_font(style, isGreen() ? &lv_font_cozette_13 : &ui_font_montserrat_12);
+    lv_style_set_text_font(style, &lv_font_cozette_13);
     lv_style_set_text_color(style, lv_color_hex(THEME(eNodePanelText)));
-    if (isGreen())
-        lv_style_set_text_line_space(style, 16);
+    lv_style_set_text_line_space(style, 16);
 };
 void apply_style_node_button_style(void)
 {
