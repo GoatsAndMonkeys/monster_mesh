@@ -457,7 +457,7 @@ void init_style_home_container_style_MAIN_DEFAULT(lv_style_t *style) {
     lv_style_set_border_side(style, LV_BORDER_SIDE_FULL);
     lv_style_set_bg_color(style, lv_color_hex(0xfffafaf4));
     lv_style_set_shadow_color(style, lv_color_hex(0xff999999));
-    lv_style_set_text_font(style, &lv_font_cozette_20);
+    lv_style_set_text_font(style, &lv_font_cozette_13);
     lv_style_set_radius(style, 10);
     lv_style_set_text_color(style, lv_color_hex(0xff294337));
 };
