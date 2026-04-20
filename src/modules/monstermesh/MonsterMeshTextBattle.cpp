@@ -75,10 +75,11 @@ void MonsterMeshTextBattle::startNetworkedAsReceiver(uint32_t remoteId,
 void MonsterMeshTextBattle::startLocal(const Gen1Party &myParty,
                                        const Gen1Party &cpuParty)
 {
-    mode_     = Mode::LOCAL_ROGUELIKE;
-    phase_    = Phase::WAIT_ACTION;
-    remoteId_ = 0;
-    cursor_   = 0; switchCursor_ = 0;
+    mode_         = Mode::LOCAL_ROGUELIKE;
+    phase_        = Phase::WAIT_ACTION;
+    remoteId_     = 0;
+    cursor_       = 0; switchCursor_ = 0;
+    fleeAttempts_ = 0;
     logFill_ = logHead_ = 0; scrollPending_ = 0;
 
     uint32_t rngSeed = (uint32_t)(millis() ^ esp_random());
@@ -307,7 +308,21 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
         return;
     }
 
-    if (c == 27 /* ESC */ || c == 'f' || c == 'F') {
+    if (c == 'f' || c == 'F') {
+        if (mode_ == Mode::NETWORKED) {
+            sendForfeit(); engine_.forfeit(0, engineLogCb, this); phase_ = Phase::FINISHED;
+        } else {
+            ++fleeAttempts_;
+            const auto &player = engine_.party(0).mons[engine_.party(0).active];
+            const auto &enemy  = engine_.party(1).mons[engine_.party(1).active];
+            uint32_t f = (uint32_t)player.spd * 32 / (enemy.spd + 1) + 30u * fleeAttempts_;
+            bool escaped = (f >= 255) || ((uint8_t)(millis() & 0xFF) < (uint8_t)f);
+            if (escaped) { appendLog("Got away safely!"); phase_ = Phase::FINISHED; }
+            else { appendLog("Can't escape!"); engine_.submitAction(0, 2 /*FLEE_FAIL*/, 0); phase_ = Phase::WAIT_REMOTE; }
+        }
+        return;
+    }
+    if (c == 27 /* ESC */) {
         if (mode_ == Mode::NETWORKED) sendForfeit();
         engine_.forfeit(0, engineLogCb, this);
         phase_ = Phase::FINISHED;
@@ -405,7 +420,7 @@ void MonsterMeshTextBattle::drawMoveMenu(lgfx::LGFX_Device *g)
     }
     g->setCursor(8, y + 42);
     g->setTextColor(0x7BEF, 0x0000);
-    g->print("[S] switch  [F] forfeit");
+    g->print("[S] switch  [F] flee");
 }
 
 void MonsterMeshTextBattle::drawSwitchMenu(lgfx::LGFX_Device *g)

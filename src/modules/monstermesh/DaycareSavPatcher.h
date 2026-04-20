@@ -572,6 +572,7 @@ struct DaycarePartyInfo {
     uint32_t totalExp;       // from SAV (3-byte BE)
     char     nickname[11];   // decoded to ASCII
     char     otName[11];     // decoded to ASCII
+    uint8_t  moves[4];       // 4 move IDs from SAV
 };
 
 class DaycareSavPatcher {
@@ -618,6 +619,9 @@ public:
                 out[i].otName[j] = gen1CharToAscii(otRaw[j]);
                 if (j == 9) out[i].otName[10] = '\0';
             }
+
+            // Moves (bytes 0x08-0x0B in the party Pokemon struct)
+            for (int m = 0; m < 4; m++) out[i].moves[m] = pkm[0x08 + m];
         }
         return count;
     }

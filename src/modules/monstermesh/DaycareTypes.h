@@ -258,6 +258,7 @@ struct DaycarePokemonState {
     uint16_t dreamCount;
     uint16_t exploreCount;
     uint16_t splashCount;         // Magikarp only
+    uint8_t  moves[4];            // SAV moves at check-in
 };
 
 // ── Persistence structure ────────────────────────────────────────────────────
@@ -406,6 +407,7 @@ struct DaycareBeacon {
         uint8_t species;    // Pokedex number
         uint8_t level;
         char    nickname[11]; // Player nickname (10 + null)
+        uint8_t moves[4];
     } pokemon[6];
 };
 #pragma pack(pop)

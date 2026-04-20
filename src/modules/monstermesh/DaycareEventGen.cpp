@@ -720,25 +720,23 @@ void DaycareEventGen::generateCompositional(
                 rel->lastSeenMs = millis();
             }
 
-            // Append relationship tier tag if meaningful
+            // Append friendship/rivalry score + delta tag
             if (rel) {
-                const char *fTag = (friendship >= FRIEND_TIER_ACQUAINTANCE)
-                                   ? friendshipTierName(friendship) : nullptr;
-                const char *rTag = (rivalry >= RIVAL_TIER_COMPETITOR)
-                                   ? rivalryTierName(rivalry) : nullptr;
-                char tierTag[40] = {};
-                if (fTag && rTag) {
-                    snprintf(tierTag, sizeof(tierTag), " [%s & %s]", fTag, rTag);
-                } else if (fTag) {
-                    snprintf(tierTag, sizeof(tierTag), " [%s]", fTag);
-                } else if (rTag) {
-                    snprintf(tierTag, sizeof(tierTag), " [%s]", rTag);
-                }
+                uint8_t newF = rel->friendship;
+                uint8_t newR = rel->rivalry;
+                uint8_t dF = newF - friendship;
+                uint8_t dR = newR - rivalry;
+                char tierTag[60] = {};
+                if (dF > 0 && dR > 0)
+                    snprintf(tierTag, sizeof(tierTag), " [Friendship %d +%d, Rivalry %d +%d]", newF, dF, newR, dR);
+                else if (dF > 0)
+                    snprintf(tierTag, sizeof(tierTag), " [Friendship %d +%d]", newF, dF);
+                else if (dR > 0)
+                    snprintf(tierTag, sizeof(tierTag), " [Rivalry %d +%d]", newR, dR);
                 if (tierTag[0]) {
                     size_t ml = strlen(msgBuf);
-                    if (ml + strlen(tierTag) < sizeof(msgBuf)) {
+                    if (ml + strlen(tierTag) < sizeof(msgBuf))
                         strcat(msgBuf, tierTag);
-                    }
                 }
             }
 

@@ -90,6 +90,7 @@ private:
     uint8_t  lastSentIndex_  = 0;
     uint16_t lastSentTurn_   = 0;
     uint32_t lastSendMs_     = 0;
+    uint8_t  fleeAttempts_   = 0;
 
     // Scrolling text log — circular buffer.
     char    log_[LOG_LINES][LOG_WIDTH + 1] = {};
