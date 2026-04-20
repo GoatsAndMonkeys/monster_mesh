@@ -1,4 +1,5 @@
 #include "MonsterMeshLobby.h"
+#include "DebugConfiguration.h"
 #include "MonsterMeshBattleShim.h"
 #include "MonsterMeshEmulator.h"
 #include <math.h>
@@ -17,7 +18,7 @@ void MonsterMeshLobby::open() {
     state_ = State::BROWSING;
     cursor_ = 0;
     beaconSent_ = false;
-    Serial.println("[LOBBY] opened");
+    LOG_DEBUG("[LOBBY] opened\n");
 }
 
 void MonsterMeshLobby::close() {
@@ -27,7 +28,7 @@ void MonsterMeshLobby::close() {
         challengeFrom_ = 0;
     }
     state_ = State::CLOSED;
-    Serial.println("[LOBBY] closed");
+    LOG_DEBUG("[LOBBY] closed\n");
 }
 
 void MonsterMeshLobby::tick(uint32_t now) {
@@ -48,13 +49,13 @@ void MonsterMeshLobby::tick(uint32_t now) {
 
     if (state_ == State::CHALLENGING && challengeMs_ &&
         (now - challengeMs_ > CHALLENGE_TIMEOUT_MS)) {
-        Serial.println("[LOBBY] challenge timed out");
+        LOG_DEBUG("[LOBBY] challenge timed out\n");
         challengeTarget_ = 0;
         state_ = State::BROWSING;
     }
     if (state_ == State::INCOMING && challengeMs_ &&
         (now - challengeMs_ > CHALLENGE_TIMEOUT_MS)) {
-        Serial.println("[LOBBY] incoming challenge expired");
+        LOG_DEBUG("[LOBBY] incoming challenge expired\n");
         challengeFrom_ = 0;
         state_ = State::BROWSING;
     }
@@ -369,12 +370,12 @@ void MonsterMeshLobby::loadStats() {
     File f = LittleFS.open(STATS_PATH, "r");
     if (!f || f.size() != sizeof(PlayerStats)) {
         stats_ = PlayerStats{};
-        Serial.println("[LOBBY] no saved stats");
+        LOG_DEBUG("[LOBBY] no saved stats\n");
         return;
     }
     f.read((uint8_t *)&stats_, sizeof(PlayerStats));
     f.close();
-    Serial.printf("[LOBBY] loaded stats: ELO=%u W=%u L=%u\n",
+    LOG_DEBUG("[LOBBY] loaded stats: ELO=%u W=%u L=%u\n",
                   stats_.elo, stats_.wins, stats_.losses);
 }
 

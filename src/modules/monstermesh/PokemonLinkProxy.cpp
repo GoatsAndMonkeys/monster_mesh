@@ -1,4 +1,5 @@
 #include "PokemonLinkProxy.h"
+#include "DebugConfiguration.h"
 #include "MeshtasticTransport.h"
 #include "MonsterMeshEmulator.h"
 #include <string.h>
@@ -69,7 +70,7 @@ void PokemonLinkProxy::transitionTo(Phase p) {
         "TRADE_DATA_END", "TRADE_PATCH_HEADER", "TRADE_PATCH_DATA",
         "TRADE_SELECT", "TRADE_CONFIRM", "TRADE_DONE", "BATTLE"
     };
-    Serial.printf("[PROXY] %s -> %s\n",
+    LOG_DEBUG("[PROXY] %s -> %s\n",
                   names[(int)phase_], names[(int)p]);
     phase_ = p;
 }
@@ -261,7 +262,7 @@ void PokemonLinkProxy::onGbTx(uint8_t byte) {
     case Phase::TRADE_SELECT: {
         uint8_t pl[1] = { byte };
         sendPacket(PktType::TRADE_SELECT, pl, 1);
-        Serial.printf("[PROXY] -> TRADE_SELECT 0x%02X\n", byte);
+        LOG_DEBUG("[PROXY] -> TRADE_SELECT 0x%02X\n", byte);
         ready = false;  // getResponse() returns remote's selection when it arrives
         break;
     }
@@ -270,7 +271,7 @@ void PokemonLinkProxy::onGbTx(uint8_t byte) {
     case Phase::TRADE_CONFIRM: {
         uint8_t pl[1] = { byte };
         sendPacket(PktType::TRADE_CONFIRM, pl, 1);
-        Serial.printf("[PROXY] -> TRADE_CONFIRM 0x%02X\n", byte);
+        LOG_DEBUG("[PROXY] -> TRADE_CONFIRM 0x%02X\n", byte);
         ready = false;
         break;
     }
@@ -367,7 +368,7 @@ void PokemonLinkProxy::onRemotePacket(PktType type, const uint8_t *payload,
     switch (type) {
 
     case PktType::TRADE_READY:
-        Serial.println("[PROXY] <- TRADE_READY");
+        LOG_DEBUG("[PROXY] <- TRADE_READY\n");
         // No action needed beyond receiving; actual unstall requires the data.
         break;
 
@@ -383,11 +384,11 @@ void PokemonLinkProxy::onRemotePacket(PktType type, const uint8_t *payload,
         }
         memcpy(remoteTradeBlock_ + offset, payload + 2, dataLen);
         tradeFragMask_ |= (1 << fragIdx);
-        Serial.printf("[PROXY] <- TRADE_BLOCK_PART frag=%d/%d (%d bytes)\n",
+        LOG_DEBUG("[PROXY] <- TRADE_BLOCK_PART frag=%d/%d (%d bytes)\n",
                       fragIdx + 1, totalFrags, dataLen);
         uint8_t allMask = (1 << totalFrags) - 1;
         if ((tradeFragMask_ & allMask) == allMask) {
-            Serial.println("[PROXY] remote trade block complete");
+            LOG_DEBUG("[PROXY] remote trade block complete\n");
             checkUnstall();
         }
         break;
@@ -405,11 +406,11 @@ void PokemonLinkProxy::onRemotePacket(PktType type, const uint8_t *payload,
         }
         memcpy(remotePatchList_ + offset, payload + 2, dataLen);
         patchFragMask_ |= (1 << fragIdx);
-        Serial.printf("[PROXY] <- PATCH_LIST_PART frag=%d/%d (%d bytes)\n",
+        LOG_DEBUG("[PROXY] <- PATCH_LIST_PART frag=%d/%d (%d bytes)\n",
                       fragIdx + 1, totalFrags, dataLen);
         uint8_t allMask = (1 << totalFrags) - 1;
         if ((patchFragMask_ & allMask) == allMask) {
-            Serial.println("[PROXY] remote patch list complete");
+            LOG_DEBUG("[PROXY] remote patch list complete\n");
             remotePatchReady_ = true;
             checkUnstall();
         }
@@ -420,7 +421,7 @@ void PokemonLinkProxy::onRemotePacket(PktType type, const uint8_t *payload,
         if (payloadLen >= 1) {
             remoteSelect_      = payload[0];
             remoteSelectReady_ = true;
-            Serial.printf("[PROXY] <- TRADE_SELECT 0x%02X\n", remoteSelect_);
+            LOG_DEBUG("[PROXY] <- TRADE_SELECT 0x%02X\n", remoteSelect_);
         }
         break;
 
@@ -428,7 +429,7 @@ void PokemonLinkProxy::onRemotePacket(PktType type, const uint8_t *payload,
         if (payloadLen >= 1) {
             remoteConfirm_      = payload[0];
             remoteConfirmReady_ = true;
-            Serial.printf("[PROXY] <- TRADE_CONFIRM 0x%02X\n", remoteConfirm_);
+            LOG_DEBUG("[PROXY] <- TRADE_CONFIRM 0x%02X\n", remoteConfirm_);
         }
         break;
 
@@ -454,7 +455,7 @@ void PokemonLinkProxy::checkUnstall() {
 
 void PokemonLinkProxy::readLocalTradeBlock() {
     emulator_.readWRAMRange(WRAM_TRADE_BLOCK, localTradeBlock_, TRADE_BLOCK_SIZE);
-    Serial.printf("[PROXY] read trade block from WRAM 0x%04X (%d bytes)\n",
+    LOG_DEBUG("[PROXY] read trade block from WRAM 0x%04X (%d bytes)\n",
                   WRAM_TRADE_BLOCK, TRADE_BLOCK_SIZE);
 }
 
@@ -490,7 +491,7 @@ void PokemonLinkProxy::buildAndPatchLocalBlock() {
     // Pad to PATCH_LIST_SIZE
     while ((uint16_t)(p - localPatchList_) < PATCH_LIST_SIZE) *p++ = 0x00;
 
-    Serial.printf("[PROXY] patch list: %d entries\n",
+    LOG_DEBUG("[PROXY] patch list: %d entries\n",
                   (int)(p - localPatchList_));
 }
 
@@ -515,7 +516,7 @@ void PokemonLinkProxy::applyRemotePatchList() {
         if (idx < TRADE_BLOCK_SIZE) remoteTradeBlock_[idx] = 0xFE;
     }
 
-    Serial.println("[PROXY] applied remote patch list");
+    LOG_DEBUG("[PROXY] applied remote patch list\n");
 }
 
 // ── Network send helpers ──────────────────────────────────────────────────────
@@ -536,7 +537,7 @@ void PokemonLinkProxy::sendPacket(PktType type, const uint8_t *payload,
 
 void PokemonLinkProxy::sendTradeReady() {
     sendPacket(PktType::TRADE_READY, nullptr, 0);
-    Serial.println("[PROXY] -> TRADE_READY");
+    LOG_DEBUG("[PROXY] -> TRADE_READY\n");
 }
 
 void PokemonLinkProxy::sendTradeBlockFragments() {
@@ -551,7 +552,7 @@ void PokemonLinkProxy::sendTradeBlockFragments() {
         pl[1] = TRADE_TOTAL_FRAGS;
         memcpy(pl + 2, localTradeBlock_ + offset, dataLen);
         sendPacket(PktType::TRADE_BLOCK_PART, pl, 2 + dataLen);
-        Serial.printf("[PROXY] -> TRADE_BLOCK_PART frag=%d/%d (%d bytes)\n",
+        LOG_DEBUG("[PROXY] -> TRADE_BLOCK_PART frag=%d/%d (%d bytes)\n",
                       i + 1, TRADE_TOTAL_FRAGS, dataLen);
         offset = end;
     }
@@ -569,7 +570,7 @@ void PokemonLinkProxy::sendPatchListFragments() {
         pl[1] = PATCH_TOTAL_FRAGS;
         memcpy(pl + 2, localPatchList_ + offset, dataLen);
         sendPacket(PktType::PATCH_LIST_PART, pl, 2 + dataLen);
-        Serial.printf("[PROXY] -> PATCH_LIST_PART frag=%d/%d (%d bytes)\n",
+        LOG_DEBUG("[PROXY] -> PATCH_LIST_PART frag=%d/%d (%d bytes)\n",
                       i + 1, PATCH_TOTAL_FRAGS, dataLen);
         offset = end;
     }
