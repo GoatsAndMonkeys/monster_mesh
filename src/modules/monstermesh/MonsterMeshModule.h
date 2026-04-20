@@ -200,6 +200,20 @@ private:
     Gen1Party terminalParty_ = {};
     bool      terminalPartyReady_ = false;
     void buildTerminalPartyFromSram(const uint8_t *sram);
+
+    // SAV cache — canonical in-RAM copy of the Gen 1 SRAM, mirrored to
+    // LittleFS (/monstermesh/sav.bin) so boot doesn't need to read from SD
+    // and runtime daycare/terminal/battle logic never touches the SPI bus.
+    // See SavCache.h.
+    uint8_t *savCache_        = nullptr;    // ps_malloc(0x8000), SAV_CACHE_SIZE bytes
+    bool     savCacheValid_   = false;      // true once a real SAV has been loaded
+    bool     savCacheReady_   = false;      // true once the boot-time load step has finished
+    bool     pendingSdSavSync_ = false;     // deferred backup-write of savCache_ back to SD
+    uint32_t lastSdSavSyncMs_ = 0;          // millis() of last SD backup write (rate limit)
+    char     lastRomPath_[256] = {};        // SD-relative path of the last launched ROM
+    void     loadSavAtBoot();               // called inside setup() SD-mount window
+    void     flushSavToCache();             // post-emulator: cartRam_ → savCache_ → LittleFS
+    void     syncSavToSd();                 // deferred: savCache_ → SD .sav file
 };
 
 extern MonsterMeshModule *monsterMeshModule;

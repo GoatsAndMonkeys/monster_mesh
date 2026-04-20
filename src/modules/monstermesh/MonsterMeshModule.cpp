@@ -20,6 +20,7 @@
 #include "MonsterMeshAudio.h"
 #include "PokemonData.h"
 #include "Gen1Species.h"
+#include "SavCache.h"
 // DaycareSavPatcher.h included via PokemonDaycare.h (in MonsterMeshModule.h)
 
 // LovyanGFX is available on T-Deck in both t-deck and t-deck-tft builds
@@ -645,6 +646,15 @@ int32_t MonsterMeshModule::runOnce()
             SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
             sdOk = SD.begin(SDCARD_CS, SPI, 4000000U);
         }
+
+        // While LVGL is still paused, load the SAV into LittleFS cache.
+        // This is the "read save file first" behavior the user asked for —
+        // it happens in the same bus-quiet window as the SD mount, so there
+        // is no second SPI race later. Runs even on SD-mount failure (which
+        // will just set savCacheReady_=true with an empty cache).
+        if (sdOk) loadSavAtBoot();
+        savCacheReady_ = true;
+
 #if HAS_TFT
         if (sdDisp && sdSavedCb)
             lv_display_set_flush_cb(sdDisp, (lv_display_flush_cb_t)sdSavedCb);
@@ -664,7 +674,7 @@ int32_t MonsterMeshModule::runOnce()
             }
             return 2000;
         }
-        setupStatus_ = "SD OK";
+        setupStatus_ = savCacheValid_ ? "SAV cached" : "SD OK";
 
         // Register scanline callback (used once a ROM is loaded)
         emu_.setScanlineCallback(scanlineCallback, this);
@@ -779,8 +789,10 @@ int32_t MonsterMeshModule::runOnce()
 
     // blitFrame() moved to emulator task on Core 1 — runOnce() is too slow for screen updates
 
-    // Deferred browser open — SD ops must not run on the LVGL task
-    if (pendingBrowserOpen_) {
+    // Deferred browser open — SD ops must not run on the LVGL task.
+    // Also gated on savCacheReady_ so the SAV load step at boot always
+    // happens before the user is allowed to scan for ROMs.
+    if (pendingBrowserOpen_ && savCacheReady_) {
         pendingBrowserOpen_ = false;
         LOG_INFO("[MonsterMesh] browser open (runOnce) emuInit=%d\n", (int)emuInitialized_);
         // Pause LVGL rendering during SD scan to avoid SPI bus contention
@@ -2111,6 +2123,88 @@ void MonsterMeshModule::daycareStatus(uint32_t replyTo)
 
     sendTextDM(replyTo, buf);
 }
+
+// ── Boot-time SAV load ──────────────────────────────────────────────────────
+//
+// Called from setup() inside the SD-mount LVGL-paused window. Populates
+// savCache_ (32KB in PSRAM) from LittleFS if present, else migrates the
+// Gen 1 .sav from SD into LittleFS on first-ever boot.
+//
+// Single SD reinit: we were just here mounting, no need to end/begin again.
+
+void MonsterMeshModule::loadSavAtBoot()
+{
+    // Allocate the canonical in-RAM SAV buffer. Re-entry safe: only done once.
+    if (!savCache_) {
+        savCache_ = static_cast<uint8_t *>(ps_malloc(SAV_CACHE_SIZE));
+        if (!savCache_) {
+            LOG_WARN("[MonsterMesh] SAV cache alloc failed (32KB PSRAM)\n");
+            return;
+        }
+        memset(savCache_, 0, SAV_CACHE_SIZE);
+    }
+
+    // Fast path: LittleFS already has the SAV from a previous boot.
+    if (savCacheLoad(savCache_, SAV_CACHE_SIZE, lastRomPath_, sizeof(lastRomPath_))) {
+        savCacheValid_ = true;
+        LOG_INFO("[MonsterMesh] SAV cache loaded from LittleFS (lastRom='%s')\n",
+                 lastRomPath_[0] ? lastRomPath_ : "(none)");
+        return;
+    }
+
+    // Slow path: first-ever boot (or LittleFS was wiped). Read last_rom.txt
+    // and the .sav from SD, then mirror them into LittleFS for next boot.
+    // We are inside the SD-mount LVGL-paused window, so just take spiLock
+    // and read — no SD.end/begin needed.
+    char romPath[256] = {};
+    {
+        concurrency::LockGuard g(spiLock);
+        File lrf = SD.open("/last_rom.txt", FILE_READ);
+        if (!lrf) {
+            LOG_INFO("[MonsterMesh] no /last_rom.txt yet — SAV cache empty\n");
+            return;
+        }
+        size_t n = lrf.readBytes(romPath, sizeof(romPath) - 1);
+        lrf.close();
+        romPath[n] = '\0';
+        while (n > 0 && (romPath[n-1] == '\n' || romPath[n-1] == '\r' || romPath[n-1] == ' '))
+            romPath[--n] = '\0';
+    }
+    if (!romPath[0]) return;
+
+    char savPath[256];
+    MonsterMeshEmulator::romPathToSavePath(romPath, savPath, sizeof(savPath));
+
+    size_t got = 0;
+    {
+        concurrency::LockGuard g(spiLock);
+        File sf = SD.open(savPath, FILE_READ);
+        if (!sf) {
+            LOG_INFO("[MonsterMesh] no SAV at '%s' — cache empty\n", savPath);
+            return;
+        }
+        got = sf.read(savCache_, SAV_CACHE_SIZE);
+        sf.close();
+    }
+    if (got == 0) return;
+
+    strncpy(lastRomPath_, romPath, sizeof(lastRomPath_) - 1);
+    lastRomPath_[sizeof(lastRomPath_) - 1] = '\0';
+    savCacheValid_ = true;
+    LOG_INFO("[MonsterMesh] SAV migrated from SD: %u bytes from %s\n",
+             (unsigned)got, savPath);
+
+    // Mirror into LittleFS so next boot takes the fast path.
+    if (savCacheStore(savCache_, SAV_CACHE_SIZE, lastRomPath_)) {
+        LOG_INFO("[MonsterMesh] SAV written to LittleFS /monstermesh/sav.bin\n");
+    } else {
+        LOG_WARN("[MonsterMesh] LittleFS write failed — SAV will re-migrate next boot\n");
+    }
+}
+
+// Stubs filled in by Stages 5+6. Declared here so the header links.
+void MonsterMeshModule::flushSavToCache() { /* Stage 5 */ }
+void MonsterMeshModule::syncSavToSd()     { /* Stage 6 */ }
 
 // ── Auto check-in: load last .sav from SD without starting emulator ────────
 
