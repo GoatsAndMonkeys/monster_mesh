@@ -2,6 +2,8 @@
 #include "images.h"
 #include "fonts.h"
 
+LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_13;
+LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_20;
 
 lv_style_t style_btn_default;
 lv_style_t style_btn_active;
@@ -53,7 +55,7 @@ void init_style_panel_style_MAIN_DEFAULT(lv_style_t *style) {
     lv_style_set_bg_color(style, lv_color_hex(0xfff4f4f0));
     lv_style_set_shadow_color(style, lv_color_hex(0xffe0e0e0));
     lv_style_set_radius(style, 0);
-    lv_style_set_text_font(style, &ui_font_montserrat_14);
+    lv_style_set_text_font(style, &lv_font_cozette_13);
 };
 
 lv_style_t *get_style_panel_style_MAIN_DEFAULT() {
@@ -130,7 +132,7 @@ void init_style_node_panel_style_MAIN_DEFAULT(lv_style_t *style) {
     lv_style_set_border_color(style, lv_color_hex(0xff979797));
     lv_style_set_border_width(style, 1);
     lv_style_set_radius(style, 10);
-    lv_style_set_text_font(style, &ui_font_montserrat_12);
+    lv_style_set_text_font(style, &lv_font_cozette_13);
     lv_style_set_text_color(style, lv_color_hex(0xff212121));
 };
 
@@ -260,7 +262,7 @@ void init_style_new_message_style_MAIN_DEFAULT(lv_style_t *style) {
     lv_style_set_pad_bottom(style, 2);
     lv_style_set_pad_left(style, 2);
     lv_style_set_pad_right(style, 2);
-    lv_style_set_text_font(style, &ui_font_montserrat_14);
+    lv_style_set_text_font(style, &lv_font_cozette_13);
     lv_style_set_bg_color(style, lv_color_hex(0xffffffff));
     lv_style_set_text_align(style, LV_TEXT_ALIGN_LEFT);
     lv_style_set_bg_opa(style, 255);
@@ -297,7 +299,7 @@ void init_style_chat_message_style_MAIN_DEFAULT(lv_style_t *style) {
     lv_style_set_pad_bottom(style, 2);
     lv_style_set_pad_left(style, 2);
     lv_style_set_pad_right(style, 2);
-    lv_style_set_text_font(style, &ui_font_montserrat_14);
+    lv_style_set_text_font(style, &lv_font_cozette_13);
     lv_style_set_bg_color(style, lv_color_hex(0xfffbfce9));
     lv_style_set_bg_opa(style, 255);
     lv_style_set_text_align(style, LV_TEXT_ALIGN_LEFT);
@@ -368,7 +370,7 @@ void remove_style_drop_down_style(lv_obj_t *obj) {
 
 void init_style_bw_label_style_MAIN_DEFAULT(lv_style_t *style) {
     lv_style_set_text_color(style, lv_color_hex(0xff212121));
-    lv_style_set_text_font(style, &ui_font_montserrat_12);
+    lv_style_set_text_font(style, &lv_font_cozette_13);
 };
 
 lv_style_t *get_style_bw_label_style_MAIN_DEFAULT() {
@@ -455,7 +457,7 @@ void init_style_home_container_style_MAIN_DEFAULT(lv_style_t *style) {
     lv_style_set_border_side(style, LV_BORDER_SIDE_FULL);
     lv_style_set_bg_color(style, lv_color_hex(0xfffafaf4));
     lv_style_set_shadow_color(style, lv_color_hex(0xff999999));
-    lv_style_set_text_font(style, &ui_font_montserrat_16);
+    lv_style_set_text_font(style, &lv_font_cozette_20);
     lv_style_set_radius(style, 10);
     lv_style_set_text_color(style, lv_color_hex(0xff294337));
 };
@@ -550,7 +552,7 @@ lv_style_t *get_style_main_screen_style_MAIN_DEFAULT() {
 };
 
 void init_style_main_screen_style_MAIN_PRESSED(lv_style_t *style) {
-    lv_style_set_text_font(style, &ui_font_montserrat_14);
+    lv_style_set_text_font(style, &lv_font_cozette_13);
 };
 
 lv_style_t *get_style_main_screen_style_MAIN_PRESSED() {
@@ -778,7 +780,7 @@ void remove_style_positive_image_style(lv_obj_t *obj) {
 //
 
 void init_style_statistics_table_style_MAIN_DEFAULT(lv_style_t *style) {
-    lv_style_set_text_font(style, &ui_font_montserrat_12);
+    lv_style_set_text_font(style, &lv_font_cozette_13);
 };
 
 lv_style_t *get_style_statistics_table_style_MAIN_DEFAULT() {
