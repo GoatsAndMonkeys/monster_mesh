@@ -872,10 +872,12 @@ int32_t MonsterMeshModule::runOnce()
         renderBrowser();
     }
 
-    // Deferred save — triggered on emulator exit, done here outside LVGL callback
+    // Deferred save — triggered on emulator exit, done here outside LVGL callback.
+    // flushSavToCache writes through to LittleFS (no SD); Stage 6's syncSavToSd
+    // drains pendingSdSavSync_ later when no foreground work is pending.
     if (pendingSave_) {
         pendingSave_ = false;
-        emu_.save();
+        flushSavToCache();
     }
 
     // Simulated weather — rotates every 3 hours using Unix time as seed.
@@ -1540,7 +1542,7 @@ void MonsterMeshModule::emuTaskLoop()
         }
 
         if (prevBattle_ != 0 && curBattle == 0) {
-            emu_.save();
+            flushSavToCache();
             if (opponentElo_ > 0) {
                 uint8_t partyCount = emu_.readWRAM(Gen1::wPartyCount);
                 bool won = false;
@@ -1935,6 +1937,13 @@ void MonsterMeshModule::launchROM(const char *path)
     LOG_INFO("[MonsterMesh] Launching ROM: %s\n", vfsPath);
 
     bool romOk = emu_.begin(vfsPath);
+    if (romOk && savCacheValid_ && savCache_ && emu_.cartRam_) {
+        // Cache is the source of truth — overwrite the SD-loaded SRAM so
+        // the emulator picks up the latest state (in case Stage 6's deferred
+        // SD sync hasn't drained yet).
+        memcpy(emu_.cartRam_, savCache_, SAV_CACHE_SIZE);
+        LOG_INFO("[MonsterMesh] launchROM: cartRam_ refreshed from SAV cache\n");
+    }
     if (!romOk) {
         LOG_WARN("[MonsterMesh] Failed to load ROM: %s\n", vfsPath);
         snprintf(setupStatusBuf_, sizeof(setupStatusBuf_), "FAIL: %s", vfsPath);
@@ -2072,8 +2081,8 @@ void MonsterMeshModule::daycareCheckIn()
 
     LOG_INFO("[MonsterMesh] daycare checkin: trainer='%s' node='%s'\n", gameName, shortName);
 
-    // Save emulator state first so SRAM is up to date
-    emu_.save();
+    // Snapshot SRAM into the LittleFS cache (Stage 6 drains to SD later)
+    flushSavToCache();
 
     daycare_.checkIn(sram, shortName, gameName);
 
@@ -2091,8 +2100,8 @@ void MonsterMeshModule::daycareCheckOut()
     // Write XP back to SRAM if emulator is running
     if (emuInitialized_ && emu_.isRunning()) {
         daycare_.checkOut(emu_.cartRam_);
-        emu_.save();  // persist patched SRAM to SD
-        LOG_INFO("[MonsterMesh] daycare checkout: XP written back to SRAM + saved\n");
+        flushSavToCache();  // mirror patched SRAM to LittleFS; SD sync deferred
+        LOG_INFO("[MonsterMesh] daycare checkout: XP written back to SRAM + cached\n");
     } else {
         daycare_.checkOut(nullptr);  // just stop daycare, no SRAM patch
         LOG_INFO("[MonsterMesh] daycare checkout: no emulator, state saved\n");
@@ -2205,8 +2214,31 @@ void MonsterMeshModule::loadSavAtBoot()
     }
 }
 
-// Stubs filled in by Stages 5+6. Declared here so the header links.
-void MonsterMeshModule::flushSavToCache() { /* Stage 5 */ }
+// Snapshot the emulator's SRAM into the LittleFS-backed cache. SD is
+// not touched here — Stage 6 (syncSavToSd) drains the deferred queue
+// later when no other foreground work is pending.
+void MonsterMeshModule::flushSavToCache()
+{
+    if (!savCache_) {
+        LOG_WARN("[MonsterMesh] flushSavToCache: no savCache_ alloc\n");
+        return;
+    }
+    if (!emu_.cartRam_) {
+        LOG_WARN("[MonsterMesh] flushSavToCache: no cartRam_\n");
+        return;
+    }
+    memcpy(savCache_, emu_.cartRam_, SAV_CACHE_SIZE);
+    savCacheValid_ = true;
+    if (savCacheStore(savCache_, SAV_CACHE_SIZE, lastRomPath_)) {
+        LOG_INFO("[MonsterMesh] flushSavToCache: %u bytes mirrored to LittleFS\n",
+                 (unsigned)SAV_CACHE_SIZE);
+    } else {
+        LOG_WARN("[MonsterMesh] flushSavToCache: LittleFS write failed\n");
+    }
+    pendingSdSavSync_ = true;
+    buildTerminalPartyFromSram(savCache_);
+}
+
 void MonsterMeshModule::syncSavToSd()     { /* Stage 6 */ }
 
 // ── Auto check-in: read from in-RAM SAV cache (no SD, no emulator) ─────────
