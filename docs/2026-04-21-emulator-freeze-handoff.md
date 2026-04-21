@@ -1,7 +1,7 @@
 # MonsterMesh emulator mid-play freeze — handoff
 
 **Branch:** `emulator-stability`
-**Current build:** `emulator-stability-b75` (commit `d47737326`)
+**Current build:** `emulator-stability-b87` (everything below b75 in §9 applies; b86 WiFi-off reverted in b87)
 **Devices:** LilyGO T-Deck × 2 — Red (`!f1a05e70`), Blue (`!a1ad6880`)
 
 Repro'd on both devices. This doc captures everything we've tried, what worked, what didn't, and where to look next. Written as a handoff so Codex (or a fresh session) can pick up without re-reading the chat.
@@ -158,3 +158,137 @@ with open('/tmp/watch.log','wb') as f:
 ## Related docs
 
 - `docs/2026-04-20-session-sd-rom-ui.md` — full prior session log covering the SD-cache redesign that was rolled back, the font sweep that was kept, and the ROM-load + MMT-flow experiments that informed the emulator-stability branch.
+
+---
+
+## 9. Extended investigation (b76 — b87)
+
+Continuing from the b75 snapshot in the sections above.
+
+### b76–b78: priority-inheriting Lock + tryLock + spiLock telemetry — REVERTED
+
+Swapped `concurrency::Lock` from `xSemaphoreCreateBinary` to `xSemaphoreCreateMutex` (every `Lock` in the project, not just `spiLock`), added `tryLock(timeoutMs)`, added `owner()` / `heldMs()` accessors, a 1 Hz watcher that logs a `WARN` if `spiLock` is held > 500 ms with the owner task name, and rewrote `blitFrame()` to use `tryLock(150)` with re-dirty-on-fail.
+
+Result: **worse.** Freezes turned into full-device silence — zero serial for 25 s during the freeze. Some code path outside `Lock` relied on the binary-semaphore reentrancy semantics or on the absence of priority inheritance. Reverted in b78.
+
+### b79: disable audio — EXONERATED
+
+Guarded the `MonsterMeshAudio` init in `MonsterMeshEmulator::begin()` with `#if 0` to rule out `i2s_write` back-pressure. Freeze still repro'd. Audio reenabled in b82.
+
+### b80: per-chunk `LOG_DEBUG` traces inside `blitFrame()` — REPLACED
+
+Enter/per-chunk/exit traces. Too chatty — each log line takes the `DEBUG_PORT` mutex and writes USB-CDC, so each `pushImage` got interrupted and the emulator rendered visibly choppy. Key observation before reverting: **`blitFrame` kept advancing** through user-reported freezes (we saw sequence #28, #35, #41, #48…#108). The render task was not stuck; the framebuffer was stale because the emu task wasn't writing to it.
+
+### b81: per-task heartbeat counters — **KEY DIAGNOSTIC SIGNAL**
+
+Replaced the per-chunk logs with three `volatile uint32_t` counters:
+
+- `g_mmEmuCount`  — bumped after `emu_.runFrame()` in `emuTaskLoop`
+- `g_mmBlitCount` — bumped at the bottom of `blitFrame()`
+- `g_mmRunCount`  — bumped at the top of `runOnce()`
+
+1 Hz check in `runOnce` logs `LOG_WARN [hb] emu+N blit+N run+N STUCK=...` if the emulator is active but either counter stops advancing. Quiet enough not to slow the emulator.
+
+**Repeatable freeze signature on b81 and every build after:**
+
+```
+[hb] emu+0 blit+0 run+20
+[hb] emu+0 blit+0 run+19
+[hb] emu+0 blit+0 run+20
+[hb] emu+0 blit+0 run+20
+[hb] emu+226 blit+47 run+11     ← resumes, catches up 226 frames
+```
+
+Both the emu task (Core 1 / priority 5) and the render task (Core 0 / priority 2) **pause simultaneously** for ~4 s and then both catch up together, while the Meshtastic `runOnce` (on whatever core it's scheduled) keeps ticking at 20 Hz. Two different cores pausing together points at a system-level event, not a task bug.
+
+ESP32 events that pause both cores:
+
+1. **Flash program/erase** — cache is disabled while the op runs; any task fetching from flash-resident code blocks.
+2. **WiFi or BT radio driver** operations that take global critical sections.
+3. **PSRAM cache invalidation** on specific chip revisions.
+4. **Power management** (light-sleep entry/exit).
+
+### b82: reenable audio
+
+Trivial revert of the b79 audio disable.
+
+### b83: suppress `LogRotate::write()` while MonsterMesh is foreground — DIDN'T FIX
+
+Patched `patches/device-ui/LogRotate.cpp` (new patch file, synced into the lib tree at build) to early-return when a new `extern "C" volatile bool g_mmSuppressFlashWrites` is true. `MonsterMeshModule::runOnce` kept the flag in sync with `emulatorActive_`.
+
+LogRotate is Meshtastic's highest-frequency flash writer — packet history is persisted on every inbound packet. Result: same freeze signature.
+
+### b84: also suppress `NodeDB::saveToDisk()` — DIDN'T FIX
+
+Added the same `g_mmSuppressFlashWrites` early-return in `src/mesh/NodeDB.cpp::saveToDisk` (NVS commits on every node-info update). Result: same freeze signature.
+
+### b85: widen the suppression flag to cover the ROM browser phase — DIDN'T FIX
+
+Changed the gate from `emulatorActive_` to `emulatorActive_ || browserActive_` so the flag is set from the moment the user opens the ROM browser, not just when the emulator is actually running. User was seeing freezes on the ROM loader too.
+
+Result: same freeze signature. Flash-write suppression is no longer a credible explanation for these freezes — either the relevant flash writes are happening elsewhere (ESP-IDF internals, Arduino runtime, module configs I didn't patch) or the cross-core pause isn't flash at all.
+
+### b86: disable WiFi during MonsterMesh foreground — BROKE UI, REVERTED
+
+Latch in `runOnce`: first time `emulatorActive_ || browserActive_` goes true, call `WiFi.disconnect(true) + WiFi.mode(WIFI_OFF)` and leave it off until reboot. BLE path stays up.
+
+User reported **ALT no longer opens the ROM browser**. Serial log showed Meshtastic's `WifiConnect` module reconnecting every second to the user's AP, then our latch firing on the next browser-open attempt, then reconnect, then latch, in a loop — the "one-shot" latch was defeated because `WifiConnect` has its own reconnect logic. The constant WiFi bouncing stalled the UI path. Reverted in b87.
+
+### b87: revert b86
+
+Clean rollback of the WiFi change. Back to b85's behavior: flash-write suppression across LogRotate + NodeDB for both browser + emulator phases, plus everything b82–b85 added. Freeze still repros.
+
+### What we **know** after b76 — b87
+
+- The freeze is **not** a MonsterMesh emu task stack / data bug (counter stops, no stack smash, no panic).
+- The freeze is **not** a MonsterMesh render task bug (render task isn't stuck — it just has nothing new to draw).
+- The freeze is **not** audio (b79).
+- The freeze is **not** our raw `Serial.print*` spew (b71 sweep to LOG_DEBUG).
+- The freeze is **not** any of the stripped subsystems (daycare, lobby, LORD, battle engine, SAV cache).
+- The freeze is **not** `LogRotate::write()` alone (b83).
+- The freeze is **not** `NodeDB::saveToDisk()` alone (b84).
+- The freeze is **not** any of the above combined (b85).
+- Disabling WiFi without taming `WifiConnect`'s reconnect loop breaks the UI (b86).
+
+### What's left to try
+
+1. **Capture a real panic.** The heartbeat shows `run+20` during freezes, which means `runOnce` (on Meshtastic's OSThread scheduler) keeps firing — but we also sometimes see the device reboot. The reset must be triggering some panic we're missing because the USB-CDC re-enumerates mid-dump. Enable ESP-IDF **coredump to flash** (`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y`). Next panic writes a full coredump; extract later with esptool. This is the highest-info signal we haven't gotten yet.
+2. **Verify TWDT is actually armed.** b75 logged `[MonsterMesh] TWDT init err=...` and `TWDT add emu err=...`. Confirm those are 0 or 0x103 on the current build. If `add` returned non-zero the watchdog isn't actually subscribed and that explains why no panic fires on a hang.
+3. **Kill WiFi without letting `WifiConnect` re-enable it.** Either (a) gate `WifiConnect::reconnect()` on the same `g_mmSuppressFlashWrites` flag, (b) turn off the WiFi admin feature at build time for emulator-stability, or (c) call `WiFi.mode(WIFI_OFF)` on every runOnce so Meshtastic's reconnect is defeated. If freezes disappear with WiFi truly off, WiFi driver is the cross-core pause source.
+4. **Try BLE off.** Same one-shot latch approach but for BLE. Worth trying only after WiFi because BLE is typically quieter.
+5. **Inspect PowerFSM for any `esp_light_sleep_start()` or `vTaskDelay`-style holds that span both cores.** Meshtastic's idle/light-sleep path is another cross-core culprit candidate.
+6. **`vTaskGetInfo()` inside the heartbeat** to dump the current task list with priorities + last-run-time. Would immediately show if a Meshtastic task jumped to high priority and starved our Core 1 task.
+
+### Commits on `emulator-stability` since b75 (newest first)
+
+```
+b87  e3e4dc166  Revert WiFi disable — WifiConnect reconnect fought the latch, broke UI
+b86  188530c40  [REVERTED]  Disable WiFi during MonsterMesh foreground
+b85  861bcaeac  Suppress flash writes during ROM browser too
+b84  4a072a5b0  Gate NodeDB::saveToDisk on g_mmSuppressFlashWrites
+b83  a07c6ab91  Suppress LogRotate flash writes while emulator is active
+b82  4e44d0bca  Reenable audio — I²S ruled out
+b81  996845e66  Three-counter 1Hz heartbeat (replaces per-chunk blitFrame logs)
+b80  3bb6e9550  Per-chunk LOG_DEBUG inside blitFrame  [REPLACED by b81]
+b79  9ff3095d0  Disable audio (diagnostic)
+b78  b2ab17995  Revert "priority-inheriting Lock + tryLock + owner telemetry"
+b77              priority-inheriting Lock + tryLock + owner telemetry  [REVERTED in b78]
+```
+
+### Key code anchors as of b87
+
+- `src/modules/monstermesh/MonsterMeshModule.cpp`
+  - Globals — `g_mmBlitCount` / `g_mmEmuCount` / `g_mmRunCount` / `g_mmSuppressFlashWrites`
+  - `runOnce` — keeps `g_mmSuppressFlashWrites` in sync with `emulatorActive_ || browserActive_`, runs the 1 Hz heartbeat, emits `STUCK=emu blit` when either counter stalls while the emulator is active.
+  - `emuTaskLoop` — `esp_task_wdt_reset()` + `g_mmEmuCount++` per frame
+  - `renderTaskLoop` — `esp_task_wdt_reset()` + `blitFrame()` per iteration
+  - `blitFrame` — 4-chunk push under `spiLock` with `vTaskDelay(1)` between chunks, bumps `g_mmBlitCount` at exit
+  - Task creation block — `esp_task_wdt_init(10, true)` + `esp_task_wdt_add()` for both tasks, logs returns
+- `patches/device-ui/LogRotate.cpp` — `write()` early-returns when `g_mmSuppressFlashWrites`. Must be copied to `.pio/libdeps/t-deck-tft/meshtastic-device-ui/source/util/LogRotate.cpp` after edits.
+- `src/mesh/NodeDB.cpp::saveToDisk` — early-return when `g_mmSuppressFlashWrites`.
+
+### Repro notes
+
+Same as the b75 repro steps at the top of this doc — no changes.
+
+Heartbeat is the fastest way to classify any new freeze: filter serial for `[hb]` and look at whether `emu+` and `blit+` are both zero while `run+` is nonzero. That's "the" pattern. If you see a different pattern, it's a new class of freeze.
