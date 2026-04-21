@@ -116,6 +116,14 @@ MonsterMeshModule::MonsterMeshModule()
 
     // Tools menu removed — ALT key is the only entry point (avoids keyboard
     // mode desync when toggling from an LVGL button callback).
+
+    // USB-CDC probe: raw Serial.write at the earliest possible point in our
+    // code, before Meshtastic's SerialConsole takes over the framing. If the
+    // CDC link is actually wired up, host captures will show the marker.
+    // If it's silent, USB-CDC itself isn't initialized and the DEBUG_PORT
+    // route through LOG_* is also dead.
+    Serial.write("\n[MMPROBE] monstermesh module ctor\n", 36);
+    Serial.flush();
 }
 
 // ── setup() — called once after mesh is initialized ─────────────────────────
@@ -1960,20 +1968,26 @@ void MonsterMeshModule::launchROM(const char *path)
     emulatorActive_ = true;
     kbSetMode(true);  // switch keyboard to RAW mode for emulator input
 
-    // Create emulator FreeRTOS task on Core 1 (high priority — never stalls)
+    // Create emulator FreeRTOS task on Core 1 (high priority — never stalls).
+    // Stack bumped 16K → 48K: the emulator call stack includes peanut-gb's
+    // CPU + PPU + MBC paths and our audio/scanline callbacks, so deep
+    // frames (especially during ROM bank switches) can chew through the
+    // smaller budget. Mid-play freezes with no visible crash fit stack
+    // overflow — this is the safety net before we get serial logs working.
     if (!emuTaskHandle_) {
         xTaskCreatePinnedToCore(
             emuTaskEntry, "monstermesh_emu",
-            16384, this, 5, &emuTaskHandle_, 1
+            49152, this, 5, &emuTaskHandle_, 1
         );
     }
 
     // Create render task on Core 0 (lower priority — blits framebuffer to TFT
-    // without blocking the emulator task, so audio stays smooth)
+    // without blocking the emulator task, so audio stays smooth). Also
+    // bumped 8K → 16K for headroom while LGFX DMA work runs on top.
     if (!renderTaskHandle_) {
         xTaskCreatePinnedToCore(
             renderTaskEntry, "monstermesh_render",
-            8192, this, 2, &renderTaskHandle_, 0
+            16384, this, 2, &renderTaskHandle_, 0
         );
     }
 
