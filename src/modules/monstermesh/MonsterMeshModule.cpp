@@ -13,6 +13,9 @@
 #include <SPI.h>
 #include <Wire.h>
 #include <SD.h>
+#if HAS_WIFI
+#include <WiFi.h>
+#endif
 #include "concurrency/LockGuard.h"
 #include "SPILock.h"
 #include <esp_task_wdt.h>
@@ -577,6 +580,23 @@ int32_t MonsterMeshModule::runOnce()
     // the foreground. ROM-loader freezes show the same cross-core pause
     // as mid-play freezes, so the browser phase needs suppression too.
     g_mmSuppressFlashWrites = emulatorActive_ || browserActive_;
+
+    // Disable WiFi once MonsterMesh goes foreground — the WiFi stack's
+    // scheduled tasks span both CPU cores and have shown up as cross-
+    // core pauses in flash-only diagnostic builds. Latch so we only
+    // flip off once (once off, stays off until reboot; BLE path still
+    // works for phone admin).
+    {
+        static bool wifiDisabled = false;
+        if (!wifiDisabled && (emulatorActive_ || browserActive_)) {
+            wifiDisabled = true;
+#if HAS_WIFI
+            WiFi.disconnect(true);
+            WiFi.mode(WIFI_OFF);
+#endif
+            LOG_INFO("[MonsterMesh] WiFi disabled for emulator stability\n");
+        }
+    }
 
     // 1 Hz heartbeat comparing per-task counters against previous snapshot.
     // On a freeze: one counter stops advancing and the others keep going —
