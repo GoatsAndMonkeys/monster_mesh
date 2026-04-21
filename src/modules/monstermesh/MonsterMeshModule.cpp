@@ -44,6 +44,13 @@ volatile uint32_t g_mmBlitCount  = 0;  // incremented at end of blitFrame
 volatile uint32_t g_mmEmuCount   = 0;  // incremented at end of each emu frame
 volatile uint32_t g_mmRunCount   = 0;  // incremented each runOnce (module task)
 
+// Set true while the emulator is active so Meshtastic's device-ui
+// LogRotate::write() skips persisting packets to LittleFS. ESP32 cache
+// disable during flash ops pauses both cores and manifests as a mid-
+// play freeze; skipping the writes avoids the pause. Declared extern
+// "C" so patches/device-ui/LogRotate.cpp can link against it.
+extern "C" volatile bool g_mmSuppressFlashWrites = false;
+
 // Set by the patched TFTView_320x240::notifyMessagesRestored() when
 // Meshtastic's device-ui finishes replaying persistent message history.
 // runOnce gates the ROM browser open on this flag so the browser scan
@@ -564,6 +571,12 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
 
 int32_t MonsterMeshModule::runOnce()
 {
+    // Keep the flash-write suppression flag in sync with emulator state.
+    // LogRotate::write() (patched) checks this and drops messages while
+    // the emulator is running so ESP32 flash-op cache-disables don't
+    // stall the emu + render tasks across both cores.
+    g_mmSuppressFlashWrites = emulatorActive_;
+
     // 1 Hz heartbeat comparing per-task counters against previous snapshot.
     // On a freeze: one counter stops advancing and the others keep going —
     // that's our stuck task. Fires a LOG_WARN to stand out in the log.
