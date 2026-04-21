@@ -1653,22 +1653,32 @@ void MonsterMeshModule::blitFrame()
     lgfx::LGFX_Device *gfx = getGfx();
     if (!gfx) return;
 
-    // Push in 4 chunks of 60 lines, releasing spiLock between chunks
-    // so the radio task can access SPI (prevents watchdog timeout)
+    // Freeze diagnostic: enter/per-chunk/exit traces. If a freeze shows
+    // "[blitFrame] #N chunk X take lock" without a matching "got lock" or
+    // "done", the render task is stuck on spiLock or inside LGFX. Numbered
+    // so enter/exit pairs can be matched across captures.
+    static uint32_t blitSeq = 0;
+    uint32_t seq = ++blitSeq;
+    LOG_DEBUG("[blitFrame] enter #%u\n", (unsigned)seq);
+
     for (int chunk = 0; chunk < 4; chunk++) {
         int yStart = chunk * 60;
         int yEnd = yStart + 60;
         if (yEnd > PM_DISP_H) yEnd = PM_DISP_H;
+        LOG_DEBUG("[blitFrame] #%u chunk %d take lock\n", (unsigned)seq, chunk);
         {
             concurrency::LockGuard g(spiLock);
+            LOG_DEBUG("[blitFrame] #%u chunk %d got lock\n", (unsigned)seq, chunk);
             gfx->startWrite();
             for (int y = yStart; y < yEnd; y++) {
                 gfx->pushImage(0, y, PM_DISP_W, 1, &frameBuf_[y * PM_DISP_W]);
             }
             gfx->endWrite();
+            LOG_DEBUG("[blitFrame] #%u chunk %d done\n", (unsigned)seq, chunk);
         }
-        if (chunk < 3) vTaskDelay(1);  // yield between chunks
+        if (chunk < 3) vTaskDelay(1);
     }
+    LOG_DEBUG("[blitFrame] exit #%u\n", (unsigned)seq);
 }
 
 // ── drawFrame() — Meshtastic OLED/TFT UI frame ─────────────────────────────
