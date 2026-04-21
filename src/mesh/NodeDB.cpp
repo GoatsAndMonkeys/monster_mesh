@@ -1486,8 +1486,17 @@ bool NodeDB::saveToDiskNoRetry(int saveWhat)
     return success;
 }
 
+// MonsterMesh hook: skip NVS/LittleFS persistence while the emulator
+// is active. ESP32 cache-disables during flash ops pause both CPU
+// cores, which manifests as mid-play freezes. Node/config state stays
+// in RAM, just isn't flushed until the emulator closes. Defined in
+// src/modules/monstermesh/MonsterMeshModule.cpp.
+extern "C" volatile bool g_mmSuppressFlashWrites;
+
 bool NodeDB::saveToDisk(int saveWhat)
 {
+    if (g_mmSuppressFlashWrites) return true;
+
     LOG_DEBUG("Save to disk %d", saveWhat);
     bool success = saveToDiskNoRetry(saveWhat);
 
