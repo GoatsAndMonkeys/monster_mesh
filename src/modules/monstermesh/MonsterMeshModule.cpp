@@ -15,6 +15,7 @@
 #include <SD.h>
 #include "concurrency/LockGuard.h"
 #include "SPILock.h"
+#include <esp_task_wdt.h>
 
 #include "PowerFSM.h"
 #include "MonsterMeshAudio.h"
@@ -1493,6 +1494,10 @@ void MonsterMeshModule::emuTaskLoop()
     uint8_t frameCount = 0;
 
     while (true) {
+        // Feed TWDT every frame — if this ever stops, the watchdog fires
+        // with a backtrace showing where the emu task is stuck.
+        esp_task_wdt_reset();
+
         // Skip emulation if ROM was ejected — task stays alive for reuse
         if (!emuInitialized_) {
             vTaskDelay(pdMS_TO_TICKS(100));
@@ -1610,6 +1615,7 @@ void MonsterMeshModule::renderTaskEntry(void *pv)
 void MonsterMeshModule::renderTaskLoop()
 {
     while (true) {
+        esp_task_wdt_reset();
         if (emulatorActive_ && frameDirty_) {
             blitFrame();
         }
@@ -1979,6 +1985,12 @@ void MonsterMeshModule::launchROM(const char *path)
             emuTaskEntry, "monstermesh_emu",
             49152, this, 5, &emuTaskHandle_, 1
         );
+        // Subscribe the task to the ESP-IDF task watchdog. Each frame in
+        // emuTaskLoop calls esp_task_wdt_reset(); if the task ever stops
+        // feeding (deadlock / infinite loop / hung SPI), TWDT panics with
+        // a backtrace + reboots, so the next boot log shows us where it
+        // was stuck instead of a silent hang.
+        esp_task_wdt_add(emuTaskHandle_);
     }
 
     // Create render task on Core 0 (lower priority — blits framebuffer to TFT
@@ -1989,6 +2001,7 @@ void MonsterMeshModule::launchROM(const char *path)
             renderTaskEntry, "monstermesh_render",
             16384, this, 2, &renderTaskHandle_, 0
         );
+        esp_task_wdt_add(renderTaskHandle_);
     }
 
     // Set up LGFX for emulator rendering (LVGL flush already suppressed)
