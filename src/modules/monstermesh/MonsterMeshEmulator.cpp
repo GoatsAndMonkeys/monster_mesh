@@ -71,11 +71,9 @@ bool MonsterMeshEmulator::begin(const char *romPath) {
     gb_init_serial(gb_, pm_serialTx, pm_serialRx);
     // gb_->direct.frame_skip = true;  // disabled — didn't help audio
 
-    // Audio disabled on emulator-stability branch to test whether I²S
-    // back-pressure was contributing to mid-play freezes. If freezes
-    // stop when audio is off, the emu task was stalling inside
-    // i2s_write() / APU generation. Re-enable by flipping the guard.
-#if 0
+    // Audio: reenabled after the no-audio build still froze — I²S wasn't
+    // the culprit. Diagnostic guard left as a comment marker so we can
+    // toggle quickly if audio becomes suspect again.
     if (!audio_) {
         audio_ = new MonsterMeshAudio();
         if (!audio_->begin()) {
@@ -84,10 +82,6 @@ bool MonsterMeshEmulator::begin(const char *romPath) {
             audio_ = nullptr;
         }
     }
-#else
-    audio_ = nullptr;
-    LOG_DEBUG("[EMU] Audio disabled (freeze-diagnosis build)\n");
-#endif
 
     running_ = true;
     LOG_DEBUG("[EMU] started — ROM: %s (%u bytes)\n", romPath, (unsigned)romSize_);
