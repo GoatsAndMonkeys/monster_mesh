@@ -571,11 +571,12 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
 
 int32_t MonsterMeshModule::runOnce()
 {
-    // Keep the flash-write suppression flag in sync with emulator state.
-    // LogRotate::write() (patched) checks this and drops messages while
-    // the emulator is running so ESP32 flash-op cache-disables don't
-    // stall the emu + render tasks across both cores.
-    g_mmSuppressFlashWrites = emulatorActive_;
+    // Keep the flash-write suppression flag in sync with both emulator AND
+    // browser state. LogRotate::write() + NodeDB::saveToDisk() (both
+    // patched) check this flag and drop writes while MonsterMesh is in
+    // the foreground. ROM-loader freezes show the same cross-core pause
+    // as mid-play freezes, so the browser phase needs suppression too.
+    g_mmSuppressFlashWrites = emulatorActive_ || browserActive_;
 
     // 1 Hz heartbeat comparing per-task counters against previous snapshot.
     // On a freeze: one counter stops advancing and the others keep going —
