@@ -37,6 +37,13 @@ LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_unscii_8;
 
 MonsterMeshModule *monsterMeshModule = nullptr;
 
+// Heartbeat counters — bumped by emuTaskLoop / blitFrame / runOnce. The 1 Hz
+// heartbeat log compares each to the previous snapshot; if any counter
+// stops advancing while another keeps going, we know which task stalled.
+volatile uint32_t g_mmBlitCount  = 0;  // incremented at end of blitFrame
+volatile uint32_t g_mmEmuCount   = 0;  // incremented at end of each emu frame
+volatile uint32_t g_mmRunCount   = 0;  // incremented each runOnce (module task)
+
 // Set by the patched TFTView_320x240::notifyMessagesRestored() when
 // Meshtastic's device-ui finishes replaying persistent message history.
 // runOnce gates the ROM browser open on this flag so the browser scan
@@ -557,6 +564,36 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
 
 int32_t MonsterMeshModule::runOnce()
 {
+    // 1 Hz heartbeat comparing per-task counters against previous snapshot.
+    // On a freeze: one counter stops advancing and the others keep going —
+    // that's our stuck task. Fires a LOG_WARN to stand out in the log.
+    g_mmRunCount++;
+    {
+        static uint32_t lastMs = 0;
+        static uint32_t lastEmu = 0, lastBlit = 0, lastRun = 0;
+        uint32_t now = millis();
+        if (now - lastMs >= 1000) {
+            uint32_t emuD  = g_mmEmuCount  - lastEmu;
+            uint32_t blitD = g_mmBlitCount - lastBlit;
+            uint32_t runD  = g_mmRunCount  - lastRun;
+            bool stuckEmu   = emulatorActive_ && emuD  == 0;
+            bool stuckBlit  = emulatorActive_ && blitD == 0;
+            if (stuckEmu || stuckBlit) {
+                LOG_WARN("[hb] emu+%u blit+%u run+%u  STUCK=%s%s\n",
+                         (unsigned)emuD, (unsigned)blitD, (unsigned)runD,
+                         stuckEmu  ? "emu "  : "",
+                         stuckBlit ? "blit" : "");
+            } else {
+                LOG_INFO("[hb] emu+%u blit+%u run+%u\n",
+                         (unsigned)emuD, (unsigned)blitD, (unsigned)runD);
+            }
+            lastMs = now;
+            lastEmu = g_mmEmuCount;
+            lastBlit = g_mmBlitCount;
+            lastRun = g_mmRunCount;
+        }
+    }
+
     // Register InputBroker observer and install keyboard hook early (after 1s).
     // The hook passes through to the original Meshtastic driver when MM is inactive,
     // so keyboard/touch work normally. ALT button detection runs from both states.
@@ -1509,6 +1546,7 @@ void MonsterMeshModule::emuTaskLoop()
         frameCount++;
         renderFrame_ = (emulatorActive_ && frameCount >= 3);
         emu_.runFrame();
+        g_mmEmuCount++;  // heartbeat — if this stops advancing, emu task stuck
         if (renderFrame_) {
             frameCount = 0;
             // frameDirty_ is set by scanlineCallback — render task picks it up
@@ -1653,32 +1691,27 @@ void MonsterMeshModule::blitFrame()
     lgfx::LGFX_Device *gfx = getGfx();
     if (!gfx) return;
 
-    // Freeze diagnostic: enter/per-chunk/exit traces. If a freeze shows
-    // "[blitFrame] #N chunk X take lock" without a matching "got lock" or
-    // "done", the render task is stuck on spiLock or inside LGFX. Numbered
-    // so enter/exit pairs can be matched across captures.
-    static uint32_t blitSeq = 0;
-    uint32_t seq = ++blitSeq;
-    LOG_DEBUG("[blitFrame] enter #%u\n", (unsigned)seq);
+    // Frame counter is bumped every call; exposed via g_mmBlitCount for
+    // the 1 Hz heartbeat in runOnce. Keeps log volume minimal while still
+    // letting us spot a freeze in either the emu task (emu counter stops)
+    // or the render task (blit counter stops).
+    extern volatile uint32_t g_mmBlitCount;
 
     for (int chunk = 0; chunk < 4; chunk++) {
         int yStart = chunk * 60;
         int yEnd = yStart + 60;
         if (yEnd > PM_DISP_H) yEnd = PM_DISP_H;
-        LOG_DEBUG("[blitFrame] #%u chunk %d take lock\n", (unsigned)seq, chunk);
         {
             concurrency::LockGuard g(spiLock);
-            LOG_DEBUG("[blitFrame] #%u chunk %d got lock\n", (unsigned)seq, chunk);
             gfx->startWrite();
             for (int y = yStart; y < yEnd; y++) {
                 gfx->pushImage(0, y, PM_DISP_W, 1, &frameBuf_[y * PM_DISP_W]);
             }
             gfx->endWrite();
-            LOG_DEBUG("[blitFrame] #%u chunk %d done\n", (unsigned)seq, chunk);
         }
         if (chunk < 3) vTaskDelay(1);
     }
-    LOG_DEBUG("[blitFrame] exit #%u\n", (unsigned)seq);
+    g_mmBlitCount++;
 }
 
 // ── drawFrame() — Meshtastic OLED/TFT UI frame ─────────────────────────────
