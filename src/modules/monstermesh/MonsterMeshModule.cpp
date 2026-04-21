@@ -557,23 +557,6 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
 
 int32_t MonsterMeshModule::runOnce()
 {
-    // spiLock held-too-long watchdog. If someone is sitting on the SPI
-    // bus for >500 ms we want to know about it — that's long enough to
-    // cause radio TX misses and visible display stutter. Log the holder
-    // task so we can match "emulator froze" reports against a specific
-    // task holding the bus. Rate-limited to one warning per held period.
-    {
-        static uint32_t lastWarnMs = 0;
-        uint32_t held = spiLock->heldMs();
-        if (held > 500 && millis() - lastWarnMs > 1000) {
-            lastWarnMs = millis();
-            TaskHandle_t h = (TaskHandle_t)spiLock->owner();
-            const char *name = h ? pcTaskGetName(h) : "(none)";
-            LOG_WARN("[spiLock] held %u ms by %s\n", (unsigned)held,
-                     name ? name : "?");
-        }
-    }
-
     // Register InputBroker observer and install keyboard hook early (after 1s).
     // The hook passes through to the original Meshtastic driver when MM is inactive,
     // so keyboard/touch work normally. ALT button detection runs from both states.
@@ -1671,28 +1654,19 @@ void MonsterMeshModule::blitFrame()
     if (!gfx) return;
 
     // Push in 4 chunks of 60 lines, releasing spiLock between chunks
-    // so the radio task can access SPI (prevents watchdog timeout).
-    //
-    // Each chunk uses tryLock(150 ms). If the SPI bus is contended by
-    // the radio or an SD op beyond that window, skip the chunk rather
-    // than sit and deadlock forever. Visual judder for a frame is
-    // preferable to the whole render task hanging and the UI freezing.
+    // so the radio task can access SPI (prevents watchdog timeout)
     for (int chunk = 0; chunk < 4; chunk++) {
         int yStart = chunk * 60;
         int yEnd = yStart + 60;
         if (yEnd > PM_DISP_H) yEnd = PM_DISP_H;
-        if (!spiLock->tryLock(150)) {
-            // Couldn't grab the bus in time — skip the rest of this frame.
-            // Mark dirty so the next tick retries.
-            frameDirty_ = true;
-            return;
+        {
+            concurrency::LockGuard g(spiLock);
+            gfx->startWrite();
+            for (int y = yStart; y < yEnd; y++) {
+                gfx->pushImage(0, y, PM_DISP_W, 1, &frameBuf_[y * PM_DISP_W]);
+            }
+            gfx->endWrite();
         }
-        gfx->startWrite();
-        for (int y = yStart; y < yEnd; y++) {
-            gfx->pushImage(0, y, PM_DISP_W, 1, &frameBuf_[y * PM_DISP_W]);
-        }
-        gfx->endWrite();
-        spiLock->unlock();
         if (chunk < 3) vTaskDelay(1);  // yield between chunks
     }
 }
