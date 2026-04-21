@@ -1974,34 +1974,37 @@ void MonsterMeshModule::launchROM(const char *path)
     emulatorActive_ = true;
     kbSetMode(true);  // switch keyboard to RAW mode for emulator input
 
+    // Arm the ESP-IDF task watchdog with a 10 s / panic-on-trigger config
+    // before subscribing our emu/render tasks. ESP-IDF 4.x API: init takes
+    // (timeout_sec, panic_bool). If the Arduino runtime already initialized
+    // it, this returns ESP_ERR_INVALID_STATE and we keep whatever timeout
+    // Arduino chose — we still get the panic behavior on hang.
+    {
+        esp_err_t twdt_err = esp_task_wdt_init(10, true);
+        LOG_INFO("[MonsterMesh] TWDT init err=%d (0=OK, 0x103=already)\n", (int)twdt_err);
+    }
+
     // Create emulator FreeRTOS task on Core 1 (high priority — never stalls).
-    // Stack bumped 16K → 48K: the emulator call stack includes peanut-gb's
-    // CPU + PPU + MBC paths and our audio/scanline callbacks, so deep
-    // frames (especially during ROM bank switches) can chew through the
-    // smaller budget. Mid-play freezes with no visible crash fit stack
-    // overflow — this is the safety net before we get serial logs working.
+    // Stack bumped 16K → 48K to rule out stack overflow during deep MBC
+    // bank-switching frames.
     if (!emuTaskHandle_) {
         xTaskCreatePinnedToCore(
             emuTaskEntry, "monstermesh_emu",
             49152, this, 5, &emuTaskHandle_, 1
         );
-        // Subscribe the task to the ESP-IDF task watchdog. Each frame in
-        // emuTaskLoop calls esp_task_wdt_reset(); if the task ever stops
-        // feeding (deadlock / infinite loop / hung SPI), TWDT panics with
-        // a backtrace + reboots, so the next boot log shows us where it
-        // was stuck instead of a silent hang.
-        esp_task_wdt_add(emuTaskHandle_);
+        esp_err_t add_err = esp_task_wdt_add(emuTaskHandle_);
+        LOG_INFO("[MonsterMesh] TWDT add emu err=%d\n", (int)add_err);
     }
 
     // Create render task on Core 0 (lower priority — blits framebuffer to TFT
-    // without blocking the emulator task, so audio stays smooth). Also
-    // bumped 8K → 16K for headroom while LGFX DMA work runs on top.
+    // without blocking the emulator task, so audio stays smooth).
     if (!renderTaskHandle_) {
         xTaskCreatePinnedToCore(
             renderTaskEntry, "monstermesh_render",
             16384, this, 2, &renderTaskHandle_, 0
         );
-        esp_task_wdt_add(renderTaskHandle_);
+        esp_err_t add_err = esp_task_wdt_add(renderTaskHandle_);
+        LOG_INFO("[MonsterMesh] TWDT add render err=%d\n", (int)add_err);
     }
 
     // Set up LGFX for emulator rendering (LVGL flush already suppressed)
