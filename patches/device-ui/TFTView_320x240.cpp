@@ -6670,6 +6670,11 @@ void TFTView_320x240::notifyMessagesRestored(void)
     lv_obj_add_flag(objects.msg_restore_panel, LV_OBJ_FLAG_HIDDEN);
     updateActiveChats();
     updateNodesFiltered(true);
+    // Signal MonsterMesh that the history replay is done. The module uses
+    // this to gate the ROM browser open — opening the browser mid-replay
+    // reliably crashes the device (LVGL + SD scan compete for CPU/TFT).
+    extern bool g_mmMessagesRestored;
+    g_mmMessagesRestored = true;
 }
 
 /**

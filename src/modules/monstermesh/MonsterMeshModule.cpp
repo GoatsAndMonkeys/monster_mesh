@@ -36,6 +36,12 @@ LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_unscii_8;
 
 MonsterMeshModule *monsterMeshModule = nullptr;
 
+// Set by the patched TFTView_320x240::notifyMessagesRestored() when
+// Meshtastic's device-ui finishes replaying persistent message history.
+// runOnce gates the ROM browser open on this flag so the browser scan
+// doesn't collide with the replay (both compete for LVGL/CPU cycles).
+bool g_mmMessagesRestored = false;
+
 // Weak default — device-ui provides the real implementation when present
 extern "C" __attribute__((weak)) void monstermesh_set_toggle_cb(void (*cb)(void)) { (void)cb; }
 
@@ -759,8 +765,15 @@ int32_t MonsterMeshModule::runOnce()
 
     // blitFrame() moved to emulator task on Core 1 — runOnce() is too slow for screen updates
 
-    // Deferred browser open — SD ops must not run on the LVGL task
-    if (pendingBrowserOpen_) {
+    // Deferred browser open — SD ops must not run on the LVGL task.
+    // Tight gate: wait for Meshtastic's device-ui to finish replaying
+    // stored message history (ViewController::restoreTextMessages calls
+    // TFTView::notifyMessagesRestored() when log.readNext() is exhausted,
+    // and our patch there flips g_mmMessagesRestored). The browser scan
+    // competes with the replay for LVGL/CPU cycles; opening during the
+    // replay reliably crashes the device. Fallback to an 8-second timer
+    // in case the signal never fires (empty log dir, or replay crashed).
+    if (pendingBrowserOpen_ && (g_mmMessagesRestored || millis() > 8000)) {
         pendingBrowserOpen_ = false;
         LOG_INFO("[MonsterMesh] browser open (runOnce) emuInit=%d\n", (int)emuInitialized_);
         // Pause LVGL rendering during SD scan to avoid SPI bus contention
