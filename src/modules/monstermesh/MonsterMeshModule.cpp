@@ -1795,14 +1795,17 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
             kbSetMode(true);
         } else {
             // No ROM loaded — open file browser
-            // First, wait for Meshtastic UI to finish its phone-sync message
-            // history replay (device-ui TFTView::notifyMessagesRestored sets
-            // g_mmMessagesRestored). Opening the browser earlier races LVGL
-            // state init and has been observed to cause delayed crashes.
-            if (!g_mmMessagesRestored) {
+            // Wait for device-ui's notifyMessagesRestored (phone history replay
+            // finished) to avoid racing LVGL state init. Fall through after
+            // 10s in case no phone is connected and the hook never fires.
+            if (!g_mmMessagesRestored && millis() < 10000) {
                 setupStatus_ = "Waiting for UI sync...";
                 LOG_INFO("[MonsterMesh] ALT ignored: messages not restored yet\n");
                 return;
+            }
+            if (!g_mmMessagesRestored) {
+                LOG_INFO("[MonsterMesh] ALT: msg-restored timeout, opening anyway\n");
+                g_mmMessagesRestored = true;  // stop re-checking
             }
             if (!daycareCheckinDone_) {
                 if (millis() < 3000) {
