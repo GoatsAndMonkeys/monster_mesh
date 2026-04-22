@@ -961,10 +961,21 @@ int32_t MonsterMeshModule::runOnce()
         }
     }
 
-    // Daycare tick disabled while hunting freeze cause.
-    // Background periodic daycare work (beacons, XP events, DMs) suspected
-    // of contributing to mid-play resets. Re-enable after freeze fix.
-    // if (daycare_.isActive()) { ... }
+    // Daycare tick — only in Meshtastic mode (not while emu/browser active).
+    // Generates events every 5 min, sends beacons, autosaves. Skipping it
+    // during ROM play prevents background mesh/SD work from competing with
+    // the emulator on the shared SPI bus.
+    if (!emulatorActive_ && !browserActive_ && daycare_.isActive()) {
+        uint32_t prevEventTime = daycare_.getLastEventTime();
+        daycare_.tick(millis());
+        if (daycare_.getLastEventTime() != prevEventTime && daycare_.getLastEventTime() != 0) {
+            const auto &evt = daycare_.getLastEvent();
+            if (evt.message[0]) {
+                sendTextDM(nodeDB->getNodeNum(), evt.message);
+                LOG_INFO("[MonsterMesh] event DM: %s\n", evt.message);
+            }
+        }
+    }
 
     drainTxQueue();
 
