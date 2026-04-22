@@ -93,23 +93,12 @@ template <class LGFX> bool LGFXDriver<LGFX>::hasTouch(void)
 
 template <class LGFX> void LGFXDriver<LGFX>::task_handler(void)
 {
-    // MonsterMesh: while the GB emulator or ROM browser is active, LVGL
-    // is paused and the inactivity timer will grow without bound. Do not
-    // enter powersave — lgfx->sleep() + powerSaveOn() reconfigure the shared
-    // SPI bus and stall the emu task. Also reset the inactivity timer so
-    // when emu exits, we don't immediately dim into sleep.
+    // MonsterMesh: while the emulator/browser is active, keep the LVGL
+    // inactivity timer reset so powersave never fires. (LVGL flushes are
+    // paused during emu, so the inactivity timer would otherwise grow
+    // without bound and powersave would stall the shared SPI bus.)
     if (g_mmEmulatorActive) {
-        if (powerSaving) {
-            // Recover cleanly if we're already in powersave when emu starts.
-            ILOG_INFO("leaving powersave (mm emu active)");
-            powerSaving = false;
-            lgfx->powerSaveOff();
-            lgfx->wakeup();
-            lgfx->setBrightness(lastBrightness);
-            DisplayDriver::view->screenSaving(false);
-        }
         lv_display_trigger_activity(NULL);
-        return;
     }
 
     // handle display timeout
