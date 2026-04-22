@@ -135,6 +135,7 @@ private:
     uint32_t pendingChallengerFrom_ = 0;  // RECEIVER: node that sent us "mmc on" (waiting for our Y/N)
     uint32_t pendingChallengeMs_    = 0;  // RECEIVER: time challenge arrived (60s timeout)
     uint32_t waitingForAcceptFrom_  = 0;  // INITIATOR: node we sent "mmc on" to (waiting for Y/N back)
+    uint32_t mmtWaitingForAcceptFrom_ = 0; // INITIATOR: sent MMT:ON, awaiting Y/N DM reply
 
     const char *getShortName(uint32_t nodeId);
 

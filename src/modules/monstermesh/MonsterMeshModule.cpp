@@ -242,7 +242,9 @@ bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
             return true;
         }
         // Single Y/N reply when we are the initiator waiting for a response
-        if (sz == 1 && waitingForAcceptFrom_ != 0 &&
+        // (cable club legacy path OR MMT text-battle)
+        if (sz == 1 &&
+            (waitingForAcceptFrom_ != 0 || mmtWaitingForAcceptFrom_ != 0) &&
             (txt[0] == 'Y' || txt[0] == 'y' || txt[0] == 'N' || txt[0] == 'n')) {
             return true;
         }
@@ -389,6 +391,28 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
         // ── Y/N reply: Person 2 sent Y or N DM to Person 1 ───────────────
         if (len == 1 && (txt[0] == 'Y' || txt[0] == 'y' || txt[0] == 'N' || txt[0] == 'n')) {
             bool accepted = (txt[0] == 'Y' || txt[0] == 'y');
+            // MMT path — P2 (challenged) replied Y/N to P1's MMT:ON DM.
+            // P1 (us) is the challenger; we're waiting for them.
+            if (mmtWaitingForAcceptFrom_ != 0 && mp.from == mmtWaitingForAcceptFrom_) {
+                uint32_t partner = mmtWaitingForAcceptFrom_;
+                mmtWaitingForAcceptFrom_ = 0;
+                if (accepted) {
+                    LOG_INFO("[MonsterMesh] MMT Y from 0x%08X — starting battle\n", (unsigned)partner);
+                    // Send MMT:ACCEPT:<seed> back with a fixed seed so P2 starts
+                    // battle too. Then start battle locally.
+                    uint32_t seed = (uint32_t)millis();
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), "MMT:ACCEPT:%08X", (unsigned)seed);
+                    sendTextDM(partner, buf);
+                    // Notify local user via self-DM
+                    sendTextDM(nodeDB->getNodeNum(), "Battle accepted — starting!");
+                } else {
+                    LOG_INFO("[MonsterMesh] MMT N from 0x%08X — declined\n", (unsigned)partner);
+                    sendTextDM(nodeDB->getNodeNum(), "Battle declined.");
+                    if (terminal_.ready()) terminal_.receiveNetReject(partner);
+                }
+                return ProcessMessage::CONTINUE;
+            }
             if (waitingForAcceptFrom_ != 0 && mp.from == waitingForAcceptFrom_) {
                 uint32_t partner = waitingForAcceptFrom_;
                 waitingForAcceptFrom_ = 0;
@@ -468,26 +492,26 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             if (mp.from == nodeDB->getNodeNum()) return ProcessMessage::CONTINUE;
             if (terminal_.ready()) {
                 terminal_.receiveNetChallenge(mp.from, getShortName(mp.from));
-                // Self-DM: notify the local user via their phone chat that a
-                // battle challenge is incoming. They reply Y or N in the
-                // terminal; we also prompt them here so they know without
-                // needing to be in the terminal UI.
-                char local[96];
+                // Self-DM: prompt user with clear Y/N via DM instructions
+                char local[128];
                 snprintf(local, sizeof(local),
-                         "[%s] wants a text battle! Open MM Terminal to reply Y or N.",
+                         "[%s] wants a text battle! DM them 'Y' to accept or 'N' to decline.",
                          getShortName(mp.from));
                 sendTextDM(nodeDB->getNodeNum(), local);
-                // ACK to challenger so their terminal knows to wait
+                // ACK to challenger so their terminal knows we received it
                 if (!isBroadcast(mp.to)) {
                     char ack[64];
                     snprintf(ack, sizeof(ack),
-                             "[%s] got your challenge! Open MMT terminal to wait.",
+                             "[%s] got your challenge — waiting for reply.",
                              getShortName(nodeDB->getNodeNum()));
                     sendTextDM(mp.from, ack);
                 }
             }
             return ProcessMessage::CONTINUE;
         }
+
+        // (MMT Y/N DM reply handled in the single-letter Y/N handler below —
+        //  see `mmtWaitingForAcceptFrom_`.)
 
         // ── MMT:ACCEPT:<seed> — challenge accepted, start battle ──────────
         if (strncmp(low, "mmt:accept:", 11) == 0 && mp.from != nodeDB->getNodeNum()) {
@@ -777,9 +801,11 @@ int32_t MonsterMeshModule::runOnce()
             if (target != 0) {
                 char challengeDM[128];
                 snprintf(challengeDM, sizeof(challengeDM),
-                         "[%s] wants a text battle! Open MonsterMesh Terminal to respond. MMT:ON",
+                         "[%s] wants a text battle! Reply Y or N in DM. MMT:ON",
                          getShortName(nodeDB->getNodeNum()));
                 sendTextDM(target, challengeDM);
+                // Record pending — single-letter Y/N DM back from target resolves it
+                mmtWaitingForAcceptFrom_ = target;
             } else {
                 sendTextDM(NODENUM_BROADCAST, "MMT:ON");
             }
