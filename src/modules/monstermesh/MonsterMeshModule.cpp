@@ -766,6 +766,18 @@ int32_t MonsterMeshModule::runOnce()
     // device-ui LGFXDriver reads to suppress powersave during play.
     g_mmEmulatorActive = (emulatorActive_ || browserActive_);
 
+    // Reset LVGL's inactivity timer from runOnce (which runs every tick
+    // regardless of LVGL state). Must happen here, not from device-ui's
+    // task_handler — that's on a paused LVGL timer during emu. Guard on
+    // setupDone_ so we don't touch LVGL state before it's fully initialized
+    // (that causes the "partial boot screen" freeze).
+#if HAS_TFT
+    if (setupDone_ && (emulatorActive_ || browserActive_)) {
+        lv_display_t *disp = lv_display_get_default();
+        if (disp) lv_display_trigger_activity(disp);
+    }
+#endif
+
     // Keep PowerFSM awake while emulator or browser is active.
     // CRITICAL: throttle to once per minute. Firing EVENT_INPUT every
     // runOnce tick (~50Hz) causes PowerFSM::onEnter("ON") to re-execute
