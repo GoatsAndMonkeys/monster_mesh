@@ -415,10 +415,9 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                         }
                         terminal_.receiveNetAccept(partner, seed, oppParty);
                     }
-                    sendTextDM(nodeDB->getNodeNum(), "Battle accepted — starting!");
+                    // No self-DM — terminal shows the battle state directly
                 } else {
                     LOG_INFO("[MonsterMesh] MMT N from 0x%08X — declined\n", (unsigned)partner);
-                    sendTextDM(nodeDB->getNodeNum(), "Battle declined.");
                     if (terminal_.ready()) terminal_.receiveNetReject(partner);
                 }
                 return ProcessMessage::CONTINUE;
@@ -509,13 +508,17 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
         // the user already sees the prompt in their phone chat thread.
         if (strstr(low, "mmt:on") || strstr(low, "mmt on")) {
             if (mp.from == nodeDB->getNodeNum()) return ProcessMessage::CONTINUE;
-            bool prompted = (len > 20);  // terminal format is ~70 chars
-            if (!prompted) {
-                char local[128];
-                snprintf(local, sizeof(local),
-                         "[%s] wants a text battle! DM them 'Y' to accept or 'N' to decline.",
-                         getShortName(mp.from));
-                sendTextDM(nodeDB->getNodeNum(), local);
+            // If the incoming DM already contains a human-readable prompt
+            // (terminal-sent challenges are long), don't add anything —
+            // the user already sees the Y/N instructions in their chat.
+            // If it's a bare "MMT:ON", send back a prompt to the challenger
+            // so THEY tell the user what to do (avoids self-DM crash).
+            if (len <= 15) {  // bare MMT:ON
+                char prompt[96];
+                snprintf(prompt, sizeof(prompt),
+                         "Tell [%s] to DM you 'Y' or 'N' to accept/decline.",
+                         getShortName(nodeDB->getNodeNum()));
+                sendTextDM(mp.from, prompt);
             }
             return ProcessMessage::CONTINUE;
         }
