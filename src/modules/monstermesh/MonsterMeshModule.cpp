@@ -1584,8 +1584,8 @@ void MonsterMeshModule::emuTaskLoop()
         }
         prevBattle_ = curBattle;
 
-        // ── Lobby tick ───────────────────────────────────────────────────
-        lobby_.tick(millis());
+        // Lobby tick disabled — cable club neutralized.
+        // lobby_.tick(millis());
 
         // ── Viewport scroll ──────────────────────────────────────────────
         if (viewportRecenter_) {
