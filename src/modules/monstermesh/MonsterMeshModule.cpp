@@ -799,16 +799,26 @@ int32_t MonsterMeshModule::runOnce()
 
     // Mode switch: when emu/browser becomes active, disable LoRa IRQ so the
     // radio stops hitting the shared SPI bus during gameplay. When exiting,
-    // restart receive. This is the user's "turn off Meshtastic during GB"
-    // architecture — preferred over trying to keep radio + emu coexistent.
+    // delay startReceive by 2 seconds so the SAV write + LVGL re-init can
+    // complete without SPI contention crashing the eject path.
+    static uint32_t pendingRadioResumeMs = 0;
     if (prevActive != g_mmEmulatorActive && RadioLibInterface::instance) {
         if (g_mmEmulatorActive) {
             LOG_INFO("[MonsterMesh] mode→EMU: disableInterrupt\n");
             RadioLibInterface::instance->disableInterrupt();
+            pendingRadioResumeMs = 0;
         } else {
-            LOG_INFO("[MonsterMesh] mode→MESH: startReceive\n");
-            RadioLibInterface::instance->startReceive();
+            // Defer radio resume to avoid SPI contention with SAV save
+            pendingRadioResumeMs = millis() + 2000;
+            LOG_INFO("[MonsterMesh] mode→MESH: defer startReceive 2s\n");
         }
+    }
+    if (pendingRadioResumeMs != 0 && millis() >= pendingRadioResumeMs &&
+        !emulatorActive_ && !browserActive_ && !pendingSave_ &&
+        RadioLibInterface::instance) {
+        LOG_INFO("[MonsterMesh] mode→MESH: startReceive now\n");
+        RadioLibInterface::instance->startReceive();
+        pendingRadioResumeMs = 0;
     }
 
     // NOTE: LVGL inactivity-timer reset moved to LGFXDriver::task_handler
@@ -985,8 +995,17 @@ int32_t MonsterMeshModule::runOnce()
         if (daycare_.getLastEventTime() != prevEventTime && daycare_.getLastEventTime() != 0) {
             const auto &evt = daycare_.getLastEvent();
             if (evt.message[0]) {
+                // Local user sees their event
                 sendTextDM(nodeDB->getNodeNum(), evt.message);
                 LOG_INFO("[MonsterMesh] event DM: %s\n", evt.message);
+                // If event involved a remote trainer, DM them too so both
+                // sides see the interaction in their phone chat.
+                if (evt.targetNodeId != 0 &&
+                    evt.targetNodeId != nodeDB->getNodeNum()) {
+                    sendTextDM(evt.targetNodeId, evt.message);
+                    LOG_INFO("[MonsterMesh] event DM → peer 0x%08X\n",
+                             (unsigned)evt.targetNodeId);
+                }
             }
         }
     }

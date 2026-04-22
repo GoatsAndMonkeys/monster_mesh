@@ -3,6 +3,7 @@
 
 #include "MonsterMeshTerminal.h"
 #include "LordGyms.h"
+#include "NodeDB.h"
 #include "gps/RTC.h"
 #include "graphics/view/TFT/Themes.h"
 #include <lvgl.h>
@@ -445,7 +446,9 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
             return;
         }
         if (savParty_.count == 0) { print("Load a save first."); return; }
-        // Find target peer by short name
+        // Find target peer by short name — try daycare neighbors first,
+        // then fall back to Meshtastic's full nodeDB so challenges work
+        // against any known peer, not just daycare-checked-in ones.
         uint32_t targetId = 0;
         for (uint8_t i = 0; i < meshPeerCount_; i++) {
             if (strncasecmp(meshPeers_[i].shortName, name, 4) == 0 ||
@@ -454,9 +457,21 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
                 break;
             }
         }
+        if (targetId == 0 && nodeDB) {
+            size_t n = nodeDB->getNumMeshNodes();
+            for (size_t i = 0; i < n; i++) {
+                auto *ni = nodeDB->getMeshNodeByIndex(i);
+                if (!ni || !ni->has_user) continue;
+                if (ni->num == nodeDB->getNodeNum()) continue;
+                if (strncasecmp(ni->user.short_name, name, 4) == 0 ||
+                    strncasecmp(ni->user.long_name,  name, strlen(name)) == 0) {
+                    targetId = ni->num;
+                    break;
+                }
+            }
+        }
         if (targetId == 0) {
-            if (meshPeerCount_ == 0) print("No trainers in range.");
-            else { char msg[48]; snprintf(msg, sizeof(msg), "Trainer '%s' not in range.", name); print(msg); }
+            char msg[64]; snprintf(msg, sizeof(msg), "Trainer '%s' not found.", name); print(msg);
             return;
         }
         pendingNetChallenge_ = true;
