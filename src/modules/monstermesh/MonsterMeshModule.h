@@ -141,6 +141,12 @@ private:
     uint32_t pendingMmtStartPartner_ = 0;
     uint32_t pendingMmtStartSeed_    = 0;
     uint32_t pendingMmtReject_       = 0;
+    // Deferred daycare notifications (self-DM from mesh receive thread crashed)
+    char     pendingNeighborMsg_[96] = {};
+    bool     pendingNeighborMsgReady_ = false;
+    char     pendingArrivalMsg_[128]  = {};
+    uint32_t pendingArrivalTargetNode_ = 0;
+    bool     pendingArrivalMsgReady_  = false;
 
     const char *getShortName(uint32_t nodeId);
 

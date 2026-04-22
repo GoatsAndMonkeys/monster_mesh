@@ -566,20 +566,24 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             if (beacon->type == 0x60) {
                 uint8_t prevNeighbors = daycare_.getNeighborCount();
                 daycare_.handleBeacon(*beacon);
-                // Notify user when a new neighbor appears
+                // New neighbor appeared — queue notification for runOnce
+                // (self-DM from handleReceived thread was crashing the device)
                 if (daycare_.getNeighborCount() > prevNeighbors) {
-                    char msg[80];
-                    snprintf(msg, sizeof(msg), "Daycare: %s (%s) is nearby!",
-                             beacon->shortName, beacon->gameName);
-                    sendTextDM(nodeDB->getNodeNum(), msg);
                     LOG_INFO("[MonsterMesh] new neighbor: %s (%s)\n",
                              beacon->shortName, beacon->gameName);
+                    snprintf(pendingNeighborMsg_, sizeof(pendingNeighborMsg_),
+                             "Daycare: %s (%s) is nearby!",
+                             beacon->shortName, beacon->gameName);
+                    pendingNeighborMsgReady_ = true;
 
                     // Dog park arrival — Pokemon interact based on type affinity
                     if (daycare_.triggerArrivalEvent(*beacon)) {
                         const auto &evt = daycare_.getLastEvent();
-                        sendTextDM(nodeDB->getNodeNum(), evt.message);
                         LOG_INFO("[MonsterMesh] arrival event: %s\n", evt.message);
+                        snprintf(pendingArrivalMsg_, sizeof(pendingArrivalMsg_),
+                                 "%s", evt.message);
+                        pendingArrivalTargetNode_ = evt.targetNodeId;
+                        pendingArrivalMsgReady_ = true;
                     }
                 }
                 return ProcessMessage::STOP;
@@ -1062,6 +1066,20 @@ int32_t MonsterMeshModule::runOnce()
     if (pendingMmtReject_ != 0 && terminal_.ready()) {
         terminal_.receiveNetReject(pendingMmtReject_);
         pendingMmtReject_ = 0;
+    }
+    // Deferred daycare notifications — safe to send DMs from OSThread
+    if (pendingNeighborMsgReady_) {
+        pendingNeighborMsgReady_ = false;
+        sendTextDM(nodeDB->getNodeNum(), pendingNeighborMsg_);
+    }
+    if (pendingArrivalMsgReady_) {
+        pendingArrivalMsgReady_ = false;
+        sendTextDM(nodeDB->getNodeNum(), pendingArrivalMsg_);
+        if (pendingArrivalTargetNode_ != 0 &&
+            pendingArrivalTargetNode_ != nodeDB->getNodeNum()) {
+            sendTextDM(pendingArrivalTargetNode_, pendingArrivalMsg_);
+        }
+        pendingArrivalTargetNode_ = 0;
     }
 
     // Expire pending challenge after 60s — send "fled" to initiator
