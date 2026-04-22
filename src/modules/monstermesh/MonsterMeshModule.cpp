@@ -754,9 +754,20 @@ int32_t MonsterMeshModule::runOnce()
         installKeyboardHook();
     }
 
-    // Keep PowerFSM awake while emulator or browser is active
+    // Keep PowerFSM awake while emulator or browser is active.
+    // CRITICAL: throttle to once per minute. Firing EVENT_INPUT every
+    // runOnce tick (~50Hz) causes PowerFSM::onEnter("ON") to re-execute
+    // every tick, which calls setBluetoothEnable(true) + screen->setOn()
+    // 50 times per second — that's the cross-core stall that has been
+    // mis-diagnosed as an "emulator freeze" for the last 80+ commits.
+    // PowerFSM's inactivity timeout is minutes; 60s keep-alive is plenty.
     if (emulatorActive_ || browserActive_) {
-        powerFSM.trigger(EVENT_INPUT);
+        static uint32_t lastKeepAliveMs = 0;
+        uint32_t now = millis();
+        if (now - lastKeepAliveMs > 60000 || lastKeepAliveMs == 0) {
+            lastKeepAliveMs = now;
+            powerFSM.trigger(EVENT_INPUT);
+        }
     }
 
     // Re-suppress LVGL flush if emulator is active — screen sleep/wake
