@@ -1486,8 +1486,17 @@ bool NodeDB::saveToDiskNoRetry(int saveWhat)
     return success;
 }
 
+// MonsterMesh: suppress flash writes while GB emulator or browser is active.
+// Flash program/erase disables cache on both cores and stalls non-IRAM tasks
+// (emu + render). Every 30-second NodeDB save would otherwise hitch the emu.
+extern "C" volatile bool g_mmEmulatorActive __attribute__((weak));
+
 bool NodeDB::saveToDisk(int saveWhat)
 {
+    if (&g_mmEmulatorActive && g_mmEmulatorActive) {
+        LOG_DEBUG("Skip NodeDB save: MonsterMesh emu active");
+        return true;
+    }
     LOG_DEBUG("Save to disk %d", saveWhat);
     bool success = saveToDiskNoRetry(saveWhat);
 
