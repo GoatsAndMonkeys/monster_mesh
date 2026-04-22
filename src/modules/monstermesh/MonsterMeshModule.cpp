@@ -939,28 +939,10 @@ int32_t MonsterMeshModule::runOnce()
         }
     }
 
-    // Daycare tick — generates events every 5 min, sends beacons, autosaves
-    // Wake from light sleep briefly before beacon/event fires (prevents freeze on wake)
-    if (daycare_.isActive()) {
-        uint32_t sinceLastEvt = millis() - daycare_.getState().lastEventMs;
-        uint32_t sinceLastBeacon = millis() - daycare_.getState().lastBeaconMs;
-        // Wake 5s before the 5-min interval so radio is ready
-        if (sinceLastEvt >= 295000 || sinceLastBeacon >= 295000) {
-            powerFSM.trigger(EVENT_INPUT);
-        }
-
-        uint32_t prevEventTime = daycare_.getLastEventTime();
-        daycare_.tick(millis());
-        // DM every new event to the local user
-        if (daycare_.getLastEventTime() != prevEventTime && daycare_.getLastEventTime() != 0) {
-            const auto &evt = daycare_.getLastEvent();
-            if (evt.message[0]) {
-                powerFSM.trigger(EVENT_INPUT);  // wake for DM send
-                sendTextDM(nodeDB->getNodeNum(), evt.message);
-                LOG_INFO("[MonsterMesh] event DM: %s\n", evt.message);
-            }
-        }
-    }
+    // Daycare tick disabled while hunting freeze cause.
+    // Background periodic daycare work (beacons, XP events, DMs) suspected
+    // of contributing to mid-play resets. Re-enable after freeze fix.
+    // if (daycare_.isActive()) { ... }
 
     drainTxQueue();
 
