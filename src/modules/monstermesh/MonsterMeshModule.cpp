@@ -398,13 +398,23 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 mmtWaitingForAcceptFrom_ = 0;
                 if (accepted) {
                     LOG_INFO("[MonsterMesh] MMT Y from 0x%08X — starting battle\n", (unsigned)partner);
-                    // Send MMT:ACCEPT:<seed> back with a fixed seed so P2 starts
-                    // battle too. Then start battle locally.
                     uint32_t seed = (uint32_t)millis();
                     char buf[32];
                     snprintf(buf, sizeof(buf), "MMT:ACCEPT:%08X", (unsigned)seed);
                     sendTextDM(partner, buf);
-                    // Notify local user via self-DM
+                    // Also start the battle locally on P1 with the same seed.
+                    if (terminal_.ready()) {
+                        Gen1Party oppParty{};
+                        const DaycareNeighborPokemon *peers = daycare_.getNeighbors();
+                        uint8_t count = daycare_.getNeighborCount();
+                        for (uint8_t i = 0; i < count; i++) {
+                            if (peers[i].nodeId == partner) {
+                                terminal_.buildAsyncOpponent(peers[i], oppParty);
+                                break;
+                            }
+                        }
+                        terminal_.receiveNetAccept(partner, seed, oppParty);
+                    }
                     sendTextDM(nodeDB->getNodeNum(), "Battle accepted — starting!");
                 } else {
                     LOG_INFO("[MonsterMesh] MMT N from 0x%08X — declined\n", (unsigned)partner);
