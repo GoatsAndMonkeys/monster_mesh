@@ -309,6 +309,15 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             return ProcessMessage::CONTINUE;
         }
 
+        // ── Cable Club DM handlers disabled ───────────────────────────────
+        // Bisect identified cable-club paths as the cause of mid-play freeze.
+        // Short-circuit all cable/link/mmc/mml strings so shim state machines
+        // never get triggered.
+        if (strstr(low, "cable") || strstr(low, "mmc") || strstr(low, "mm link") ||
+            strstr(low, "mml on") || strstr(low, "mmlon") || strstr(low, "mm waiting")) {
+            return ProcessMessage::CONTINUE;
+        }
+
         // ── PERSON 2: receives "mmc on" from Person 1 ────────────────────
         // Store pending challenge, send "MM waiting" ack so Person 1 knows
         // we received it and can then send us the formatted challenge message.
@@ -1537,8 +1546,10 @@ void MonsterMeshModule::emuTaskLoop()
         }
         renderFrame_ = false;
 
-        // BattleShim tick (drives state machine + serial batch flush)
-        shim_.tick();
+        // BattleShim tick disabled — cable-club feature neutralized;
+        // running this per-frame was a suspected contributor to the mid-play
+        // crash/freeze since it pokes at shared state every emu frame.
+        // shim_.tick();
 
         // ── Auto-save on battle end + ELO ────────────────────────────────
         uint8_t curBattle = emu_.readWRAM(Gen1::wIsInBattle);
@@ -1598,12 +1609,7 @@ void MonsterMeshModule::emuTaskLoop()
                     case 's': case 'S': lobby_.navigateDown(); break;
                     case 'k': case 'K': lobby_.selectPeer();   break;
                     case 'l': case 'L':
-                        if (lobby_.state() == MonsterMeshLobby::State::INCOMING)
-                            lobby_.rejectIncoming();
-                        else if (lobby_.state() == MonsterMeshLobby::State::CHALLENGING) {
-                            lobby_.close();
-                            lobby_.open();
-                        }
+                        // Lobby disabled (Cable Club neutralized)
                         break;
                 }
             }
@@ -1874,15 +1880,9 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
         return;
     }
 
-    // ── P: lobby toggle ────────────────────────────────────────────────
+    // Cable Club (lobby) disabled: bisect identified the link-cable code paths
+    // as the source of the emulator video freeze. All entry points neutralized.
     if (ascii == 'p' || ascii == 'P') {
-        if (lobbyOpen_) {
-            lobby_.close();
-            lobbyOpen_ = false;
-        } else {
-            lobby_.open();
-            lobbyOpen_ = true;
-        }
         return;
     }
 
