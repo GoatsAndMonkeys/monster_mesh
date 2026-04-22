@@ -490,16 +490,23 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
         // ── MMT:ON — text battle challenge (DM-native) ──────────────────
         // Do NOT touch the terminal state here — the challenged user handles
         // everything via phone DMs. Only the MMT:ACCEPT:<seed> response
-        // brings the terminal into the battle. This keeps the challenge
-        // prompt out of the terminal and puts it in the user's chat app
-        // where they can reply with a normal 'Y' / 'N' DM.
+        // brings the terminal into the battle.
+        //
+        // If the MMT:ON arrived as a bare signal (no accompanying prompt),
+        // self-DM the user so their phone chat shows Y/N instructions. If
+        // the DM from the challenger already carries human-readable text
+        // (the terminal-sent challenge format), skip the self-DM since
+        // the user already sees the prompt in their phone chat thread.
         if (strstr(low, "mmt:on") || strstr(low, "mmt on")) {
             if (mp.from == nodeDB->getNodeNum()) return ProcessMessage::CONTINUE;
-            char local[128];
-            snprintf(local, sizeof(local),
-                     "[%s] wants a text battle! DM them 'Y' to accept or 'N' to decline.",
-                     getShortName(mp.from));
-            sendTextDM(nodeDB->getNodeNum(), local);
+            bool prompted = (len > 20);  // terminal format is ~70 chars
+            if (!prompted) {
+                char local[128];
+                snprintf(local, sizeof(local),
+                         "[%s] wants a text battle! DM them 'Y' to accept or 'N' to decline.",
+                         getShortName(mp.from));
+                sendTextDM(nodeDB->getNodeNum(), local);
+            }
             return ProcessMessage::CONTINUE;
         }
 
