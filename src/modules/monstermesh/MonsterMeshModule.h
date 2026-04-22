@@ -141,6 +141,9 @@ private:
     uint32_t pendingMmtStartPartner_ = 0;
     uint32_t pendingMmtStartSeed_    = 0;
     uint32_t pendingMmtReject_       = 0;
+    uint8_t  pendingMmtActType_      = 0;
+    uint8_t  pendingMmtActIdx_       = 0;
+    bool     pendingMmtActReady_     = false;
     // Deferred daycare notifications (self-DM from mesh receive thread crashed)
     char     pendingNeighborMsg_[96] = {};
     bool     pendingNeighborMsgReady_ = false;

@@ -516,41 +516,28 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
         // (MMT Y/N DM reply handled in the single-letter Y/N handler below —
         //  see `mmtWaitingForAcceptFrom_`.)
 
-        // ── MMT:ACCEPT:<seed> — challenge accepted, start battle ──────────
+        // ── MMT:ACCEPT:<seed> — challenge accepted, defer to runOnce ─────
         if (strncmp(low, "mmt:accept:", 11) == 0 && mp.from != nodeDB->getNodeNum()) {
             uint32_t seed = (uint32_t)strtoul(low + 11, nullptr, 16);
-            if (terminal_.ready()) {
-                // Build opponent party from daycare neighbor list
-                Gen1Party oppParty{};
-                const DaycareNeighborPokemon *peers = daycare_.getNeighbors();
-                uint8_t count = daycare_.getNeighborCount();
-                for (uint8_t i = 0; i < count; i++) {
-                    if (peers[i].nodeId == mp.from) {
-                        terminal_.buildAsyncOpponent(peers[i], oppParty);
-                        break;
-                    }
-                }
-                terminal_.receiveNetAccept(mp.from, seed, oppParty);
-            }
+            pendingMmtStartPartner_ = mp.from;
+            pendingMmtStartSeed_    = seed;
             return ProcessMessage::CONTINUE;
         }
 
-        // ── MMT:REJECT — opponent declined our challenge ──────────────────
+        // ── MMT:REJECT — opponent declined, defer to runOnce ────────────
         if (strncmp(low, "mmt:reject", 10) == 0 && mp.from != nodeDB->getNodeNum()) {
-            if (terminal_.ready()) {
-                terminal_.receiveNetReject(mp.from);
-            }
+            pendingMmtReject_ = mp.from;
             return ProcessMessage::CONTINUE;
         }
 
-        // ── MMT:ACT:<type>:<index> — opponent's live battle action ────────
+        // ── MMT:ACT:<type>:<index> — opponent's battle action, defer ────
         if (strncmp(low, "mmt:act:", 8) == 0 && mp.from != nodeDB->getNodeNum()) {
             uint8_t act = (uint8_t)strtoul(low + 8, nullptr, 10);
             const char *colon = strchr(low + 8, ':');
             uint8_t idx = colon ? (uint8_t)strtoul(colon + 1, nullptr, 10) : 0;
-            if (terminal_.ready()) {
-                terminal_.receiveNetAction(act, idx);
-            }
+            pendingMmtActType_ = act;
+            pendingMmtActIdx_  = idx;
+            pendingMmtActReady_ = true;
             return ProcessMessage::CONTINUE;
         }
 
@@ -1066,6 +1053,10 @@ int32_t MonsterMeshModule::runOnce()
     if (pendingMmtReject_ != 0 && terminal_.ready()) {
         terminal_.receiveNetReject(pendingMmtReject_);
         pendingMmtReject_ = 0;
+    }
+    if (pendingMmtActReady_ && terminal_.ready()) {
+        terminal_.receiveNetAction(pendingMmtActType_, pendingMmtActIdx_);
+        pendingMmtActReady_ = false;
     }
     // Deferred daycare notifications — safe to send DMs from OSThread
     if (pendingNeighborMsgReady_) {
