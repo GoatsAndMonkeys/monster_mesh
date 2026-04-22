@@ -397,28 +397,18 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 uint32_t partner = mmtWaitingForAcceptFrom_;
                 mmtWaitingForAcceptFrom_ = 0;
                 if (accepted) {
-                    LOG_INFO("[MonsterMesh] MMT Y from 0x%08X — starting battle\n", (unsigned)partner);
+                    LOG_INFO("[MonsterMesh] MMT Y from 0x%08X — deferring battle start\n",
+                             (unsigned)partner);
+                    // Defer terminal LVGL work to runOnce; sending DMs here is fine.
                     uint32_t seed = (uint32_t)millis();
                     char buf[32];
                     snprintf(buf, sizeof(buf), "MMT:ACCEPT:%08X", (unsigned)seed);
                     sendTextDM(partner, buf);
-                    // Also start the battle locally on P1 with the same seed.
-                    if (terminal_.ready()) {
-                        Gen1Party oppParty{};
-                        const DaycareNeighborPokemon *peers = daycare_.getNeighbors();
-                        uint8_t count = daycare_.getNeighborCount();
-                        for (uint8_t i = 0; i < count; i++) {
-                            if (peers[i].nodeId == partner) {
-                                terminal_.buildAsyncOpponent(peers[i], oppParty);
-                                break;
-                            }
-                        }
-                        terminal_.receiveNetAccept(partner, seed, oppParty);
-                    }
-                    // No self-DM — terminal shows the battle state directly
+                    pendingMmtStartPartner_ = partner;
+                    pendingMmtStartSeed_    = seed;
                 } else {
                     LOG_INFO("[MonsterMesh] MMT N from 0x%08X — declined\n", (unsigned)partner);
-                    if (terminal_.ready()) terminal_.receiveNetReject(partner);
+                    pendingMmtReject_ = partner;  // terminal work happens in runOnce
                 }
                 return ProcessMessage::CONTINUE;
             }
@@ -1050,6 +1040,29 @@ int32_t MonsterMeshModule::runOnce()
     }
 
     drainTxQueue();
+
+    // Process deferred MMT battle-start from handleReceived Y path.
+    // We land here on the OSThread, which is safe for LVGL terminal_ calls.
+    if (pendingMmtStartPartner_ != 0 && terminal_.ready()) {
+        uint32_t partner = pendingMmtStartPartner_;
+        uint32_t seed    = pendingMmtStartSeed_;
+        pendingMmtStartPartner_ = 0;
+        pendingMmtStartSeed_    = 0;
+        Gen1Party oppParty{};
+        const DaycareNeighborPokemon *peers = daycare_.getNeighbors();
+        uint8_t count = daycare_.getNeighborCount();
+        for (uint8_t i = 0; i < count; i++) {
+            if (peers[i].nodeId == partner) {
+                terminal_.buildAsyncOpponent(peers[i], oppParty);
+                break;
+            }
+        }
+        terminal_.receiveNetAccept(partner, seed, oppParty);
+    }
+    if (pendingMmtReject_ != 0 && terminal_.ready()) {
+        terminal_.receiveNetReject(pendingMmtReject_);
+        pendingMmtReject_ = 0;
+    }
 
     // Expire pending challenge after 60s — send "fled" to initiator
     if (pendingChallengerFrom_ != 0 &&

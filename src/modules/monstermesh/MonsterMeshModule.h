@@ -136,6 +136,11 @@ private:
     uint32_t pendingChallengeMs_    = 0;  // RECEIVER: time challenge arrived (60s timeout)
     uint32_t waitingForAcceptFrom_  = 0;  // INITIATOR: node we sent "mmc on" to (waiting for Y/N back)
     uint32_t mmtWaitingForAcceptFrom_ = 0; // INITIATOR: sent MMT:ON, awaiting Y/N DM reply
+    // Deferred battle-start: set from handleReceived (router thread), consumed in runOnce
+    // so LVGL terminal work happens on the OSThread context, not the mesh-receive thread.
+    uint32_t pendingMmtStartPartner_ = 0;
+    uint32_t pendingMmtStartSeed_    = 0;
+    uint32_t pendingMmtReject_       = 0;
 
     const char *getShortName(uint32_t nodeId);
 
