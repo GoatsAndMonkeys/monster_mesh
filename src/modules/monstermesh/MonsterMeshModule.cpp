@@ -17,6 +17,7 @@
 #include "SPILock.h"
 
 #include "PowerFSM.h"
+#include "mesh/RadioLibInterface.h"
 #include "MonsterMeshAudio.h"
 #include "PokemonData.h"
 #include "Gen1Species.h"
@@ -773,7 +774,22 @@ int32_t MonsterMeshModule::runOnce()
 
     // Mirror emulator/browser active state to the global flag the patched
     // device-ui LGFXDriver reads to suppress powersave during play.
+    bool prevActive = g_mmEmulatorActive;
     g_mmEmulatorActive = (emulatorActive_ || browserActive_);
+
+    // Mode switch: when emu/browser becomes active, disable LoRa IRQ so the
+    // radio stops hitting the shared SPI bus during gameplay. When exiting,
+    // restart receive. This is the user's "turn off Meshtastic during GB"
+    // architecture — preferred over trying to keep radio + emu coexistent.
+    if (prevActive != g_mmEmulatorActive && RadioLibInterface::instance) {
+        if (g_mmEmulatorActive) {
+            LOG_INFO("[MonsterMesh] mode→EMU: disableInterrupt\n");
+            RadioLibInterface::instance->disableInterrupt();
+        } else {
+            LOG_INFO("[MonsterMesh] mode→MESH: startReceive\n");
+            RadioLibInterface::instance->startReceive();
+        }
+    }
 
     // NOTE: LVGL inactivity-timer reset moved to LGFXDriver::task_handler
     // because LVGL APIs are not thread-safe from arbitrary FreeRTOS tasks;
