@@ -296,11 +296,9 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             sendTextDM(replyTo, "Daycare: Pokemon checked out! XP applied.");
             return ProcessMessage::CONTINUE;
         }
-        if (strstr(low, "mmd status") || strstr(low, "mmd info") ||
-            strstr(low, "mmds") || strstr(low, "mmd s")) {
-            daycareStatus(replyTo);
-            return ProcessMessage::CONTINUE;
-        }
+        // `mmd status` deliberately NOT handled as a DM — daycare status is
+        // shown in the local Terminal (type "mmd" or "daycare"). Keeps the
+        // mesh free of status chatter.
         if (strstr(low, "mmd test")) {
             if (!daycare_.isActive()) {
                 // Auto check-in if not active
@@ -470,8 +468,16 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             if (mp.from == nodeDB->getNodeNum()) return ProcessMessage::CONTINUE;
             if (terminal_.ready()) {
                 terminal_.receiveNetChallenge(mp.from, getShortName(mp.from));
-                // If this was a direct DM (not broadcast), ack to challenger so
-                // they know to open their terminal to wait for the battle.
+                // Self-DM: notify the local user via their phone chat that a
+                // battle challenge is incoming. They reply Y or N in the
+                // terminal; we also prompt them here so they know without
+                // needing to be in the terminal UI.
+                char local[96];
+                snprintf(local, sizeof(local),
+                         "[%s] wants a text battle! Open MM Terminal to reply Y or N.",
+                         getShortName(mp.from));
+                sendTextDM(nodeDB->getNodeNum(), local);
+                // ACK to challenger so their terminal knows to wait
                 if (!isBroadcast(mp.to)) {
                     char ack[64];
                     snprintf(ack, sizeof(ack),
@@ -619,6 +625,14 @@ int32_t MonsterMeshModule::runOnce()
 
             // ── Ensure MonsterMesh channel exists ────────────────────────────
             ensureMonsterMeshChannel();
+
+            // Wire the terminal's daycare-status callback so typing `mmd`
+            // or `daycare` in the terminal prints local status without
+            // a mesh DM round-trip.
+            terminal_.setDaycareStatusFn(
+                [](void *ctx, char *buf, size_t n) {
+                    static_cast<MonsterMeshModule *>(ctx)->daycareStatusString(buf, n);
+                }, this);
 
             // ── Daycare ─────────────────────────────────────────────────────
             daycare_.init();
@@ -2137,31 +2151,35 @@ void MonsterMeshModule::daycareCheckOut()
     }
 }
 
-void MonsterMeshModule::daycareStatus(uint32_t replyTo)
+// Fill buf with a human-readable daycare status string.
+// Used by the Terminal to display status locally (no DM round-trip).
+void MonsterMeshModule::daycareStatusString(char *buf, size_t bufsize)
 {
+    if (!buf || bufsize < 16) return;
+    int pos = 0;
+
     if (!daycare_.isActive()) {
-        sendTextDM(replyTo, "Daycare: Not active. DM 'mmd in' to check in.");
+        snprintf(buf, bufsize, "Daycare: Not active (no SAV loaded).");
         return;
     }
 
     const auto &state = daycare_.getState();
-    char buf[200];
-    int pos = 0;
-
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "Daycare: %d Pokemon\n", state.partyCount);
-
+    pos += snprintf(buf + pos, bufsize - pos, "Daycare: %d Pokemon\n", state.partyCount);
     for (uint8_t i = 0; i < state.partyCount && i < 6; i++) {
         const auto &p = state.pokemon[i];
         const char *name = p.nickname[0] ? p.nickname : "???";
         uint8_t level = p.savLevel + p.totalLevelsGained;
-        pos += snprintf(buf + pos, sizeof(buf) - pos,
+        pos += snprintf(buf + pos, bufsize - pos,
                         "%s Lv%d +%luXP\n", name, level, (unsigned long)p.totalXpGained);
-        if (pos >= (int)sizeof(buf) - 40) break;
+        if (pos >= (int)bufsize - 40) break;
     }
+    snprintf(buf + pos, bufsize - pos, "Neighbors: %d", daycare_.getNeighborCount());
+}
 
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
-                    "Neighbors: %d", daycare_.getNeighborCount());
-
+void MonsterMeshModule::daycareStatus(uint32_t replyTo)
+{
+    char buf[256];
+    daycareStatusString(buf, sizeof(buf));
     sendTextDM(replyTo, buf);
 }
 

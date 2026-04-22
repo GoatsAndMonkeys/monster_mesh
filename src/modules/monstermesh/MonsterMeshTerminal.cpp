@@ -600,6 +600,24 @@ void MonsterMeshTerminal::handleCommand(const char *cmd)
         return;
     }
 
+    if (strcmp(cmd, "mmd") == 0 || strcmp(cmd, "daycare") == 0) {
+        if (dayStatusFn_) {
+            char buf[256];
+            dayStatusFn_(dayStatusCtx_, buf, sizeof(buf));
+            // Print multi-line status (split on \n)
+            char *line = buf;
+            while (line && *line) {
+                char *nl = strchr(line, '\n');
+                if (nl) *nl = '\0';
+                print(line);
+                line = nl ? nl + 1 : nullptr;
+            }
+        } else {
+            print("Daycare: (no status available)");
+        }
+        return;
+    }
+
     if (strcmp(cmd, "status") == 0) {
         if (state_ == State::IN_BATTLE)
             describeBattleStatus();

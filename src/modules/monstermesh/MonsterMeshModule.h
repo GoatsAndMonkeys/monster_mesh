@@ -192,6 +192,7 @@ private:
     void daycareCheckIn();
     void daycareCheckOut();
     void daycareStatus(uint32_t replyTo);
+    void daycareStatusString(char *buf, size_t bufsize);
     void daycareAutoCheckIn();  // load last .sav from SD, auto check-in without emulator
     bool pendingAutoCheckin_  = false;
     bool daycareCheckinDone_  = false;

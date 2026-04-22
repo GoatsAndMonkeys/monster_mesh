@@ -93,6 +93,15 @@ public:
         meshPeerCount_  = count;
     }
 
+    // Module-provided callback for rendering daycare status locally in the
+    // terminal (typed command: `mmd`). Fills caller's buffer with a multi-line
+    // summary. Module wires this up in setup.
+    using DaycareStatusFn = void (*)(void *ctx, char *buf, size_t bufsize);
+    void setDaycareStatusFn(DaycareStatusFn fn, void *ctx) {
+        dayStatusFn_  = fn;
+        dayStatusCtx_ = ctx;
+    }
+
 private:
     enum class State : uint8_t {
         IDLE,             // no party loaded
@@ -167,6 +176,9 @@ private:
     // Mesh peer list — pointer into PokemonDaycare::neighbors_ (not owned)
     const DaycareNeighborPokemon *meshPeers_     = nullptr;
     uint8_t                       meshPeerCount_ = 0;
+
+    DaycareStatusFn dayStatusFn_  = nullptr;
+    void           *dayStatusCtx_ = nullptr;
     char                          lastFoeSource_[12] = {};  // trainer short name of last opponent
 
     // LVGL objects (not owned)
