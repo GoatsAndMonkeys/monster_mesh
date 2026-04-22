@@ -8,6 +8,15 @@
 #include "util/ILog.h"
 #include <functional>
 
+// MonsterMesh hook: suppress display powersave while the GB emulator is
+// running. Normally powersave fires after screenTimeout ms of LVGL inactivity,
+// but MonsterMesh pauses LVGL refreshes during emu — the inactivity timer
+// therefore expires and lgfx->sleep() + lgfx->powerSaveOn() get called,
+// reconfiguring the shared SPI bus and stalling the emulator task on Core 1.
+// That's the "mid-play freeze" signature. The flag is defined in
+// MonsterMeshModule.cpp and kept in sync with emulatorActive_ || browserActive_.
+extern "C" volatile bool g_mmEmulatorActive;
+
 constexpr uint32_t defaultLongPressTime = 600; // ms until long press is detected (lvgl default is 400)
 constexpr uint32_t defaultGestureLimit = 10;   // x/y diff pixel until a swipe gesture is detected (lvgl default is 50)
 
@@ -84,6 +93,25 @@ template <class LGFX> bool LGFXDriver<LGFX>::hasTouch(void)
 
 template <class LGFX> void LGFXDriver<LGFX>::task_handler(void)
 {
+    // MonsterMesh: while the GB emulator or ROM browser is active, LVGL
+    // is paused and the inactivity timer will grow without bound. Do not
+    // enter powersave — lgfx->sleep() + powerSaveOn() reconfigure the shared
+    // SPI bus and stall the emu task. Also reset the inactivity timer so
+    // when emu exits, we don't immediately dim into sleep.
+    if (g_mmEmulatorActive) {
+        if (powerSaving) {
+            // Recover cleanly if we're already in powersave when emu starts.
+            ILOG_INFO("leaving powersave (mm emu active)");
+            powerSaving = false;
+            lgfx->powerSaveOff();
+            lgfx->wakeup();
+            lgfx->setBrightness(lastBrightness);
+            DisplayDriver::view->screenSaving(false);
+        }
+        lv_display_trigger_activity(NULL);
+        return;
+    }
+
     // handle display timeout
     if ((screenTimeout > 0 && lv_display_get_inactive_time(NULL) > screenTimeout) || powerSaving ||
         (DisplayDriver::view->isScreenLocked())) {

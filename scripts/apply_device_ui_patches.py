@@ -28,7 +28,13 @@ def neutralize_bsec2_exit(libdeps_dir):
 
 project_dir = env["PROJECT_DIR"]
 env_name = env["PIOENV"]
-libdeps_dir = os.path.join(project_dir, ".pio", "libdeps", env_name)
+# PIO's PROJECT_LIBDEPS_DIR honors the [platformio]libdeps_dir setting, so we
+# find the correct location whether it's the default .pio/libdeps or a custom
+# path like ~/.pio_libdeps_pokemesh (used to escape iCloud sync).
+libdeps_base = env.subst("$PROJECT_LIBDEPS_DIR")
+if not libdeps_base:
+    libdeps_base = os.path.join(project_dir, ".pio", "libdeps")
+libdeps_dir = os.path.join(libdeps_base, env_name)
 patches_src = os.path.join(project_dir, "patches", "device-ui")
 lib_root_dir = os.path.join(libdeps_dir, "meshtastic-device-ui")
 lib_source_fallback = os.path.join(lib_root_dir, "source")

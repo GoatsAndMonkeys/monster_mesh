@@ -36,6 +36,14 @@ LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_unscii_8;
 
 MonsterMeshModule *monsterMeshModule = nullptr;
 
+// Global flag read by patched device-ui LGFXDriver to suppress powersave
+// transitions while the GB emulator is running. Otherwise LVGL's inactivity
+// timer expires (because LVGL flushes are paused during emu), triggering
+// lgfx->sleep() + lgfx->powerSaveOn() which reconfigures the shared SPI bus
+// and stalls the emulator task on Core 1. Symptom was "[DeviceUI] enter
+// powersave" immediately before the mid-play freeze.
+extern "C" volatile bool g_mmEmulatorActive = false;
+
 // Weak default — device-ui provides the real implementation when present
 extern "C" __attribute__((weak)) void monstermesh_set_toggle_cb(void (*cb)(void)) { (void)cb; }
 
@@ -754,12 +762,16 @@ int32_t MonsterMeshModule::runOnce()
         installKeyboardHook();
     }
 
+    // Mirror emulator/browser active state to the global flag the patched
+    // device-ui LGFXDriver reads to suppress powersave during play.
+    g_mmEmulatorActive = (emulatorActive_ || browserActive_);
+
     // Keep PowerFSM awake while emulator or browser is active.
     // CRITICAL: throttle to once per minute. Firing EVENT_INPUT every
     // runOnce tick (~50Hz) causes PowerFSM::onEnter("ON") to re-execute
     // every tick, which calls setBluetoothEnable(true) + screen->setOn()
     // 50 times per second — that's the cross-core stall that has been
-    // mis-diagnosed as an "emulator freeze" for the last 80+ commits.
+    // mis-diagnosed as an "emulator freeze" for 80+ commits.
     // PowerFSM's inactivity timeout is minutes; 60s keep-alive is plenty.
     if (emulatorActive_ || browserActive_) {
         static uint32_t lastKeepAliveMs = 0;
