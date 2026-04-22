@@ -45,6 +45,12 @@ MonsterMeshModule *monsterMeshModule = nullptr;
 // powersave" immediately before the mid-play freeze.
 extern "C" volatile bool g_mmEmulatorActive = false;
 
+// Set by the patched TFTView_320x240::notifyMessagesRestored — blocks
+// MonsterMesh from opening the ROM browser until Meshtastic's phone-sync
+// message history replay completes. Opening earlier races the LVGL state
+// machine and triggers the mid-play crash ~3 min in.
+extern "C" volatile bool g_mmMessagesRestored = false;
+
 // Weak default — device-ui provides the real implementation when present
 extern "C" __attribute__((weak)) void monstermesh_set_toggle_cb(void (*cb)(void)) { (void)cb; }
 
@@ -1789,8 +1795,15 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
             kbSetMode(true);
         } else {
             // No ROM loaded — open file browser
-            // If checkin hasn't run yet, open browser anyway after 15s
-            // (handles case where no last_rom.txt exists on SD card)
+            // First, wait for Meshtastic UI to finish its phone-sync message
+            // history replay (device-ui TFTView::notifyMessagesRestored sets
+            // g_mmMessagesRestored). Opening the browser earlier races LVGL
+            // state init and has been observed to cause delayed crashes.
+            if (!g_mmMessagesRestored) {
+                setupStatus_ = "Waiting for UI sync...";
+                LOG_INFO("[MonsterMesh] ALT ignored: messages not restored yet\n");
+                return;
+            }
             if (!daycareCheckinDone_) {
                 if (millis() < 3000) {
                     setupStatus_ = "Loading party...";

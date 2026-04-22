@@ -6664,12 +6664,16 @@ void TFTView_320x240::notifyRestoreMessages(int32_t percentage)
     lv_bar_set_value(objects.message_restore_bar, percentage, LV_ANIM_OFF);
 }
 
+extern "C" volatile bool g_mmMessagesRestored;
+
 void TFTView_320x240::notifyMessagesRestored(void)
 {
     MeshtasticView::notifyMessagesRestored();
     lv_obj_add_flag(objects.msg_restore_panel, LV_OBJ_FLAG_HIDDEN);
     updateActiveChats();
     updateNodesFiltered(true);
+    // MonsterMesh: signal that UI/phone sync is done; ROM browser may now open.
+    g_mmMessagesRestored = true;
 }
 
 /**
