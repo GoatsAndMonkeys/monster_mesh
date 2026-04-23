@@ -1865,6 +1865,8 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
         if (browserActive_) {
             // ── Browser → Meshtastic ──────────────────────────────────────
             browserActive_ = false;
+            // Auto daycare check-in since user returned to idle
+            if (!daycare_.isActive()) pendingAutoCheckin_ = true;
 #if HAS_TFT
             lvgl_hide_browser();
 #endif
@@ -1877,6 +1879,9 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
             emulatorActive_ = false;
             if (emu_.isRunning()) pendingSave_ = true;
             if (emu_.audio_) emu_.audio_->setMuted(true);
+            // Auto check back INTO daycare since we're idle again.
+            // Deferred so SAV write finishes first.
+            pendingAutoCheckin_ = true;
 #if HAS_TFT
             lv_display_t *disp = lv_display_get_default();
             if (disp) {
@@ -2133,6 +2138,12 @@ void MonsterMeshModule::launchROM(const char *path)
 #endif
     emulatorActive_ = true;
     kbSetMode(true);  // switch keyboard to RAW mode for emulator input
+
+    // Auto check OUT of daycare while playing — user isn't idle anymore.
+    if (daycare_.isActive()) {
+        LOG_INFO("[MonsterMesh] auto-daycare: playing ROM, checking out\n");
+        daycareCheckOut();
+    }
 
     // Create emulator FreeRTOS task on Core 1 (high priority — never stalls)
     if (!emuTaskHandle_) {
