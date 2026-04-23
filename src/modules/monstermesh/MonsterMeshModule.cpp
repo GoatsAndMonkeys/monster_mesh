@@ -513,29 +513,28 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
         if (strstr(low, "mmt:on") || strstr(low, "mmt on")) {
             uint32_t myNode = nodeDB->getNodeNum();
             if (mp.from == myNode) {
-                // WE sent MMT:ON (from phone DM to someone). Arm our state
-                // so a Y reply from them resolves, and send a follow-up
-                // prompt DM so the recipient sees Y/N instructions in the
-                // same phone-chat thread.
+                // Outgoing: we initiated via phone DM. Arm state so Y reply
+                // from recipient resolves.
                 mmtWaitingForAcceptFrom_ = mp.to;
-                char prompt[128];
-                snprintf(prompt, sizeof(prompt),
-                         "[%s] wants a text battle! Reply Y to accept or N to decline.",
-                         getShortName(myNode));
-                // Stage for runOnce to avoid sending DM from router thread.
-                pendingMmtPendingAckTo_ = 0;  // clear other path
-                strncpy(pendingNeighborMsg_, prompt, sizeof(pendingNeighborMsg_) - 1);
-                pendingNeighborMsg_[sizeof(pendingNeighborMsg_) - 1] = '\0';
-                pendingMmtPromptTo_ = mp.to;  // send to recipient, not self
-                pendingNeighborMsgReady_ = false;
-                pendingMmtPromptReady_ = true;
-                LOG_INFO("[MonsterMesh] outgoing MMT:ON → armed waiting + prompt to 0x%08X\n",
+                LOG_INFO("[MonsterMesh] outgoing MMT:ON — armed waiting on 0x%08X\n",
                          (unsigned)mp.to);
                 return ProcessMessage::CONTINUE;
             }
-            // Incoming MMT:ON — track challenger. No prompt needed from us;
-            // the challenger's firmware sends the user-visible prompt.
+            // Incoming: someone DM'd us MMT:ON. Track challenger + send a
+            // Y/N prompt DM back to them so it lands in the shared phone
+            // chat thread (Blue sees it as outgoing, Red sees it as
+            // incoming from Blue — both sides have context).
             mmtChallengerFrom_ = mp.from;
+            char prompt[128];
+            snprintf(prompt, sizeof(prompt),
+                     "[%s] got your MMT challenge — reply Y to accept or N to decline.",
+                     getShortName(myNode));
+            strncpy(pendingNeighborMsg_, prompt, sizeof(pendingNeighborMsg_) - 1);
+            pendingNeighborMsg_[sizeof(pendingNeighborMsg_) - 1] = '\0';
+            pendingMmtPromptTo_ = mp.from;   // DM back to challenger
+            pendingMmtPromptReady_ = true;
+            LOG_INFO("[MonsterMesh] incoming MMT:ON from 0x%08X — prompt queued\n",
+                     (unsigned)mp.from);
             return ProcessMessage::CONTINUE;
         }
 
