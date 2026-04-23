@@ -70,11 +70,15 @@ private:
 public:
     // Generate a "dog park" arrival event when a new trainer comes online
     // Matches local Pokemon with newcomer's Pokemon by type affinity or rivalry
+    // localShortName/localGameName: the local trainer identity so the remote
+    //   perspective message can be assembled from the newcomer's POV.
     static void generateArrivalEvent(
         DaycareEvent &out,
         const DaycarePokemonState *localParty, uint8_t localPartyCount,
         const DaycareBeacon &newcomer,
-        DaycareState &state);
+        DaycareState &state,
+        const char *localShortName = "",
+        const char *localGameName  = "");
 
 private:
     static bool tryEscape(DaycareEvent &out,

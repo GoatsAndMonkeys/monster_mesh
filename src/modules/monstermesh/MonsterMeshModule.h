@@ -152,6 +152,7 @@ private:
     char     pendingNeighborMsg_[96] = {};
     bool     pendingNeighborMsgReady_ = false;
     char     pendingArrivalMsg_[128]  = {};
+    char     pendingArrivalRemoteMsg_[128] = {};
     uint32_t pendingArrivalTargetNode_ = 0;
     bool     pendingArrivalMsgReady_  = false;
 

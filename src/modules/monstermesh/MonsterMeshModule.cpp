@@ -668,6 +668,13 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                         LOG_INFO("[MonsterMesh] arrival event: %s\n", evt.message);
                         snprintf(pendingArrivalMsg_, sizeof(pendingArrivalMsg_),
                                  "%s", evt.message);
+                        // Partner DM uses partner-perspective text if available.
+                        if (evt.remoteMessage[0])
+                            snprintf(pendingArrivalRemoteMsg_,
+                                     sizeof(pendingArrivalRemoteMsg_),
+                                     "%s", evt.remoteMessage);
+                        else
+                            pendingArrivalRemoteMsg_[0] = '\0';
                         pendingArrivalTargetNode_ = evt.targetNodeId;
                         pendingArrivalMsgReady_ = true;
                     }
@@ -1201,9 +1208,13 @@ int32_t MonsterMeshModule::runOnce()
         sendTextDM(nodeDB->getNodeNum(), pendingArrivalMsg_);
         if (pendingArrivalTargetNode_ != 0 &&
             pendingArrivalTargetNode_ != nodeDB->getNodeNum()) {
-            sendTextDM(pendingArrivalTargetNode_, pendingArrivalMsg_);
+            const char *partnerMsg = pendingArrivalRemoteMsg_[0]
+                                     ? pendingArrivalRemoteMsg_
+                                     : pendingArrivalMsg_;
+            sendTextDM(pendingArrivalTargetNode_, partnerMsg);
         }
         pendingArrivalTargetNode_ = 0;
+        pendingArrivalRemoteMsg_[0] = '\0';
     }
 
     // Expire pending challenge after 60s — send "fled" to initiator
