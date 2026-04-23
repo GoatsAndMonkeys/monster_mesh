@@ -1044,12 +1044,28 @@ int32_t MonsterMeshModule::runOnce()
         pendingMmtStartPartner_ = 0;
         pendingMmtStartSeed_    = 0;
         Gen1Party oppParty{};
+        bool found = false;
         const DaycareNeighborPokemon *peers = daycare_.getNeighbors();
         uint8_t count = daycare_.getNeighborCount();
         for (uint8_t i = 0; i < count; i++) {
             if (peers[i].nodeId == partner) {
                 terminal_.buildAsyncOpponent(peers[i], oppParty);
+                found = true;
                 break;
+            }
+        }
+        if (!found) {
+            // Partner hasn't checked into daycare — fall back to mirror-match
+            // using our own party as the opponent so battle can still happen.
+            LOG_INFO("[MonsterMesh] MMT: peer 0x%08X not in daycare, mirror-match\n",
+                     (unsigned)partner);
+            oppParty = terminalParty_;  // cached from SAV
+            if (oppParty.count == 0) {
+                sendTextDM(nodeDB->getNodeNum(),
+                           "MMT: need SAV party data — try `mmd in` first.");
+                sendTextDM(partner,
+                           "MMT: your opponent has no party data. Try `mmd in` on both devices.");
+                return 10;
             }
         }
         terminal_.receiveNetAccept(partner, seed, oppParty);
