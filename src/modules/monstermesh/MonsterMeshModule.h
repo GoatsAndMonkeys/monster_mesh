@@ -143,6 +143,8 @@ private:
     uint32_t pendingMmtReject_       = 0;
     uint32_t pendingMmtPendingAckTo_ = 0;  // defer MMT:PENDING ack to runOnce
     uint32_t mmtChallengerFrom_      = 0;  // tracks who sent us MMT:ON
+    uint32_t pendingMmtPromptTo_     = 0;  // DM prompt target (we are challenger)
+    bool     pendingMmtPromptReady_  = false;
     uint8_t  pendingMmtActType_      = 0;
     uint8_t  pendingMmtActIdx_       = 0;
     bool     pendingMmtActReady_     = false;
