@@ -832,7 +832,9 @@ int32_t MonsterMeshModule::runOnce()
             snprintf(act, sizeof(act), "MMT:ACT:%u:%u",
                      (unsigned)terminal_.netAction(),
                      (unsigned)terminal_.netIndex());
-            sendTextDM(terminal_.netPartnerNodeId(), act);
+            uint32_t partner = terminal_.netPartnerNodeId();
+            LOG_INFO("[MonsterMesh] MMT: send action '%s' to 0x%08X\n", act, (unsigned)partner);
+            sendTextDM(partner, act);
             terminal_.clearNetAction();
         }
 
@@ -1131,6 +1133,8 @@ int32_t MonsterMeshModule::runOnce()
         pendingMmtReject_ = 0;
     }
     if (pendingMmtActReady_ && terminal_.ready()) {
+        LOG_INFO("[MonsterMesh] MMT: recv action %u:%u\n",
+                 (unsigned)pendingMmtActType_, (unsigned)pendingMmtActIdx_);
         terminal_.receiveNetAction(pendingMmtActType_, pendingMmtActIdx_);
         pendingMmtActReady_ = false;
     }
