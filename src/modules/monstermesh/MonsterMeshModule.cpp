@@ -223,9 +223,11 @@ bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
             return true;
         }
     }
-    // Accept TEXT_MESSAGE DMs TO us
+    // Accept TEXT_MESSAGE DMs TO us OR outgoing FROM us (so we can see our
+    // own phone-initiated MMT:ON and arm challenger state from the source).
+    uint32_t myNode = nodeDB->getNodeNum();
     if (p->decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
-        p->to == nodeDB->getNodeNum() &&
+        (p->to == myNode || p->from == myNode) &&
         p->decoded.payload.size > 0) {
         const char *txt = (const char *)p->decoded.payload.bytes;
         size_t sz = p->decoded.payload.size;
@@ -497,23 +499,31 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
         // (the terminal-sent challenge format), skip the self-DM since
         // the user already sees the prompt in their phone chat thread.
         if (strstr(low, "mmt:on") || strstr(low, "mmt on")) {
-            if (mp.from == nodeDB->getNodeNum()) return ProcessMessage::CONTINUE;
-            // Track challenger so our Y/N DM back to them resolves correctly.
-            mmtChallengerFrom_ = mp.from;
-            // Auto-ack back to challenger with "MMT:PENDING" so their firmware
-            // knows we're the one handling the challenge and can arm
-            // mmtWaitingForAcceptFrom_. This makes phone-initiated bare
-            // MMT:ON DMs work end-to-end (Red can't snoop its own outgoing,
-            // so Blue tells Red "I received it" explicitly).
-            pendingMmtPendingAckTo_ = mp.from;
-            // If it's a bare MMT:ON (phone DM, no prompt text), surface
-            // Y/N to our user via self-DM. Deferred for thread safety.
-            if (len <= 15) {
-                snprintf(pendingNeighborMsg_, sizeof(pendingNeighborMsg_),
-                         "[%s] wants a text battle! DM back 'Y' to accept or 'N' to decline.",
-                         getShortName(mp.from));
-                pendingNeighborMsgReady_ = true;
+            uint32_t myNode = nodeDB->getNodeNum();
+            if (mp.from == myNode) {
+                // WE sent MMT:ON (from phone DM to someone). Arm our state
+                // so a Y reply from them resolves, and send a follow-up
+                // prompt DM so the recipient sees Y/N instructions in the
+                // same phone-chat thread.
+                mmtWaitingForAcceptFrom_ = mp.to;
+                char prompt[128];
+                snprintf(prompt, sizeof(prompt),
+                         "[%s] wants a text battle! Reply Y to accept or N to decline.",
+                         getShortName(myNode));
+                // Stage for runOnce to avoid sending DM from router thread.
+                pendingMmtPendingAckTo_ = 0;  // clear other path
+                strncpy(pendingNeighborMsg_, prompt, sizeof(pendingNeighborMsg_) - 1);
+                pendingNeighborMsg_[sizeof(pendingNeighborMsg_) - 1] = '\0';
+                pendingMmtPromptTo_ = mp.to;  // send to recipient, not self
+                pendingNeighborMsgReady_ = false;
+                pendingMmtPromptReady_ = true;
+                LOG_INFO("[MonsterMesh] outgoing MMT:ON → armed waiting + prompt to 0x%08X\n",
+                         (unsigned)mp.to);
+                return ProcessMessage::CONTINUE;
             }
+            // Incoming MMT:ON — track challenger. No prompt needed from us;
+            // the challenger's firmware sends the user-visible prompt.
+            mmtChallengerFrom_ = mp.from;
             return ProcessMessage::CONTINUE;
         }
 
@@ -1092,10 +1102,13 @@ int32_t MonsterMeshModule::runOnce()
         terminal_.receiveNetAction(pendingMmtActType_, pendingMmtActIdx_);
         pendingMmtActReady_ = false;
     }
-    if (pendingMmtPendingAckTo_ != 0) {
-        uint32_t to = pendingMmtPendingAckTo_;
-        pendingMmtPendingAckTo_ = 0;
-        sendTextDM(to, "MMT:PENDING");
+    // Send prompt to recipient of our MMT:ON (we are challenger).
+    // Lands in the shared phone-chat thread as "from us" — natural flow.
+    if (pendingMmtPromptReady_ && pendingMmtPromptTo_ != 0) {
+        uint32_t to = pendingMmtPromptTo_;
+        pendingMmtPromptTo_ = 0;
+        pendingMmtPromptReady_ = false;
+        sendTextDM(to, pendingNeighborMsg_);
     }
     // Deferred daycare notifications — safe to send DMs from OSThread
     if (pendingNeighborMsgReady_) {
