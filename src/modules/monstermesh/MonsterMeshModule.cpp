@@ -853,7 +853,11 @@ int32_t MonsterMeshModule::runOnce()
     // 50 times per second — that's the cross-core stall that has been
     // mis-diagnosed as an "emulator freeze" for 80+ commits.
     // PowerFSM's inactivity timeout is minutes; 60s keep-alive is plenty.
-    if (emulatorActive_ || browserActive_) {
+    // Always keep PowerFSM awake — MonsterMesh's emu/render FreeRTOS tasks
+    // don't survive light sleep (LORA_DIO1 wake expects radio IRQ which is
+    // disabled during emu, and emu task sleep/wake cycle isn't handled).
+    // Fire once per minute to prevent the 5-min light-sleep timeout.
+    {
         static uint32_t lastKeepAliveMs = 0;
         uint32_t now = millis();
         if (now - lastKeepAliveMs > 60000 || lastKeepAliveMs == 0) {
@@ -2353,14 +2357,10 @@ void MonsterMeshModule::daycareAutoCheckIn()
         const auto &state = daycare_.getState();
         LOG_INFO("[MonsterMesh] auto-daycare: %d pokemon checked in\n", state.partyCount);
         daycare_.forceBeacon();
-        daycare_.forceEvent();
-        // DM the first event to the user
-        const auto &evt = daycare_.getLastEvent();
-        if (evt.message[0]) {
-            sendTextDM(nodeDB->getNodeNum(), evt.message);
-            LOG_INFO("[MonsterMesh] first event: %s\n", evt.message);
-        }
-        LOG_INFO("[MonsterMesh] auto-daycare: beacon + event sent\n");
+        // Skip firing an event DM during boot — firing sendTextDM here before
+        // BLE/Meshtastic services are fully ready was crashing the device
+        // (reboot at ~11s). The regular daycare timer will fire events later.
+        LOG_INFO("[MonsterMesh] auto-daycare: beacon sent, skipping boot-time event DM\n");
         setupStatus_ = "Daycare active";
     }
 }
