@@ -56,6 +56,12 @@ extern "C" {
 volatile bool g_mmSuppressFlashWrites = false;
 }
 
+// Broader powersave gate — stays true for the life of the module. Covers
+// terminal, daycare, and background mesh work, not just the emulator. The
+// display powersave path (lgfx->sleep() + lgfx->powerSaveOn()) reconfigures
+// the shared SPI bus and crashes whenever SD/LoRa/TFT are mid-transfer.
+extern "C" volatile bool g_mmKeepAwake = false;
+
 // Set by the patched TFTView_320x240::notifyMessagesRestored() when
 // Meshtastic's device-ui finishes replaying persistent message history.
 // runOnce gates the ROM browser open on this flag so the browser scan
@@ -741,6 +747,7 @@ int32_t MonsterMeshModule::runOnce()
                 setupStatus_ = "SD mount FAILED";
                 LOG_WARN("[MonsterMesh] SD.begin() failed after %d retries\n", MAX_SETUP_RETRIES);
                 setupDone_ = true;
+                g_mmKeepAwake = true;
             } else {
                 snprintf(setupStatusBuf_, sizeof(setupStatusBuf_), "SD retry %d/%d...", setupRetries_ + 1, MAX_SETUP_RETRIES);
                 setupStatus_ = setupStatusBuf_;
@@ -754,6 +761,7 @@ int32_t MonsterMeshModule::runOnce()
         emu_.setScanlineCallback(scanlineCallback, this);
 
         setupDone_ = true;
+        g_mmKeepAwake = true;  // block display powersave for the life of the module
 
         // Keyboard hook installed early (at 1s) via kbObserverRegistered_ path above.
         // Re-install the LVGL hook here in case LVGL wasn't ready at 1s.

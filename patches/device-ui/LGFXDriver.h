@@ -8,6 +8,21 @@
 #include "util/ILog.h"
 #include <functional>
 
+// MonsterMesh hook: suppress display powersave while the GB emulator is
+// running. Normally powersave fires after screenTimeout ms of LVGL inactivity,
+// but MonsterMesh pauses LVGL refreshes during emu — the inactivity timer
+// therefore expires and lgfx->sleep() + lgfx->powerSaveOn() get called,
+// reconfiguring the shared SPI bus and stalling the emulator task on Core 1.
+// That's the "mid-play freeze" signature. The flag is defined in
+// MonsterMeshModule.cpp and kept in sync with emulatorActive_ || browserActive_.
+extern "C" volatile bool g_mmEmulatorActive;
+// Broader gate: stays true for the life of the MonsterMesh module. The
+// display powersave path (lgfx->sleep() + lgfx->powerSaveOn()) reconfigures
+// the shared SPI bus, which crashes the device whenever daycare, terminal,
+// or mesh traffic is mid-transfer. Keeping the inactivity timer poked means
+// powersave never fires.
+extern "C" volatile bool g_mmKeepAwake;
+
 constexpr uint32_t defaultLongPressTime = 600; // ms until long press is detected (lvgl default is 400)
 constexpr uint32_t defaultGestureLimit = 10;   // x/y diff pixel until a swipe gesture is detected (lvgl default is 50)
 
@@ -84,9 +99,19 @@ template <class LGFX> bool LGFXDriver<LGFX>::hasTouch(void)
 
 template <class LGFX> void LGFXDriver<LGFX>::task_handler(void)
 {
+    // MonsterMesh: skip the powersave/sleep transition while MonsterMesh owns
+    // the display. Powersave calls lgfx->sleep() + lgfx->powerSaveOn() which
+    // reconfigure the shared SPI bus and crash SD/LoRa mid-transfer. We still
+    // need to run DisplayDriver::task_handler() below so LVGL keeps pumping
+    // touch/input events — early-return would freeze the UI.
+    bool mmOwnsDisplay = (g_mmEmulatorActive || g_mmKeepAwake);
+    if (mmOwnsDisplay) {
+        lv_display_trigger_activity(NULL);
+    }
+
     // handle display timeout
-    if ((screenTimeout > 0 && lv_display_get_inactive_time(NULL) > screenTimeout) || powerSaving ||
-        (DisplayDriver::view->isScreenLocked())) {
+    if (!mmOwnsDisplay && ((screenTimeout > 0 && lv_display_get_inactive_time(NULL) > screenTimeout) || powerSaving ||
+        (DisplayDriver::view->isScreenLocked()))) {
         // sleep screen only if there are means for wakeup
         if (DisplayDriver::view->getInputDriver()->hasPointerDevice() || hasTouch() ||
             DisplayDriver::view->getInputDriver()->hasKeyboardDevice() || hasButton()) {
