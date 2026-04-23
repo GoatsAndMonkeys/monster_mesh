@@ -2159,9 +2159,12 @@ void MonsterMeshModule::launchROM(const char *path)
     kbSetMode(true);  // switch keyboard to RAW mode for emulator input
 
     // Auto check OUT of daycare while playing — user isn't idle anymore.
+    // Use the no-SRAM-patch path so we don't do a 32KB SD write on the
+    // launchROM thread (causes UI freeze on "Loading ROM..." screen).
+    // The user's live play will update SAV naturally on next eject.
     if (daycare_.isActive()) {
-        LOG_INFO("[MonsterMesh] auto-daycare: playing ROM, checking out\n");
-        daycareCheckOut();
+        LOG_INFO("[MonsterMesh] auto-daycare: playing ROM, checking out (no save)\n");
+        daycare_.checkOut(nullptr);
     }
 
     // Create emulator FreeRTOS task on Core 1 (high priority — never stalls)
