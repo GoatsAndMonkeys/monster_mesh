@@ -580,20 +580,24 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             uint32_t myNode = nodeDB->getNodeNum();
             if (mp.from == myNode) {
                 // Outgoing: we initiated via phone DM. Arm state so Y reply
-                // from recipient resolves.
+                // from recipient resolves, and queue a follow-up prompt DM
+                // to the recipient so the Y/N ask lands in the shared
+                // Red↔Blue phone-chat thread (not self-chat).
                 mmtWaitingForAcceptFrom_ = mp.to;
-                LOG_INFO("[MonsterMesh] outgoing MMT:ON — armed waiting on 0x%08X\n",
+                snprintf(pendingNeighborMsg_, sizeof(pendingNeighborMsg_),
+                         "[%s] wants a text battle! Reply Y or N.",
+                         getShortName(myNode));
+                pendingMmtPromptTo_ = mp.to;
+                pendingMmtPromptReady_ = true;
+                LOG_INFO("[MonsterMesh] outgoing MMT:ON → armed 0x%08X + prompt queued\n",
                          (unsigned)mp.to);
                 return ProcessMessage::CONTINUE;
             }
-            // Incoming: someone DM'd us MMT:ON. Track challenger + self-DM
-            // a Y/N prompt so our phone shows it (not the challenger's).
+            // Incoming: someone DM'd us MMT:ON. Track challenger only —
+            // the challenger's firmware sends the user-visible Y/N prompt
+            // to us in the same shared chat thread, so no self-DM needed.
             mmtChallengerFrom_ = mp.from;
-            snprintf(pendingNeighborMsg_, sizeof(pendingNeighborMsg_),
-                     "%s challenged you to a text battle — reply Y or N in your chat with them.",
-                     getShortName(mp.from));
-            pendingNeighborMsgReady_ = true;   // self-DM path in runOnce
-            LOG_INFO("[MonsterMesh] incoming MMT:ON from 0x%08X — self-DM queued\n",
+            LOG_INFO("[MonsterMesh] incoming MMT:ON from 0x%08X — armed (challenger will prompt)\n",
                      (unsigned)mp.from);
             return ProcessMessage::CONTINUE;
         }
