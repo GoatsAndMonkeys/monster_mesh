@@ -520,20 +520,14 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                          (unsigned)mp.to);
                 return ProcessMessage::CONTINUE;
             }
-            // Incoming: someone DM'd us MMT:ON. Track challenger + send a
-            // Y/N prompt DM back to them so it lands in the shared phone
-            // chat thread (Blue sees it as outgoing, Red sees it as
-            // incoming from Blue — both sides have context).
+            // Incoming: someone DM'd us MMT:ON. Track challenger + self-DM
+            // a Y/N prompt so our phone shows it (not the challenger's).
             mmtChallengerFrom_ = mp.from;
-            char prompt[128];
-            snprintf(prompt, sizeof(prompt),
-                     "[%s] got your MMT challenge — reply Y to accept or N to decline.",
-                     getShortName(myNode));
-            strncpy(pendingNeighborMsg_, prompt, sizeof(pendingNeighborMsg_) - 1);
-            pendingNeighborMsg_[sizeof(pendingNeighborMsg_) - 1] = '\0';
-            pendingMmtPromptTo_ = mp.from;   // DM back to challenger
-            pendingMmtPromptReady_ = true;
-            LOG_INFO("[MonsterMesh] incoming MMT:ON from 0x%08X — prompt queued\n",
+            snprintf(pendingNeighborMsg_, sizeof(pendingNeighborMsg_),
+                     "%s challenged you to a text battle — reply Y or N in your chat with them.",
+                     getShortName(mp.from));
+            pendingNeighborMsgReady_ = true;   // self-DM path in runOnce
+            LOG_INFO("[MonsterMesh] incoming MMT:ON from 0x%08X — self-DM queued\n",
                      (unsigned)mp.from);
             return ProcessMessage::CONTINUE;
         }
@@ -1143,6 +1137,8 @@ int32_t MonsterMeshModule::runOnce()
         uint32_t to = pendingMmtPromptTo_;
         pendingMmtPromptTo_ = 0;
         pendingMmtPromptReady_ = false;
+        LOG_INFO("[MonsterMesh] sending MMT prompt DM to 0x%08X: %s\n",
+                 (unsigned)to, pendingNeighborMsg_);
         sendTextDM(to, pendingNeighborMsg_);
     }
     // Deferred daycare notifications — safe to send DMs from OSThread
