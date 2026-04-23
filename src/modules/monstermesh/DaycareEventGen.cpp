@@ -1178,7 +1178,9 @@ void DaycareEventGen::generateArrivalEvent(
     DaycareEvent &out,
     const DaycarePokemonState *localParty, uint8_t localPartyCount,
     const DaycareBeacon &newcomer,
-    DaycareState &state)
+    DaycareState &state,
+    const char *localShortName,
+    const char *localGameName)
 {
     rngSeed(millis() ^ newcomer.nodeId);
 
@@ -1251,21 +1253,69 @@ void DaycareEventGen::generateArrivalEvent(
     else
         snprintf(remoteName, sizeof(remoteName), "%s's %s", trainerTag, remoteSpecies);
 
-    // Generate message
+    // Build partner-perspective names: from the newcomer's POV, OUR pokemon
+    // gets our trainer tag prefix, and THEIR pokemon is "your <species>".
+    char localTrainerTag[14] = {};
+    if (localShortName && localShortName[0]) {
+        if (localGameName && localGameName[0])
+            snprintf(localTrainerTag, sizeof(localTrainerTag), "%s-%s",
+                     localShortName, localGameName);
+        else
+            snprintf(localTrainerTag, sizeof(localTrainerTag), "%s", localShortName);
+    }
+    char localNameForRemote[80];
+    if (localTrainerTag[0])
+        snprintf(localNameForRemote, sizeof(localNameForRemote), "%s's %s",
+                 localTrainerTag, localName);
+    else
+        snprintf(localNameForRemote, sizeof(localNameForRemote), "%s", localName);
+    char remoteNameForRemote[60];
+    if (newcomer.pokemon[bestRemote].nickname[0])
+        snprintf(remoteNameForRemote, sizeof(remoteNameForRemote),
+                 "your %s (%s)", remoteSpecies,
+                 newcomer.pokemon[bestRemote].nickname);
+    else
+        snprintf(remoteNameForRemote, sizeof(remoteNameForRemote),
+                 "your %s", remoteSpecies);
+
+    // Generate message (local perspective + remote perspective)
     if (!isRivalry && sharedType > 0 && sharedType < TYPE_COUNT) {
         const char *tName = typeNameStr[sharedType];
         const char *tmpl = arrivalAffinityTemplates[rngRange(ARRIVAL_AFFINITY_COUNT)];
-        // Template takes local, remote, type — but snprintf can't reorder, so build manually
+        // All affinity templates start with "Your %s ..." — same template works
+        // with swapped names for the remote view; we just manually prefix the
+        // remote name with "your" via the naming above.
         char tmpBuf[200];
-        // All templates are "Your %s ... %s ... %s ..."
         snprintf(tmpBuf, sizeof(tmpBuf), tmpl, localName, remoteName, tName);
         strncpy(out.message, tmpBuf, sizeof(out.message) - 1);
+        // Remote view: swap "Your %s" → "<localTag>'s %s" and "%s" → "your %s"
+        // by rewriting the template with "%s" (no leading "Your ").
+        // Easiest: replace "Your " with "" in the template output before substitution.
+        // Instead: run snprintf again with remoteName/localNameForRemote swapped,
+        // then strip any leading "Your " and prepend localNameForRemote manually.
+        snprintf(tmpBuf, sizeof(tmpBuf), tmpl,
+                 localNameForRemote, remoteNameForRemote, tName);
+        // Template starts with "Your " — strip it so remoteMessage reads
+        // "<localTag>'s Mewtwo ... your Mew ..." (not "Your <localTag>'s ...").
+        const char *src = tmpBuf;
+        if (strncmp(src, "Your ", 5) == 0) src += 5;
+        strncpy(out.remoteMessage, src, sizeof(out.remoteMessage) - 1);
     } else if (isRivalry) {
         const char *tmpl = arrivalRivalryTemplates[rngRange(ARRIVAL_RIVALRY_COUNT)];
         snprintf(out.message, sizeof(out.message), tmpl, localName, remoteName);
+        char tmpBuf[200];
+        snprintf(tmpBuf, sizeof(tmpBuf), tmpl, localNameForRemote, remoteNameForRemote);
+        const char *src = tmpBuf;
+        if (strncmp(src, "Your ", 5) == 0) src += 5;
+        strncpy(out.remoteMessage, src, sizeof(out.remoteMessage) - 1);
     } else {
         const char *tmpl = arrivalCuriousTemplates[rngRange(ARRIVAL_CURIOUS_COUNT)];
         snprintf(out.message, sizeof(out.message), tmpl, localName, remoteName);
+        char tmpBuf[200];
+        snprintf(tmpBuf, sizeof(tmpBuf), tmpl, localNameForRemote, remoteNameForRemote);
+        const char *src = tmpBuf;
+        if (strncmp(src, "Your ", 5) == 0) src += 5;
+        strncpy(out.remoteMessage, src, sizeof(out.remoteMessage) - 1);
     }
 
     out.xp = 10 + rngRange(11);  // 10-20 XP for the meetup

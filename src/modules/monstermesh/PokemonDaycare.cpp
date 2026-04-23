@@ -452,7 +452,8 @@ bool PokemonDaycare::triggerArrivalEvent(const DaycareBeacon &newcomer) {
 
     DaycareEvent evt = {};
     DaycareEventGen::generateArrivalEvent(
-        evt, state_.pokemon, state_.partyCount, newcomer, state_);
+        evt, state_.pokemon, state_.partyCount, newcomer, state_,
+        shortName_, gameName_);
 
     // Apply XP
     if (evt.xp > 0 && evt.targetSpeciesIdx < state_.partyCount) {
