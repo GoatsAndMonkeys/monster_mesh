@@ -1909,7 +1909,13 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
                     savedFlushCb_ = nullptr;
                 }
                 if (disp->refr_timer) lv_timer_resume(disp->refr_timer);
-                lv_obj_invalidate(lv_screen_active());
+                // Mark ENTIRE screen as invalid — emu's LGFX writes bypassed
+                // LVGL's dirty-rect tracking, so LVGL thinks nothing changed
+                // and only redraws the top bar. Force a full refresh.
+                lv_area_t full = { 0, 0, (int32_t)lv_display_get_horizontal_resolution(disp) - 1,
+                                   (int32_t)lv_display_get_vertical_resolution(disp) - 1 };
+                lv_obj_invalidate_area(lv_screen_active(), &full);
+                lv_refr_now(disp);
             }
 #endif
             kbSetMode(false);
