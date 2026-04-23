@@ -224,10 +224,11 @@ bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
         }
     }
     // Accept TEXT_MESSAGE DMs TO us OR outgoing FROM us (so we can see our
-    // own phone-initiated MMT:ON and arm challenger state from the source).
+    // own phone-initiated MMT:ON and arm challenger state from the source),
+    // plus broadcasts carrying "mm..."/"mmt "-prefixed commands.
     uint32_t myNode = nodeDB->getNodeNum();
     if (p->decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
-        (p->to == myNode || p->from == myNode) &&
+        (p->to == myNode || p->from == myNode || isBroadcast(p->to)) &&
         p->decoded.payload.size > 0) {
         const char *txt = (const char *)p->decoded.payload.bytes;
         size_t sz = p->decoded.payload.size;
@@ -491,6 +492,78 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 sendTextDM(mp.from, "MM waiting");
             }
             return ProcessMessage::CONTINUE;
+        }
+
+        // ── "mmt <shortname>" — phone-friendly challenge format ─────────
+        // Anyone can type "mmt mmbl" (or MMT mmbl) in a public channel or
+        // DM. We parse the trailing token as a target shortname:
+        //   • if it matches OUR shortname → we are the target, treat as
+        //     incoming MMT:ON from mp.from (self-DM Y/N prompt).
+        //   • if it matches another node → we are the sender, DM "mmt on"
+        //     to that node's nodeId and arm mmtWaitingForAcceptFrom_.
+        // Works from broadcast OR DM regardless of who initiated.
+        if ((low[0]=='m' && low[1]=='m' && low[2]=='t' && low[3]==' ')) {
+            const char *tgt = low + 4;
+            while (*tgt == ' ') tgt++;
+            // Skip literal "on" — existing handler below treats that as challenge-to-DM-recipient
+            if (!(tgt[0]=='o' && tgt[1]=='n' && (tgt[2]=='\0' || tgt[2]==' ' || tgt[2]=='\r' || tgt[2]=='\n'))) {
+                // Trim trailing whitespace
+                char name[8] = {};
+                size_t i = 0;
+                while (i < 4 && tgt[i] && tgt[i] != ' ' && tgt[i] != '\r' && tgt[i] != '\n') {
+                    name[i] = tgt[i]; i++;
+                }
+                name[i] = '\0';
+                if (i >= 2) {
+                    uint32_t myNode = nodeDB->getNodeNum();
+                    const char *myShort = getShortName(myNode);
+                    // Case-insensitive comparison (low is already lowercase, myShort may not be)
+                    auto ieq4 = [](const char *a, const char *b) -> bool {
+                        for (int k = 0; k < 5; k++) {
+                            char ca = a[k], cb = b[k];
+                            if (ca >= 'A' && ca <= 'Z') ca += 32;
+                            if (cb >= 'A' && cb <= 'Z') cb += 32;
+                            if (ca != cb) return false;
+                            if (ca == '\0') return true;
+                        }
+                        return true;
+                    };
+                    if (ieq4(name, myShort) && mp.from != myNode) {
+                        // We're the target. Treat as incoming MMT:ON.
+                        mmtChallengerFrom_ = mp.from;
+                        snprintf(pendingNeighborMsg_, sizeof(pendingNeighborMsg_),
+                                 "%s challenged you to a text battle — reply Y or N in your chat with them.",
+                                 getShortName(mp.from));
+                        pendingNeighborMsgReady_ = true;
+                        LOG_INFO("[MonsterMesh] 'mmt %s' targets us from 0x%08X — self-DM prompt queued\n",
+                                 name, (unsigned)mp.from);
+                        return ProcessMessage::CONTINUE;
+                    }
+                    if (mp.from == myNode) {
+                        // We sent this — resolve shortname to nodeId and arm.
+                        uint32_t target = 0;
+                        size_t n = nodeDB->getNumMeshNodes();
+                        for (size_t k = 0; k < n; k++) {
+                            auto *node = nodeDB->getMeshNodeByIndex(k);
+                            if (node && node->has_user && ieq4(name, node->user.short_name)) {
+                                target = node->num;
+                                break;
+                            }
+                        }
+                        if (target != 0 && target != myNode) {
+                            mmtWaitingForAcceptFrom_ = target;
+                            LOG_INFO("[MonsterMesh] we sent 'mmt %s' → armed waiting on 0x%08X\n",
+                                     name, (unsigned)target);
+                            // Also DM "mmt on" to them so their firmware's incoming handler fires
+                            // (in case they didn't see the broadcast).
+                            sendTextDM(target, "mmt on");
+                        } else {
+                            LOG_INFO("[MonsterMesh] sent 'mmt %s' but shortname not in nodeDB\n", name);
+                        }
+                        return ProcessMessage::CONTINUE;
+                    }
+                }
+            }
         }
 
         // ── MMT:ON — text battle challenge (DM-native) ──────────────────
