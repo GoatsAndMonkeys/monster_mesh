@@ -62,6 +62,12 @@ Syslog syslog(syslogClient);
 
 Periodic *wifiReconnect;
 
+// MonsterMesh sets this while its ROM browser or emulator owns the foreground.
+// Weak default keeps WiFi builds that exclude MonsterMesh linkable.
+extern "C" {
+__attribute__((weak)) volatile bool g_mmSuppressFlashWrites = false;
+}
+
 #ifdef USE_WS5500
 // Startup Ethernet
 bool initEthernet()
@@ -155,6 +161,16 @@ static int32_t reconnectWiFi()
 {
     const char *wifiName = config.network.wifi_ssid;
     const char *wifiPsw = config.network.wifi_psk;
+
+    if (g_mmSuppressFlashWrites) {
+        needReconnect = false;
+        isReconnecting = false;
+        wifiReconnectPending = false;
+#ifdef ARCH_ESP32
+        WiFi.setAutoReconnect(false);
+#endif
+        return 1000;
+    }
 
     if (config.network.wifi_enabled && needReconnect) {
 
@@ -392,6 +408,13 @@ static void WiFiEvent(WiFiEvent_t event)
 #ifdef WIFI_LED
         digitalWrite(WIFI_LED, LOW);
 #endif
+        if (g_mmSuppressFlashWrites) {
+            syslog.disable();
+            needReconnect = false;
+            isReconnecting = false;
+            wifiReconnectPending = false;
+            break;
+        }
         if (!isReconnecting) {
             WiFi.disconnect(false, true);
             syslog.disable();
@@ -417,6 +440,13 @@ static void WiFiEvent(WiFiEvent_t event)
         break;
     case ARDUINO_EVENT_WIFI_STA_LOST_IP:
         LOG_INFO("Lost IP address and IP address is reset to 0");
+        if (g_mmSuppressFlashWrites) {
+            syslog.disable();
+            needReconnect = false;
+            isReconnecting = false;
+            wifiReconnectPending = false;
+            break;
+        }
         if (!isReconnecting) {
             WiFi.disconnect(false, true);
             syslog.disable();

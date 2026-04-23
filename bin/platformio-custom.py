@@ -8,6 +8,7 @@ import subprocess
 import json
 import re
 import time
+import shutil
 from datetime import datetime
 
 from readprops import readProps
@@ -152,6 +153,49 @@ for lb in env.GetLibBuilders():
     if lb.name == "meshtastic-device-ui":
         lb.env.Append(CPPDEFINES=[("APP_VERSION", verObj["long"])])
         break
+
+
+def apply_device_ui_patches():
+    """Overlay local MonsterMesh UI patches onto the downloaded device-ui lib."""
+    libdeps = env.subst("$PROJECT_LIBDEPS_DIR")
+    pioenv = env.get("PIOENV")
+    if not libdeps or not pioenv:
+        return
+
+    device_ui = join(libdeps, pioenv, "meshtastic-device-ui")
+    patch_dir = join(env["PROJECT_DIR"], "patches", "device-ui")
+    if not os.path.isdir(device_ui) or not os.path.isdir(patch_dir):
+        return
+
+    patch_map = {
+        "LGFXDriver.h": "include/graphics/driver/LGFXDriver.h",
+        "LogRotate.cpp": "source/util/LogRotate.cpp",
+        "TFTView_320x240.cpp": "source/graphics/TFT/TFTView_320x240.cpp",
+        "TFTView_320x240.h": "include/graphics/view/TFT/TFTView_320x240.h",
+        "Themes.cpp": "source/graphics/TFT/Themes.cpp",
+        "Themes.h": "include/graphics/view/TFT/Themes.h",
+        "lv_font_cozette_13.c": "generated/ui_320x240/lv_font_cozette_13.c",
+        "lv_font_cozette_20.c": "generated/ui_320x240/lv_font_cozette_20.c",
+        "lv_font_cozette_26.c": "generated/ui_320x240/lv_font_cozette_26.c",
+        "lv_i18n.c": "locale/lv_i18n.c",
+        "screens.c": "generated/ui_320x240/screens.c",
+        "screens.h": "generated/ui_320x240/screens.h",
+        "styles.c": "generated/ui_320x240/styles.c",
+    }
+
+    copied = 0
+    for src_name, dst_rel in patch_map.items():
+        src = join(patch_dir, src_name)
+        dst = join(device_ui, dst_rel)
+        if os.path.exists(src) and os.path.exists(os.path.dirname(dst)):
+            shutil.copyfile(src, dst)
+            copied += 1
+
+    if copied:
+        print(f"[MonsterMesh] Applied {copied} device-ui patch files")
+
+
+apply_device_ui_patches()
 
 # Get the display resolution from macros
 def get_display_resolution(build_flags):

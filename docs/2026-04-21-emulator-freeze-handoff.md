@@ -1,7 +1,7 @@
 # MonsterMesh emulator mid-play freeze — handoff
 
 **Branch:** `emulator-stability`
-**Current build:** `emulator-stability-b87` (everything below b75 in §9 applies; b86 WiFi-off reverted in b87)
+**Current build:** post-b87 local diagnostic candidate — TWDT return-code detail + WiFi-off retry with `WifiConnect` gated
 **Devices:** LilyGO T-Deck × 2 — Red (`!f1a05e70`), Blue (`!a1ad6880`)
 
 Repro'd on both devices. This doc captures everything we've tried, what worked, what didn't, and where to look next. Written as a handoff so Codex (or a fresh session) can pick up without re-reading the chat.
@@ -98,12 +98,16 @@ Also worth considering:
 
 In descending priority:
 
-1. **Confirm the TWDT init log on boot.** On next reset, grep the boot serial for `[MonsterMesh] TWDT init err=` — value tells us whether our init took (`0`) or Arduino beat us to it (`0x103`). Also grep for `TWDT add emu err=` and `TWDT add render err=`. If either add returned non-zero, TWDT isn't actually armed on those tasks and that explains the silence on hang.
-2. **If TWDT is confirmed armed but still doesn't fire on hang**, the render task is somehow still servicing its feed even while blitFrame hangs. Either lift `esp_task_wdt_reset()` out of the top of the loop and put it **before** each potentially-blocking call (spiLock acquire, LGFX writes) so the hang window gets bracketed, or add an explicit timeout to the render-side spiLock take.
-3. **Add a heartbeat `LOG_INFO` inside `blitFrame()` entry + exit** with a sequence counter. During a freeze, if we see only "enter #N" without "exit #N" appearing, the render task is stuck inside LGFX. If we see matching enter/exit continuing, the blit itself is fine and the freeze is upstream of it.
-4. **Instrument `spiLock`.** `src/concurrency/Lock.cpp` has simple FreeRTOS semaphore lock/unlock — add a global `volatile TaskHandle_t g_spiLockOwner` + `uint32_t g_spiLockTakenMs` that's set/cleared around the lock, and dump them from a 1 Hz LOG_INFO in `runOnce`. If someone is holding the lock for >1 s during a freeze we catch them.
-5. **Try disabling the BattleShim `tick()` call in `emuTaskLoop`.** `shim_.tick()` runs every frame while the emulator is active. Even though BattleShim is dormant without MML, the tick could still be touching mutexes or transport queues that interact badly. Commenting out one call is a 30-second test.
-6. **Rule out the framebuffer double-write race.** `scanlineCallback` on the emu task and `blitFrame()` on the render task both touch `frameBuf_` without a lock. Use `frameDirty_` as the only sync. It's racy but historically "works." If the race finally bites, you get a half-updated frame → maybe LVGL chokes on it.
+1. **Flash the post-b87 local diagnostic candidate and capture serial.** On ROM launch, grep for these exact markers:
+   - `[MonsterMesh] TWDT init err=.../0x... <name>`
+   - `[MonsterMesh] TWDT add emu handle=... err=.../0x... <name> armed=...`
+   - `[MonsterMesh] TWDT add render handle=... err=.../0x... <name> armed=...`
+   - `[MonsterMesh] WiFi disabled for foreground stability test`
+2. **Interpret the TWDT logs first.** `armed=1` on both tasks means TWDT is subscribed. `armed=0` or any non-OK add error means the watchdog is still not protecting that task, which explains silent hangs.
+3. **Then interpret the WiFi-off result.** If the emulator stops freezing while WiFi stays off, the cross-core pause source is likely the ESP32 WiFi driver path or WiFi-adjacent syslog/reconnect work. If the same `[hb] emu+0 blit+0 run+20` freeze still appears, WiFi is not the primary trigger and the next highest-signal move is flash coredumps.
+4. **Enable ESP-IDF coredump-to-flash if freezes continue.** The heartbeat shows `runOnce` keeps firing, but the device sometimes reboots; USB-CDC may miss the panic. A flash coredump gives a post-reboot artifact.
+5. **Try BLE off after WiFi is ruled out.** Same one-shot foreground latch idea, but leave this behind WiFi because BLE is usually quieter.
+6. **Inspect PowerFSM/light-sleep next.** Search for `esp_light_sleep_start()` and any power-management path that could pause both emulator cores while `runOnce` keeps ticking.
 
 ---
 
@@ -238,7 +242,27 @@ User reported **ALT no longer opens the ROM browser**. Serial log showed Meshtas
 
 Clean rollback of the WiFi change. Back to b85's behavior: flash-write suppression across LogRotate + NodeDB for both browser + emulator phases, plus everything b82–b85 added. Freeze still repros.
 
-### What we **know** after b76 — b87
+### b88 candidate: TWDT return detail + WiFi-off retry with `WifiConnect` gated
+
+This is the current local diagnostic candidate. Device result pending.
+
+Changes:
+
+- TWDT logs now print decimal + hex return codes, a short `esp_err_t` name, task handles, and an `armed=1/0` field for both emu and render subscriptions.
+- `runOnce()` still sets `g_mmSuppressFlashWrites` for `emulatorActive_ || browserActive_`, and now also uses the first foreground transition to disable WiFi with `WiFi.setAutoReconnect(false)`, `WiFi.disconnect(true, false)`, and `WiFi.mode(WIFI_OFF)`. The second `false` keeps saved AP credentials intact.
+- `src/mesh/wifi/WiFiAPClient.cpp` observes `g_mmSuppressFlashWrites` in both its reconnect timer and disconnect/lost-IP event paths, clears reconnect state, disables syslog, and refuses to bring WiFi back up while MonsterMesh owns the foreground.
+- Build determinism fix: `LovyanGFX` is pinned to `1.2.0` for T-Deck, and `bin/platformio-custom.py` overlays the tracked `patches/device-ui` files into the downloaded `meshtastic-device-ui` dependency. The overlay now includes `TFTView_320x240.h`, so a fresh dependency install gets the generated UI callbacks and declarations together.
+
+Build verification:
+
+```text
+/home/tpcopeland/.local/bin/pipx run platformio run -e t-deck-tft
+...
+[MonsterMesh] Applied 13 device-ui patch files
+t-deck-tft     SUCCESS   00:01:20.097
+```
+
+### What we **know** after b76 — b88 candidate
 
 - The freeze is **not** a MonsterMesh emu task stack / data bug (counter stops, no stack smash, no panic).
 - The freeze is **not** a MonsterMesh render task bug (render task isn't stuck — it just has nothing new to draw).
@@ -249,19 +273,20 @@ Clean rollback of the WiFi change. Back to b85's behavior: flash-write suppressi
 - The freeze is **not** `NodeDB::saveToDisk()` alone (b84).
 - The freeze is **not** any of the above combined (b85).
 - Disabling WiFi without taming `WifiConnect`'s reconnect loop breaks the UI (b86).
+- WiFi-off with `WifiConnect` gated is ready to test but not yet validated on hardware (b88 candidate).
 
 ### What's left to try
 
-1. **Capture a real panic.** The heartbeat shows `run+20` during freezes, which means `runOnce` (on Meshtastic's OSThread scheduler) keeps firing — but we also sometimes see the device reboot. The reset must be triggering some panic we're missing because the USB-CDC re-enumerates mid-dump. Enable ESP-IDF **coredump to flash** (`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y`). Next panic writes a full coredump; extract later with esptool. This is the highest-info signal we haven't gotten yet.
-2. **Verify TWDT is actually armed.** b75 logged `[MonsterMesh] TWDT init err=...` and `TWDT add emu err=...`. Confirm those are 0 or 0x103 on the current build. If `add` returned non-zero the watchdog isn't actually subscribed and that explains why no panic fires on a hang.
-3. **Kill WiFi without letting `WifiConnect` re-enable it.** Either (a) gate `WifiConnect::reconnect()` on the same `g_mmSuppressFlashWrites` flag, (b) turn off the WiFi admin feature at build time for emulator-stability, or (c) call `WiFi.mode(WIFI_OFF)` on every runOnce so Meshtastic's reconnect is defeated. If freezes disappear with WiFi truly off, WiFi driver is the cross-core pause source.
-4. **Try BLE off.** Same one-shot latch approach but for BLE. Worth trying only after WiFi because BLE is typically quieter.
-5. **Inspect PowerFSM for any `esp_light_sleep_start()` or `vTaskDelay`-style holds that span both cores.** Meshtastic's idle/light-sleep path is another cross-core culprit candidate.
-6. **`vTaskGetInfo()` inside the heartbeat** to dump the current task list with priorities + last-run-time. Would immediately show if a Meshtastic task jumped to high priority and starved our Core 1 task.
+1. **Run the b88 candidate on hardware.** Confirm the TWDT `armed=` fields and verify that WiFi does not reconnect after `[MonsterMesh] WiFi disabled for foreground stability test`.
+2. **Capture a real panic if b88 still freezes.** The heartbeat shows `run+20` during freezes, which means `runOnce` (on Meshtastic's OSThread scheduler) keeps firing — but we also sometimes see the device reboot. The reset must be triggering some panic we're missing because the USB-CDC re-enumerates mid-dump. Enable ESP-IDF **coredump to flash** (`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y`). Next panic writes a full coredump; extract later with esptool.
+3. **Try BLE off if WiFi is ruled out.** Same one-shot foreground latch idea, but leave this behind WiFi because BLE is typically quieter.
+4. **Inspect PowerFSM for any `esp_light_sleep_start()` or `vTaskDelay`-style holds that span both cores.** Meshtastic's idle/light-sleep path is another cross-core culprit candidate.
+5. **`vTaskGetInfo()` inside the heartbeat** to dump the current task list with priorities + last-run-time. Would immediately show if a Meshtastic task jumped to high priority and starved our Core 1 task.
 
 ### Commits on `emulator-stability` since b75 (newest first)
 
 ```
+b88  local      TWDT return detail + WiFi-off retry with WifiConnect gated  [DEVICE RESULT PENDING]
 b87  e3e4dc166  Revert WiFi disable — WifiConnect reconnect fought the latch, broke UI
 b86  188530c40  [REVERTED]  Disable WiFi during MonsterMesh foreground
 b85  861bcaeac  Suppress flash writes during ROM browser too
@@ -275,16 +300,18 @@ b78  b2ab17995  Revert "priority-inheriting Lock + tryLock + owner telemetry"
 b77              priority-inheriting Lock + tryLock + owner telemetry  [REVERTED in b78]
 ```
 
-### Key code anchors as of b87
+### Key code anchors as of b88 candidate
 
 - `src/modules/monstermesh/MonsterMeshModule.cpp`
   - Globals — `g_mmBlitCount` / `g_mmEmuCount` / `g_mmRunCount` / `g_mmSuppressFlashWrites`
-  - `runOnce` — keeps `g_mmSuppressFlashWrites` in sync with `emulatorActive_ || browserActive_`, runs the 1 Hz heartbeat, emits `STUCK=emu blit` when either counter stalls while the emulator is active.
+  - `runOnce` — keeps `g_mmSuppressFlashWrites` in sync with `emulatorActive_ || browserActive_`, disables WiFi once when MonsterMesh first goes foreground, runs the 1 Hz heartbeat, emits `STUCK=emu blit` when either counter stalls while the emulator is active.
   - `emuTaskLoop` — `esp_task_wdt_reset()` + `g_mmEmuCount++` per frame
   - `renderTaskLoop` — `esp_task_wdt_reset()` + `blitFrame()` per iteration
   - `blitFrame` — 4-chunk push under `spiLock` with `vTaskDelay(1)` between chunks, bumps `g_mmBlitCount` at exit
-  - Task creation block — `esp_task_wdt_init(10, true)` + `esp_task_wdt_add()` for both tasks, logs returns
-- `patches/device-ui/LogRotate.cpp` — `write()` early-returns when `g_mmSuppressFlashWrites`. Must be copied to `.pio/libdeps/t-deck-tft/meshtastic-device-ui/source/util/LogRotate.cpp` after edits.
+  - Task creation block — `esp_task_wdt_init(10, true)` + `esp_task_wdt_add()` for both tasks, logs return code/name, handle, and armed state
+- `src/mesh/wifi/WiFiAPClient.cpp` — reconnect timer and disconnect/lost-IP event paths bail out while `g_mmSuppressFlashWrites` is true.
+- `bin/platformio-custom.py::apply_device_ui_patches()` — overlays tracked `patches/device-ui` files into `.pio/libdeps/<env>/meshtastic-device-ui` at build time.
+- `patches/device-ui/LogRotate.cpp` — `write()` early-returns when `g_mmSuppressFlashWrites`.
 - `src/mesh/NodeDB.cpp::saveToDisk` — early-return when `g_mmSuppressFlashWrites`.
 
 ### Repro notes

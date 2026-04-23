@@ -13,9 +13,13 @@
 #include <SPI.h>
 #include <Wire.h>
 #include <SD.h>
+#if HAS_WIFI
+#include <WiFi.h>
+#endif
 #include "concurrency/LockGuard.h"
 #include "SPILock.h"
 #include <esp_task_wdt.h>
+#include <esp_err.h>
 
 #include "PowerFSM.h"
 #include "MonsterMeshAudio.h"
@@ -44,12 +48,13 @@ volatile uint32_t g_mmBlitCount  = 0;  // incremented at end of blitFrame
 volatile uint32_t g_mmEmuCount   = 0;  // incremented at end of each emu frame
 volatile uint32_t g_mmRunCount   = 0;  // incremented each runOnce (module task)
 
-// Set true while the emulator is active so Meshtastic's device-ui
-// LogRotate::write() skips persisting packets to LittleFS. ESP32 cache
-// disable during flash ops pauses both cores and manifests as a mid-
-// play freeze; skipping the writes avoids the pause. Declared extern
-// "C" so patches/device-ui/LogRotate.cpp can link against it.
-extern "C" volatile bool g_mmSuppressFlashWrites = false;
+// Set true while MonsterMesh is in the foreground. Device-ui LogRotate,
+// NodeDB saves, and WiFi reconnect diagnostics check this to avoid work
+// that can pause both ESP32 cores during ROM browsing or emulation.
+// Declared extern "C" so patched files can link against it.
+extern "C" {
+volatile bool g_mmSuppressFlashWrites = false;
+}
 
 // Set by the patched TFTView_320x240::notifyMessagesRestored() when
 // Meshtastic's device-ui finishes replaying persistent message history.
@@ -75,6 +80,18 @@ static lgfx::LGFX_Device *getGfx()
 {
     if (g_deviceUiLgfx) return g_deviceUiLgfx;
     return getLovyanGfx();
+}
+
+static const char *mmEspErrName(esp_err_t err)
+{
+    switch (err) {
+        case ESP_OK: return "OK";
+        case ESP_ERR_INVALID_STATE: return "INVALID_STATE";
+        case ESP_ERR_INVALID_ARG: return "INVALID_ARG";
+        case ESP_ERR_NO_MEM: return "NO_MEM";
+        case ESP_ERR_NOT_FOUND: return "NOT_FOUND";
+        default: return "UNKNOWN";
+    }
 }
 
 // Forward declarations for static helpers defined later in this file
@@ -571,12 +588,28 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
 
 int32_t MonsterMeshModule::runOnce()
 {
-    // Keep the flash-write suppression flag in sync with both emulator AND
-    // browser state. LogRotate::write() + NodeDB::saveToDisk() (both
-    // patched) check this flag and drop writes while MonsterMesh is in
-    // the foreground. ROM-loader freezes show the same cross-core pause
-    // as mid-play freezes, so the browser phase needs suppression too.
+    // Foreground session flag. LogRotate::write(), NodeDB::saveToDisk(), and
+    // WifiConnect diagnostics check this while MonsterMesh owns the UI.
+    // ROM-loader freezes show the same cross-core pause as mid-play freezes,
+    // so the browser phase needs the same treatment as the emulator.
     g_mmSuppressFlashWrites = emulatorActive_ || browserActive_;
+
+    // Disable WiFi once MonsterMesh goes foreground. b86 tried this directly,
+    // but WifiConnect's reconnect loop turned it back on; WiFiAPClient now
+    // observes g_mmSuppressFlashWrites and refuses reconnects while this flag
+    // is true. BLE remains available until reboot.
+    {
+        static bool wifiDisabledForSession = false;
+        if (!wifiDisabledForSession && g_mmSuppressFlashWrites) {
+            wifiDisabledForSession = true;
+#if HAS_WIFI
+            WiFi.setAutoReconnect(false);
+            WiFi.disconnect(true, false);
+            WiFi.mode(WIFI_OFF);
+#endif
+            LOG_INFO("[MonsterMesh] WiFi disabled for foreground stability test\n");
+        }
+    }
 
     // 1 Hz heartbeat comparing per-task counters against previous snapshot.
     // On a freeze: one counter stops advancing and the others keep going —
@@ -2038,7 +2071,8 @@ void MonsterMeshModule::launchROM(const char *path)
     // Arduino chose — we still get the panic behavior on hang.
     {
         esp_err_t twdt_err = esp_task_wdt_init(10, true);
-        LOG_INFO("[MonsterMesh] TWDT init err=%d (0=OK, 0x103=already)\n", (int)twdt_err);
+        LOG_INFO("[MonsterMesh] TWDT init err=%d/0x%X %s (0=OK, 0x103=already)\n",
+                 (int)twdt_err, (unsigned)twdt_err, mmEspErrName(twdt_err));
     }
 
     // Create emulator FreeRTOS task on Core 1 (high priority — never stalls).
@@ -2050,7 +2084,11 @@ void MonsterMeshModule::launchROM(const char *path)
             49152, this, 5, &emuTaskHandle_, 1
         );
         esp_err_t add_err = esp_task_wdt_add(emuTaskHandle_);
-        LOG_INFO("[MonsterMesh] TWDT add emu err=%d\n", (int)add_err);
+        LOG_INFO("[MonsterMesh] TWDT add emu handle=%p err=%d/0x%X %s armed=%d\n",
+                 emuTaskHandle_, (int)add_err, (unsigned)add_err, mmEspErrName(add_err),
+                 add_err == ESP_OK ? 1 : 0);
+    } else {
+        LOG_INFO("[MonsterMesh] TWDT add emu skipped existing handle=%p\n", emuTaskHandle_);
     }
 
     // Create render task on Core 0 (lower priority — blits framebuffer to TFT
@@ -2061,7 +2099,11 @@ void MonsterMeshModule::launchROM(const char *path)
             16384, this, 2, &renderTaskHandle_, 0
         );
         esp_err_t add_err = esp_task_wdt_add(renderTaskHandle_);
-        LOG_INFO("[MonsterMesh] TWDT add render err=%d\n", (int)add_err);
+        LOG_INFO("[MonsterMesh] TWDT add render handle=%p err=%d/0x%X %s armed=%d\n",
+                 renderTaskHandle_, (int)add_err, (unsigned)add_err, mmEspErrName(add_err),
+                 add_err == ESP_OK ? 1 : 0);
+    } else {
+        LOG_INFO("[MonsterMesh] TWDT add render skipped existing handle=%p\n", renderTaskHandle_);
     }
 
     // Set up LGFX for emulator rendering (LVGL flush already suppressed)
