@@ -391,8 +391,13 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
         }
 
         // ── Y/N reply: Person 2 sent Y or N DM to Person 1 ───────────────
-        if (len == 1 && (txt[0] == 'Y' || txt[0] == 'y' || txt[0] == 'N' || txt[0] == 'n')) {
-            bool accepted = (txt[0] == 'Y' || txt[0] == 'y');
+        // Accept short tokens: "y", "n", "yes", "no" (case-insensitive).
+        bool ynShort = (len == 1 && (txt[0] == 'Y' || txt[0] == 'y' ||
+                                      txt[0] == 'N' || txt[0] == 'n'));
+        bool ynYes   = (len <= 5 && (strstr(low, "yes") != nullptr));
+        bool ynNo    = (len <= 5 && (strstr(low, "no") == low));
+        if (ynShort || ynYes || ynNo) {
+            bool accepted = (ynShort && (txt[0] == 'Y' || txt[0] == 'y')) || ynYes;
             // MMT path — P2 (challenged) replied Y/N to P1's MMT:ON DM.
             // P1 (us) is the challenger; we're waiting for them.
             if (mmtWaitingForAcceptFrom_ != 0 && mp.from == mmtWaitingForAcceptFrom_) {
@@ -1079,11 +1084,9 @@ int32_t MonsterMeshModule::runOnce()
             }
         }
         if (!found) {
-            // Partner hasn't checked into daycare — fall back to mirror-match
-            // using our own party as the opponent so battle can still happen.
             LOG_INFO("[MonsterMesh] MMT: peer 0x%08X not in daycare, mirror-match\n",
                      (unsigned)partner);
-            oppParty = terminalParty_;  // cached from SAV
+            oppParty = terminalParty_;
             if (oppParty.count == 0) {
                 sendTextDM(nodeDB->getNodeNum(),
                            "MMT: need SAV party data — try `mmd in` first.");
@@ -1093,6 +1096,8 @@ int32_t MonsterMeshModule::runOnce()
             }
         }
         terminal_.receiveNetAccept(partner, seed, oppParty);
+        // DM both sides telling them to open the Terminal for turn input.
+        sendTextDM(partner, "Battle started! Open MM Terminal (Tools menu) to play.");
     }
     if (pendingMmtReject_ != 0 && terminal_.ready()) {
         terminal_.receiveNetReject(pendingMmtReject_);
