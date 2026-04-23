@@ -505,18 +505,32 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
         // the user already sees the prompt in their phone chat thread.
         if (strstr(low, "mmt:on") || strstr(low, "mmt on")) {
             if (mp.from == nodeDB->getNodeNum()) return ProcessMessage::CONTINUE;
-            // If the incoming DM already contains a human-readable prompt
-            // (terminal-sent challenges are long), don't add anything —
-            // the user already sees the Y/N instructions in their chat.
-            // If it's a bare "MMT:ON", send back a prompt to the challenger
-            // so THEY tell the user what to do (avoids self-DM crash).
-            if (len <= 15) {  // bare MMT:ON
-                char prompt[96];
-                snprintf(prompt, sizeof(prompt),
-                         "Tell [%s] to DM you 'Y' or 'N' to accept/decline.",
-                         getShortName(nodeDB->getNodeNum()));
-                sendTextDM(mp.from, prompt);
+            // Track challenger so our Y/N DM back to them resolves correctly.
+            mmtChallengerFrom_ = mp.from;
+            // Auto-ack back to challenger with "MMT:PENDING" so their firmware
+            // knows we're the one handling the challenge and can arm
+            // mmtWaitingForAcceptFrom_. This makes phone-initiated bare
+            // MMT:ON DMs work end-to-end (Red can't snoop its own outgoing,
+            // so Blue tells Red "I received it" explicitly).
+            pendingMmtPendingAckTo_ = mp.from;
+            // If it's a bare MMT:ON (phone DM, no prompt text), surface
+            // Y/N to our user via self-DM. Deferred for thread safety.
+            if (len <= 15) {
+                snprintf(pendingNeighborMsg_, sizeof(pendingNeighborMsg_),
+                         "[%s] wants a text battle! DM back 'Y' to accept or 'N' to decline.",
+                         getShortName(mp.from));
+                pendingNeighborMsgReady_ = true;
             }
+            return ProcessMessage::CONTINUE;
+        }
+
+        // ── MMT:PENDING — opponent acknowledged our MMT:ON ──────────────
+        // Arms mmtWaitingForAcceptFrom_ so a bare 'Y' DM from that peer
+        // resolves into MMT:ACCEPT (enables phone-initiated challenges).
+        if (strstr(low, "mmt:pending") && mp.from != nodeDB->getNodeNum()) {
+            mmtWaitingForAcceptFrom_ = mp.from;
+            LOG_INFO("[MonsterMesh] MMT:PENDING from 0x%08X — armed\n",
+                     (unsigned)mp.from);
             return ProcessMessage::CONTINUE;
         }
 
@@ -1104,6 +1118,11 @@ int32_t MonsterMeshModule::runOnce()
     if (pendingMmtActReady_ && terminal_.ready()) {
         terminal_.receiveNetAction(pendingMmtActType_, pendingMmtActIdx_);
         pendingMmtActReady_ = false;
+    }
+    if (pendingMmtPendingAckTo_ != 0) {
+        uint32_t to = pendingMmtPendingAckTo_;
+        pendingMmtPendingAckTo_ = 0;
+        sendTextDM(to, "MMT:PENDING");
     }
     // Deferred daycare notifications — safe to send DMs from OSThread
     if (pendingNeighborMsgReady_) {
