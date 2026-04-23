@@ -16,6 +16,12 @@
 // That's the "mid-play freeze" signature. The flag is defined in
 // MonsterMeshModule.cpp and kept in sync with emulatorActive_ || browserActive_.
 extern "C" volatile bool g_mmEmulatorActive;
+// Broader gate: stays true for the life of the MonsterMesh module. The
+// display powersave path (lgfx->sleep() + lgfx->powerSaveOn()) reconfigures
+// the shared SPI bus, which crashes the device whenever daycare, terminal,
+// or mesh traffic is mid-transfer. Keeping the inactivity timer poked means
+// powersave never fires.
+extern "C" volatile bool g_mmKeepAwake;
 
 constexpr uint32_t defaultLongPressTime = 600; // ms until long press is detected (lvgl default is 400)
 constexpr uint32_t defaultGestureLimit = 10;   // x/y diff pixel until a swipe gesture is detected (lvgl default is 50)
@@ -97,8 +103,9 @@ template <class LGFX> void LGFXDriver<LGFX>::task_handler(void)
     // inactivity timer reset so powersave never fires. (LVGL flushes are
     // paused during emu, so the inactivity timer would otherwise grow
     // without bound and powersave would stall the shared SPI bus.)
-    if (g_mmEmulatorActive) {
+    if (g_mmEmulatorActive || g_mmKeepAwake) {
         lv_display_trigger_activity(NULL);
+        return;  // skip powersave transition entirely while MonsterMesh owns display
     }
 
     // handle display timeout
