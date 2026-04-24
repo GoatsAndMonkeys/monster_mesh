@@ -858,10 +858,9 @@ int32_t MonsterMeshModule::runOnce()
         installKeyboardHook();
     }
 
-    // Keep PowerFSM awake while emulator or browser is active
-    if (emulatorActive_ || browserActive_) {
-        powerFSM.trigger(EVENT_INPUT);
-    }
+    // Sleep prevention handled by g_mmPreventSleep gate in PowerFSM.cpp.
+    // Firing EVENT_INPUT here every runOnce tick caused 20Hz "State: ON"
+    // spam (ON→ON re-entry), starving LVGL render and masking browser UI.
 
     // Re-suppress LVGL flush if emulator is active — screen sleep/wake
     // may restore the real flush callback behind our back.
