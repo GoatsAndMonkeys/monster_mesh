@@ -15,6 +15,11 @@
 #include "PortduinoGlue.h"
 #include "meshUtils.h"
 #endif
+
+// MonsterMesh foreground gate — defined in MonsterMeshModule.cpp.
+// Weak default keeps non-MonsterMesh builds linkable.
+extern "C" __attribute__((weak)) volatile bool g_mmSuppressFlashWrites = false;
+
 void LockingArduinoHal::spiBeginTransaction()
 {
     spiLock->lock();
@@ -170,6 +175,18 @@ ErrorCode RadioLibInterface::send(meshtastic_MeshPacket *p)
     if (p->to == NODENUM_BROADCAST_NO_LORA) {
         LOG_DEBUG("Drop no-LoRa pkt");
         return ERRNO_SHOULD_RELEASE;
+    }
+
+    // MonsterMesh foreground gate: while the emulator or ROM browser owns
+    // the shared SPI bus, a LoRa TX can block the mesh thread for ~45ms
+    // and collide with the render task mid-frame, which reliably crashes
+    // the device after ~30-90s of play. Drop packets silently here; the
+    // phone still sees them via BLE and we resume TX when MonsterMesh
+    // backgrounds. Matches LogRotate/NodeDB suppression pattern. The
+    // extern declaration lives at file scope (see top of this file).
+    if (g_mmSuppressFlashWrites) {
+        packetPool.release(p);
+        return ERRNO_DISABLED;
     }
 
     // Sometimes when testing it is useful to be able to never turn on the xmitter

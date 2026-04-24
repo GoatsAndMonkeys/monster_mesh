@@ -54,6 +54,13 @@ volatile uint32_t g_mmRunCount   = 0;  // incremented each runOnce (module task)
 // Declared extern "C" so patched files can link against it.
 extern "C" {
 volatile bool g_mmSuppressFlashWrites = false;
+// Module-lifetime flag: true once MonsterMeshModule has finished lazy-init
+// in runOnce(). PowerFSM lsEnter/nbEnter observe this and bounce straight
+// back to stateON via EVENT_INPUT — a low-power sleep transition while the
+// module is alive reconfigures LORA_DIO1 as a wakeup source and corrupts
+// the shared SPI bus mid-play. Scoped wider than g_mmSuppressFlashWrites
+// because the pre-ROM lsEnter fires before the user ever opens the emu.
+volatile bool g_mmPreventSleep = false;
 }
 
 // Broader powersave gate — stays true for the life of the module. Covers
@@ -61,6 +68,13 @@ volatile bool g_mmSuppressFlashWrites = false;
 // display powersave path (lgfx->sleep() + lgfx->powerSaveOn()) reconfigures
 // the shared SPI bus and crashes whenever SD/LoRa/TFT are mid-transfer.
 extern "C" volatile bool g_mmKeepAwake = false;
+
+// True only while the emulator/browser frame is actually being blitted —
+// patched LGFXDriver::task_handler early-returns when this is set so LVGL
+// doesn't draw over the emulator framebuffer. Distinct from g_mmKeepAwake
+// (which is module-lifetime) because drawing should resume when the user
+// returns to the Meshtastic UI.
+extern "C" volatile bool g_mmEmulatorActive = false;
 
 // Set by the patched TFTView_320x240::notifyMessagesRestored() when
 // Meshtastic's device-ui finishes replaying persistent message history.
@@ -599,6 +613,7 @@ int32_t MonsterMeshModule::runOnce()
     // ROM-loader freezes show the same cross-core pause as mid-play freezes,
     // so the browser phase needs the same treatment as the emulator.
     g_mmSuppressFlashWrites = emulatorActive_ || browserActive_;
+    g_mmEmulatorActive      = emulatorActive_ || browserActive_;
 
     // Disable WiFi once MonsterMesh goes foreground. b86 tried this directly,
     // but WifiConnect's reconnect loop turned it back on; WiFiAPClient now
@@ -761,7 +776,9 @@ int32_t MonsterMeshModule::runOnce()
         emu_.setScanlineCallback(scanlineCallback, this);
 
         setupDone_ = true;
-        g_mmKeepAwake = true;  // block display powersave for the life of the module
+        g_mmKeepAwake = true;    // block display powersave for the life of the module
+        g_mmPreventSleep = true; // block PowerFSM LS/NB transitions for the life of the module
+        LOG_INFO("[MonsterMesh] g_mmKeepAwake + g_mmPreventSleep armed\n");
 
         // Keyboard hook installed early (at 1s) via kbObserverRegistered_ path above.
         // Re-install the LVGL hook here in case LVGL wasn't ready at 1s.

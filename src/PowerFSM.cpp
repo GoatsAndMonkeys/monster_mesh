@@ -26,6 +26,15 @@
 #ifndef SLEEP_TIME
 #define SLEEP_TIME 30
 #endif
+
+// MonsterMesh foreground guard. When MonsterMeshModule finishes lazy-init
+// it flips this to true; lsEnter/nbEnter observe it and bounce back to
+// stateON via EVENT_INPUT. Low-power sleep reconfigures LORA_DIO1 as a
+// wakeup source, which corrupts the shared SPI bus mid-play and hangs
+// the device. Weak default keeps non-MonsterMesh builds linkable.
+extern "C" {
+__attribute__((weak)) volatile bool g_mmPreventSleep = false;
+}
 #if MESHTASTIC_EXCLUDE_POWER_FSM
 FakeFsm powerFSM;
 void PowerFSM_setup(){};
@@ -81,6 +90,11 @@ static uint32_t secsSlept;
 
 static void lsEnter()
 {
+    if (g_mmPreventSleep) {
+        LOG_INFO("lsEnter suppressed — MonsterMesh foreground");
+        powerFSM.trigger(EVENT_INPUT);
+        return;
+    }
     LOG_INFO("lsEnter begin, ls_secs=%u", config.power.ls_secs);
     if (screen)
         screen->setOn(false);
@@ -160,6 +174,11 @@ static void lsExit()
 
 static void nbEnter()
 {
+    if (g_mmPreventSleep) {
+        LOG_INFO("nbEnter suppressed — MonsterMesh foreground");
+        powerFSM.trigger(EVENT_INPUT);
+        return;
+    }
     LOG_DEBUG("State: NB");
     if (screen)
         screen->setOn(false);
