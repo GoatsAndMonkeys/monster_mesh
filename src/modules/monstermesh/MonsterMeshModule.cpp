@@ -69,11 +69,14 @@ volatile bool g_mmPreventSleep = false;
 // the shared SPI bus and crashes whenever SD/LoRa/TFT are mid-transfer.
 extern "C" volatile bool g_mmKeepAwake = false;
 
-// True only while the emulator/browser frame is actually being blitted —
-// patched LGFXDriver::task_handler early-returns when this is set so LVGL
-// doesn't draw over the emulator framebuffer. Distinct from g_mmKeepAwake
-// (which is module-lifetime) because drawing should resume when the user
-// returns to the Meshtastic UI.
+// True ONLY while the emulator frame is being blitted — patched
+// LGFXDriver::task_handler early-returns when this is set so LVGL doesn't
+// draw over the emulator framebuffer. Must NOT be set during the browser
+// because the browser draws through LVGL; early-returning task_handler in
+// browser mode leaves lv_task_handler un-pumped and the browser screen
+// never renders (user sees a frozen display while runOnce keeps heart-
+// beating). Distinct from g_mmKeepAwake (module-lifetime) because drawing
+// should resume when the user returns to the Meshtastic UI.
 extern "C" volatile bool g_mmEmulatorActive = false;
 
 // Set by the patched TFTView_320x240::notifyMessagesRestored() when
@@ -613,7 +616,10 @@ int32_t MonsterMeshModule::runOnce()
     // ROM-loader freezes show the same cross-core pause as mid-play freezes,
     // so the browser phase needs the same treatment as the emulator.
     g_mmSuppressFlashWrites = emulatorActive_ || browserActive_;
-    g_mmEmulatorActive      = emulatorActive_ || browserActive_;
+    // NOTE: g_mmEmulatorActive must NOT include browserActive_ — the browser
+    // draws through LVGL, and the patched LGFXDriver::task_handler
+    // early-returns whenever this flag is true, leaving LVGL un-pumped.
+    g_mmEmulatorActive      = emulatorActive_;
 
     // Disable WiFi once MonsterMesh goes foreground. b86 tried this directly,
     // but WifiConnect's reconnect loop turned it back on; WiFiAPClient now
