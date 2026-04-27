@@ -139,8 +139,15 @@ bool RadioLibInterface::receiveDetected(uint16_t irq, ulong syncWordHeaderValidF
 /// Send a packet (possibly by enquing in a private fifo).  This routine will
 /// later free() the packet to pool.  This routine is not allowed to stall because it is called from
 /// bluetooth comms code.  If the txmit queue is empty it might return an error
+extern "C" __attribute__((weak)) volatile bool g_mmEmulatorActive = false;
+
 ErrorCode RadioLibInterface::send(meshtastic_MeshPacket *p)
 {
+    if (g_mmEmulatorActive) {
+        LOG_DEBUG("MM gate: drop TX (portnum=%u)", p->decoded.portnum);
+        packetPool.release(p);
+        return ERRNO_DISABLED;
+    }
 
 #ifndef DISABLE_WELCOME_UNSET
 

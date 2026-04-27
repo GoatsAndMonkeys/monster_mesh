@@ -7,6 +7,15 @@
 #include <stdio.h>
 #include <sys/stat.h>
 
+// Bus-park: force the OTHER two devices' CS HIGH before an SD op. Catches the
+// case where a prior aborted SPI transaction left LORA_CS or TFT_CS stuck LOW —
+// which would otherwise let two chips listen to the same SD command and corrupt
+// the read. Cheap (3 GPIO writes); call inside the spiLock guard.
+static inline void mm_park_bus_for_sd() {
+    pinMode(LORA_CS, OUTPUT); digitalWrite(LORA_CS, HIGH);
+    pinMode(TFT_CS,  OUTPUT); digitalWrite(TFT_CS,  HIGH);
+}
+
 // peanut_gb.h is a single-header library with all function bodies inline.
 // It MUST only be included in this one translation unit.
 // audio_read() and audio_write() are defined in MonsterMeshAudio.cpp
@@ -208,6 +217,7 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
 
     // SD shares SPI bus with radio — hold spiLock for the duration
     concurrency::LockGuard g(spiLock);
+    mm_park_bus_for_sd();
 
     // Try opening the file directly first — SD is already initialized by the browser.
     // Avoid SD.end()/SPI.begin()/SD.begin() here: the map tile loader accesses SD
@@ -241,6 +251,23 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
                 entry = dir.openNextFile();
             }
             dir.close();
+        }
+    }
+    if (!f) {
+        // SD bus may be in a stale state (prior crash / shared-SPI contention).
+        // Re-init under spiLock and retry. Same pattern as writeSaveFile().
+        Serial.printf("[EMU] open failed on all paths, re-initing SD\n");
+        SD.end();
+        delay(20);
+        mm_park_bus_for_sd();
+        SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+        if (SD.begin(SDCARD_CS, SPI, 4000000U)) {
+            Serial.printf("[EMU] SD re-init OK, retrying open\n");
+            f = SD.open(sdPath, FILE_READ);
+            if (!f) f = SD.open(path, FILE_READ);
+            Serial.printf("[EMU] post-reinit open = %d\n", (int)(bool)f);
+        } else {
+            Serial.printf("[EMU] SD re-init failed\n");
         }
     }
     if (!f) {
@@ -324,6 +351,7 @@ void MonsterMeshEmulator::writeSaveFile(const char *romPath) {
 
     // SD shares SPI bus — reinit before access
     concurrency::LockGuard g(spiLock);
+    mm_park_bus_for_sd();
     SD.end();
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
     if (!SD.begin(SDCARD_CS, SPI)) {

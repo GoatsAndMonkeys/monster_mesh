@@ -45,6 +45,13 @@ MonsterMeshModule *monsterMeshModule = nullptr;
 // powersave" immediately before the mid-play freeze.
 extern "C" volatile bool g_mmEmulatorActive = false;
 
+// Set true at end of MonsterMeshModule::setup() and never cleared. Read by
+// PowerFSM lsEnter()/nbEnter() to refuse light/normal-sleep transitions while
+// the module is alive — sleep on T-Deck stalls the shared SPI bus and crashes
+// emu/SD/LoRa. Module-lifetime gate (NOT scoped to emu/browser) because the
+// pre-ROM PowerFSM crash signature occurred before the user ever opened MM.
+extern "C" volatile bool g_mmPreventSleep = false;
+
 // Set by the patched TFTView_320x240::notifyMessagesRestored — blocks
 // MonsterMesh from opening the ROM browser until Meshtastic's phone-sync
 // message history replay completes. Opening earlier races the LVGL state
@@ -698,6 +705,14 @@ int32_t MonsterMeshModule::runOnce()
         bool sdOk = false;
         {
             concurrency::LockGuard g(spiLock);
+            // SPI bus hygiene: park all three CS lines HIGH before SPI.begin().
+            // T-Deck shares MOSI/MISO/SCK across TFT/SD/LoRa — if any CS floats LOW
+            // at boot or after a reset, that chip listens to traffic meant for the
+            // others and gets stuck in a bad state. Driving CS HIGH first guarantees
+            // bus quiet before SD probes the card.
+            pinMode(LORA_CS, OUTPUT);    digitalWrite(LORA_CS, HIGH);
+            pinMode(TFT_CS, OUTPUT);     digitalWrite(TFT_CS, HIGH);
+            pinMode(SDCARD_CS, OUTPUT);  digitalWrite(SDCARD_CS, HIGH);
             SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
             sdOk = SD.begin(SDCARD_CS, SPI, 4000000U);
         }
@@ -726,6 +741,10 @@ int32_t MonsterMeshModule::runOnce()
         emu_.setScanlineCallback(scanlineCallback, this);
 
         setupDone_ = true;
+        // Module fully alive — block PowerFSM sleep transitions for the rest
+        // of runtime (cleared only on shutdown).
+        g_mmPreventSleep = true;
+        LOG_INFO("[MonsterMesh] g_mmPreventSleep=1 (module live)\n");
 
         // Keyboard hook installed early (at 1s) via kbObserverRegistered_ path above.
         // Re-install the LVGL hook here in case LVGL wasn't ready at 1s.
