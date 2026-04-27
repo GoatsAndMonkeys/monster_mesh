@@ -1715,7 +1715,6 @@ void MonsterMeshModule::emuTaskLoop()
 {
     const TickType_t framePeriod = pdMS_TO_TICKS(16);  // ~60fps
     TickType_t lastWake = xTaskGetTickCount();
-    uint8_t frameCount = 0;
 
     while (true) {
         // Skip emulation if ROM was ejected — task stays alive for reuse
@@ -1725,14 +1724,9 @@ void MonsterMeshModule::emuTaskLoop()
             continue;
         }
 
-        // Write to framebuffer every 3rd frame — render task blits to TFT separately
-        frameCount++;
-        renderFrame_ = (emulatorActive_ && frameCount >= 3);
+        // Render every emulator frame at 60fps — render task blits to TFT separately
+        renderFrame_ = emulatorActive_;
         emu_.runFrame();
-        if (renderFrame_) {
-            frameCount = 0;
-            // frameDirty_ is set by scanlineCallback — render task picks it up
-        }
         renderFrame_ = false;
 
         // BattleShim tick disabled — cable-club feature neutralized;
@@ -1835,8 +1829,8 @@ void MonsterMeshModule::renderTaskLoop()
         if (emulatorActive_ && frameDirty_) {
             blitFrame();
         }
-        // ~30fps render rate — emulator runs at 60fps independently
-        vTaskDelay(pdMS_TO_TICKS(33));
+        // ~60fps render rate — matches emulator
+        vTaskDelay(pdMS_TO_TICKS(16));
     }
 }
 
