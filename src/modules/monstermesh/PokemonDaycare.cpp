@@ -3,6 +3,7 @@
 
 #include "PokemonDaycare.h"
 #include "DaycareData.h"
+#include "FSCommon.h"
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
@@ -559,21 +560,23 @@ bool PokemonDaycare::isNight() const {
     return (h < sunriseHour || h >= sunsetHour);
 }
 
-// ── Save / Load (LittleFS stubs) ────────────────────────────────────────────
-// Real implementation will use FSCom.open("/daycare/state.dat", FILE_O_WRITE)
-// For now, stubs that return true.
+// ── Save / Load (LittleFS via FSCom) ────────────────────────────────────────
+
+static constexpr const char *DAYCARE_STATE_PATH = "/monstermesh/daycare.dat";
 
 bool PokemonDaycare::saveState() {
-    // TODO: FSCom.open("/daycare/state.dat", FILE_O_WRITE)
-    //       f.write((uint8_t*)&state_, sizeof(state_))
-    //       f.close()
-    return true;
+    FSCom.mkdir("/monstermesh");
+    auto f = FSCom.open(DAYCARE_STATE_PATH, FILE_O_WRITE);
+    if (!f) return false;
+    size_t written = f.write(reinterpret_cast<const uint8_t *>(&state_), sizeof(state_));
+    f.close();
+    return written == sizeof(state_);
 }
 
 bool PokemonDaycare::loadState() {
-    // TODO: FSCom.open("/daycare/state.dat", FILE_O_READ)
-    //       f.read((uint8_t*)&state_, sizeof(state_))
-    //       f.close()
-    //       return state_.magic == DaycareState::MAGIC
-    return false;  // no saved state yet
+    auto f = FSCom.open(DAYCARE_STATE_PATH, FILE_O_READ);
+    if (!f) return false;
+    size_t read = f.read(reinterpret_cast<uint8_t *>(&state_), sizeof(state_));
+    f.close();
+    return read == sizeof(state_) && state_.magic == DaycareState::MAGIC;
 }

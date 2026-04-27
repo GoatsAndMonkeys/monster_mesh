@@ -1028,6 +1028,14 @@ int32_t MonsterMeshModule::runOnce()
         }
     }
 
+    // Lobby tick — only in Meshtastic mode (not while emu/browser active).
+    // Beacons player presence for matchmaking and expires stale peers.
+    // Self-gates on lobby state (CLOSED → no-op) so this is cheap when the
+    // lobby UI isn't open.
+    if (!emulatorActive_ && !browserActive_) {
+        lobby_.tick(millis());
+    }
+
     // Daycare tick — only in Meshtastic mode (not while emu/browser active).
     // Generates events every 5 min, sends beacons, autosaves. Skipping it
     // during ROM play prevents background mesh/SD work from competing with
