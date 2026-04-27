@@ -537,14 +537,37 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             return ProcessMessage::CONTINUE;
         }
 
-        // ── MMT:ACT:<type>:<index> — opponent's battle action, defer ────
+        // ── MMT:ACT:<type>:<index>[:<seq>] — opponent's battle action ───
+        // Always reply MMT:ACK:<seq> on receipt (handled by runOnce).
+        // Dedupe by seq so a duplicate retransmit doesn't double-apply.
         if (strncmp(low, "mmt:act:", 8) == 0 && mp.from != nodeDB->getNodeNum()) {
             uint8_t act = (uint8_t)strtoul(low + 8, nullptr, 10);
-            const char *colon = strchr(low + 8, ':');
-            uint8_t idx = colon ? (uint8_t)strtoul(colon + 1, nullptr, 10) : 0;
-            pendingMmtActType_ = act;
-            pendingMmtActIdx_  = idx;
-            pendingMmtActReady_ = true;
+            const char *p1 = strchr(low + 8, ':');
+            uint8_t idx = p1 ? (uint8_t)strtoul(p1 + 1, nullptr, 10) : 0;
+            const char *p2 = p1 ? strchr(p1 + 1, ':') : nullptr;
+            uint8_t seq = p2 ? (uint8_t)strtoul(p2 + 1, nullptr, 10) : 0;
+            pendingMmtActSeq_ = seq;
+            pendingMmtActFrom_ = mp.from;
+            // Process only if this is a new seq (idempotency for retransmits)
+            if (seq != mmtActLastRxSeq_) {
+                pendingMmtActType_ = act;
+                pendingMmtActIdx_  = idx;
+                pendingMmtActReady_ = true;
+                mmtActLastRxSeq_ = seq;
+            } else {
+                LOG_INFO("[MonsterMesh] MMT:ACT dup seq=%u, ACK only\n", (unsigned)seq);
+            }
+            return ProcessMessage::CONTINUE;
+        }
+
+        // ── MMT:ACK:<seq> — partner confirmed our move was processed ────
+        if (strncmp(low, "mmt:ack:", 8) == 0 && mp.from != nodeDB->getNodeNum()) {
+            uint8_t seq = (uint8_t)strtoul(low + 8, nullptr, 10);
+            if (mmtActOutPending_ && seq == mmtActOutSeq_ &&
+                mp.from == mmtActOutPartner_) {
+                LOG_INFO("[MonsterMesh] MMT:ACK seq=%u — move confirmed\n", (unsigned)seq);
+                mmtActOutPending_ = false;
+            }
             return ProcessMessage::CONTINUE;
         }
 
@@ -797,14 +820,52 @@ int32_t MonsterMeshModule::runOnce()
             terminal_.clearPendingDM();
         }
 
-        // Drain live PvP action
-        if (terminal_.hasNetAction() && terminal_.netPartnerNodeId() != 0) {
-            char act[16];
-            snprintf(act, sizeof(act), "MMT:ACT:%u:%u",
-                     (unsigned)terminal_.netAction(),
-                     (unsigned)terminal_.netIndex());
-            sendTextDM(terminal_.netPartnerNodeId(), act);
+        // Drain live PvP action — send MMT:ACT with sequence number, retain
+        // for retry until partner responds with MMT:ACK:<seq>.
+        if (!mmtActOutPending_ && terminal_.hasNetAction() &&
+            terminal_.netPartnerNodeId() != 0) {
+            mmtActOutSeq_++;
+            mmtActOutType_    = terminal_.netAction();
+            mmtActOutIdx_     = terminal_.netIndex();
+            mmtActOutPartner_ = terminal_.netPartnerNodeId();
+            mmtActOutRetries_ = 0;
+            mmtActOutLastTxMs_ = millis();
+            mmtActOutPending_ = true;
+            char act[24];
+            snprintf(act, sizeof(act), "MMT:ACT:%u:%u:%u",
+                     (unsigned)mmtActOutType_,
+                     (unsigned)mmtActOutIdx_,
+                     (unsigned)mmtActOutSeq_);
+            sendTextDM(mmtActOutPartner_, act);
             terminal_.clearNetAction();
+        }
+        // Retry outbound MMT:ACT every 5s up to 3 times if no MMT:ACK arrives
+        if (mmtActOutPending_ &&
+            (millis() - mmtActOutLastTxMs_) > 5000) {
+            if (mmtActOutRetries_ >= 3) {
+                LOG_WARN("[MonsterMesh] MMT:ACT seq=%u — no ACK after 3 retries\n",
+                         (unsigned)mmtActOutSeq_);
+                mmtActOutPending_ = false;
+                pendingMmtReject_ = mmtActOutPartner_;  // surface as "trainer fled"
+            } else {
+                mmtActOutRetries_++;
+                mmtActOutLastTxMs_ = millis();
+                char act[24];
+                snprintf(act, sizeof(act), "MMT:ACT:%u:%u:%u",
+                         (unsigned)mmtActOutType_,
+                         (unsigned)mmtActOutIdx_,
+                         (unsigned)mmtActOutSeq_);
+                LOG_INFO("[MonsterMesh] MMT:ACT seq=%u retry %u\n",
+                         (unsigned)mmtActOutSeq_, (unsigned)mmtActOutRetries_);
+                sendTextDM(mmtActOutPartner_, act);
+            }
+        }
+        // Drain pending MMT:ACK reply (set by handleReceived on MMT:ACT)
+        if (pendingMmtActFrom_ != 0) {
+            char ack[16];
+            snprintf(ack, sizeof(ack), "MMT:ACK:%u", (unsigned)pendingMmtActSeq_);
+            sendTextDM(pendingMmtActFrom_, ack);
+            pendingMmtActFrom_ = 0;
         }
 
         // Drain net challenge — send targeted DM with human text + MMT:ON signal
@@ -1070,6 +1131,12 @@ int32_t MonsterMeshModule::runOnce()
         uint32_t seed    = pendingMmtStartSeed_;
         pendingMmtStartPartner_ = 0;
         pendingMmtStartSeed_    = 0;
+        // Reset MMT:ACT seq state for fresh battle so seq numbers don't
+        // collide with leftovers from a previous match.
+        mmtActOutSeq_       = 0;
+        mmtActOutPending_   = false;
+        mmtActLastRxSeq_    = 0xFF;
+        pendingMmtActFrom_  = 0;
         Gen1Party oppParty{};
         bool found = false;
         const DaycareNeighborPokemon *peers = daycare_.getNeighbors();

@@ -144,6 +144,17 @@ private:
     uint8_t  pendingMmtActType_      = 0;
     uint8_t  pendingMmtActIdx_       = 0;
     bool     pendingMmtActReady_     = false;
+    uint8_t  pendingMmtActSeq_       = 0;     // seq of last received MMT:ACT (for ACK reply)
+    uint32_t pendingMmtActFrom_      = 0;     // sender of last received MMT:ACT
+    uint8_t  mmtActLastRxSeq_        = 0xFF;  // last processed inbound seq (0xFF = none)
+    // Outgoing MMT:ACT retry state
+    bool     mmtActOutPending_       = false; // true = awaiting MMT:ACK from partner
+    uint8_t  mmtActOutSeq_           = 0;     // seq of last sent MMT:ACT
+    uint8_t  mmtActOutType_          = 0;
+    uint8_t  mmtActOutIdx_           = 0;
+    uint32_t mmtActOutPartner_       = 0;
+    uint32_t mmtActOutLastTxMs_      = 0;
+    uint8_t  mmtActOutRetries_       = 0;
     // Deferred daycare notifications (self-DM from mesh receive thread crashed)
     char     pendingNeighborMsg_[96] = {};
     bool     pendingNeighborMsgReady_ = false;
