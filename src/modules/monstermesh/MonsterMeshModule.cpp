@@ -2274,8 +2274,10 @@ void MonsterMeshModule::launchROM(const char *path)
         }
         const char *shortName = getShortName(nodeDB->getNodeNum());
         daycare_.checkIn(sram, shortName, gameName);
-        daycare_.forceBeacon();
-        LOG_INFO("[MonsterMesh] daycare auto-checked in: trainer='%s' party=%d, beacon sent\n",
+        // forceBeacon() omitted — TX while ROM is still loading/SD-busy can
+        // collide with NodeInfo/PacketAPI early-boot traffic and reset the
+        // device. The periodic beacon timer will broadcast normally.
+        LOG_INFO("[MonsterMesh] daycare auto-checked in: trainer='%s' party=%d\n",
                  gameName, daycare_.getState().partyCount);
     }
 }
@@ -2454,11 +2456,9 @@ void MonsterMeshModule::daycareAutoCheckIn()
     if (daycare_.isActive()) {
         const auto &state = daycare_.getState();
         LOG_INFO("[MonsterMesh] auto-daycare: %d pokemon checked in\n", state.partyCount);
-        daycare_.forceBeacon();
-        // Skip firing an event DM during boot — firing sendTextDM here before
-        // BLE/Meshtastic services are fully ready was crashing the device
-        // (reboot at ~11s). The regular daycare timer will fire events later.
-        LOG_INFO("[MonsterMesh] auto-daycare: beacon sent, skipping boot-time event DM\n");
+        // Boot-time forceBeacon() removed — the LoRa TX during the early-boot
+        // PacketAPI/NodeInfo window was causing a clean reset (~11s in).
+        // The daycare's periodic beacon timer will broadcast on its own cadence.
         setupStatus_ = "Daycare active";
     }
 }
