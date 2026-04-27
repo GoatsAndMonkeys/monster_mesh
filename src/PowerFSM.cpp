@@ -79,8 +79,15 @@ static void shutdownEnter()
 
 static uint32_t secsSlept;
 
+extern "C" __attribute__((weak)) volatile bool g_mmPreventSleep = false;
+
 static void lsEnter()
 {
+    if (g_mmPreventSleep) {
+        LOG_DEBUG("MM gate: refuse lsEnter while module active");
+        powerFSM.trigger(EVENT_INPUT);
+        return;
+    }
     LOG_INFO("lsEnter begin, ls_secs=%u", config.power.ls_secs);
     if (screen)
         screen->setOn(false);
@@ -160,6 +167,11 @@ static void lsExit()
 
 static void nbEnter()
 {
+    if (g_mmPreventSleep) {
+        LOG_DEBUG("MM gate: refuse nbEnter while module active");
+        powerFSM.trigger(EVENT_INPUT);
+        return;
+    }
     LOG_DEBUG("State: NB");
     if (screen)
         screen->setOn(false);

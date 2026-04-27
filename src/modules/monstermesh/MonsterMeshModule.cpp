@@ -45,6 +45,13 @@ MonsterMeshModule *monsterMeshModule = nullptr;
 // powersave" immediately before the mid-play freeze.
 extern "C" volatile bool g_mmEmulatorActive = false;
 
+// Set true at end of MonsterMeshModule::setup() and never cleared. Read by
+// PowerFSM lsEnter()/nbEnter() to refuse light/normal-sleep transitions while
+// the module is alive — sleep on T-Deck stalls the shared SPI bus and crashes
+// emu/SD/LoRa. Module-lifetime gate (NOT scoped to emu/browser) because the
+// pre-ROM PowerFSM crash signature occurred before the user ever opened MM.
+extern "C" volatile bool g_mmPreventSleep = false;
+
 // Set by the patched TFTView_320x240::notifyMessagesRestored — blocks
 // MonsterMesh from opening the ROM browser until Meshtastic's phone-sync
 // message history replay completes. Opening earlier races the LVGL state
@@ -698,6 +705,14 @@ int32_t MonsterMeshModule::runOnce()
         bool sdOk = false;
         {
             concurrency::LockGuard g(spiLock);
+            // SPI bus hygiene: park all three CS lines HIGH before SPI.begin().
+            // T-Deck shares MOSI/MISO/SCK across TFT/SD/LoRa — if any CS floats LOW
+            // at boot or after a reset, that chip listens to traffic meant for the
+            // others and gets stuck in a bad state. Driving CS HIGH first guarantees
+            // bus quiet before SD probes the card.
+            pinMode(LORA_CS, OUTPUT);    digitalWrite(LORA_CS, HIGH);
+            pinMode(TFT_CS, OUTPUT);     digitalWrite(TFT_CS, HIGH);
+            pinMode(SDCARD_CS, OUTPUT);  digitalWrite(SDCARD_CS, HIGH);
             SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
             sdOk = SD.begin(SDCARD_CS, SPI, 4000000U);
         }
@@ -726,6 +741,10 @@ int32_t MonsterMeshModule::runOnce()
         emu_.setScanlineCallback(scanlineCallback, this);
 
         setupDone_ = true;
+        // Module fully alive — block PowerFSM sleep transitions for the rest
+        // of runtime (cleared only on shutdown).
+        g_mmPreventSleep = true;
+        LOG_INFO("[MonsterMesh] g_mmPreventSleep=1 (module live)\n");
 
         // Keyboard hook installed early (at 1s) via kbObserverRegistered_ path above.
         // Re-install the LVGL hook here in case LVGL wasn't ready at 1s.
@@ -1411,33 +1430,40 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
     }
 
     // ── Pass-through when MonsterMesh is not active ───────────────────────
-    // Peek at RAW bytes to detect bare ALT press (toggle to MonsterMesh).
-    // Switch MCU to RAW, read 5 bytes, switch back to KEY — then pass through.
+    // Peek at RAW bytes to detect bare ALT press (toggle to MonsterMesh), but
+    // throttle the RAW-mode toggle to once per ~150 ms. Doing it every LVGL
+    // tick (~30 ms) corrupts the keyboard MCU's key buffer — every user press
+    // lands in the brief RAW-or-transitioning window and gets eaten, leaving
+    // Meshtastic mode unable to receive any keys.
     if (!mmActive) {
-        Wire.beginTransmission(0x55);
-        Wire.write(0x03);  // RAW mode
-        Wire.endTransmission();
-        Wire.requestFrom((uint8_t)0x55, (uint8_t)5);
-        uint8_t rb[5] = {};
-        for (int i = 0; i < 5 && Wire.available(); i++) rb[i] = Wire.read();
-        Wire.beginTransmission(0x55);
-        Wire.write(0x04);  // back to KEY mode
-        Wire.endTransmission();
-        g_rawMode = false;
+        static uint32_t lastAltPeekMs = 0;
+        uint32_t nowMs = millis();
+        if (nowMs - lastAltPeekMs >= 150) {
+            lastAltPeekMs = nowMs;
+            Wire.beginTransmission(0x55);
+            Wire.write(0x03);  // RAW mode
+            Wire.endTransmission();
+            Wire.requestFrom((uint8_t)0x55, (uint8_t)5);
+            uint8_t rb[5] = {};
+            for (int i = 0; i < 5 && Wire.available(); i++) rb[i] = Wire.read();
+            Wire.beginTransmission(0x55);
+            Wire.write(0x04);  // back to KEY mode
+            Wire.endTransmission();
+            g_rawMode = false;
 
-        bool altNow = (rb[0] & 0x10) != 0;
-        bool symNow = (rb[0] & 0x04) != 0;
-        if (altNow && !g_altWasHeldKey) {
-            g_altWasHeldKey = true;
-            uint32_t now = millis();
-            if (now - g_micLastToggleMs > 600 && monsterMeshModule) {
-                g_micLastToggleMs = now;
-                // Sym+Alt → 0x06 (file browser), Alt alone → 0x05
-                monsterMeshModule->handleKeyFromLVGL(symNow ? 0x06 : 0x05);
-                return;  // consumed — don't pass KEY event through
+            bool altNow = (rb[0] & 0x10) != 0;
+            bool symNow = (rb[0] & 0x04) != 0;
+            if (altNow && !g_altWasHeldKey) {
+                g_altWasHeldKey = true;
+                if (nowMs - g_micLastToggleMs > 600 && monsterMeshModule) {
+                    g_micLastToggleMs = nowMs;
+                    // Sym+Alt → 0x06 (file browser), Alt alone → 0x05
+                    monsterMeshModule->handleKeyFromLVGL(symNow ? 0x06 : 0x05);
+                    return;  // consumed — don't pass KEY event through
+                }
             }
+            if (!altNow) g_altWasHeldKey = false;
         }
-        if (!altNow) g_altWasHeldKey = false;
 
         if (g_savedKbReadCb) g_savedKbReadCb(indev, data);
         return;
@@ -1522,6 +1548,40 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
         }
         // LVGL gets nothing while emulator is active
         return;
+    }
+
+    // ── Bare-ALT detection in browser (KEY mode) ─────────────────────────
+    // Browser uses KEY mode for char-based navigation, but the MCU never sends
+    // anything for bare ALT in KEY mode (only ALT+letter produces a byte).
+    // Throttled RAW peek (150 ms) lets the user exit the browser with ALT alone.
+    if (monsterMeshModule && monsterMeshModule->isBrowserActive()) {
+        static uint32_t lastBrowserAltPeekMs = 0;
+        static bool browserAltWasHeld = false;
+        uint32_t nowMs = millis();
+        if (nowMs - lastBrowserAltPeekMs >= 150) {
+            lastBrowserAltPeekMs = nowMs;
+            Wire.beginTransmission(0x55);
+            Wire.write(0x03);  // RAW mode
+            Wire.endTransmission();
+            Wire.requestFrom((uint8_t)0x55, (uint8_t)5);
+            uint8_t rb[5] = {};
+            for (int i = 0; i < 5 && Wire.available(); i++) rb[i] = Wire.read();
+            Wire.beginTransmission(0x55);
+            Wire.write(0x04);  // back to KEY mode
+            Wire.endTransmission();
+
+            bool altNow = (rb[0] & 0x10) != 0;
+            bool symNow = (rb[0] & 0x04) != 0;
+            if (altNow && !browserAltWasHeld) {
+                browserAltWasHeld = true;
+                if (nowMs - g_micLastToggleMs > 600) {
+                    g_micLastToggleMs = nowMs;
+                    monsterMeshModule->handleKeyFromLVGL(symNow ? 0x06 : 0x05);
+                    return;  // consumed
+                }
+            }
+            if (!altNow) browserAltWasHeld = false;
+        }
     }
 
     // ── KEY mode: read 1-byte ASCII ──────────────────────────────────────
@@ -1883,6 +1943,16 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
             // Deferred so SAV write finishes first.
             pendingAutoCheckin_ = true;
 #if HAS_TFT
+            // LVGL does incremental redraw and doesn't know about the emulator's
+            // direct LGFX writes — any region LVGL considers clean keeps showing
+            // stale emu pixels. Fill the framebuffer black, then let LVGL redraw
+            // on top. lv_refr_now forces a full immediate refresh so the user
+            // doesn't briefly see a black screen before content comes back.
+            {
+                concurrency::LockGuard g(spiLock);
+                lgfx::LGFX_Device *gfx = getGfx();
+                if (gfx) gfx->fillScreen(0x0000);
+            }
             lv_display_t *disp = lv_display_get_default();
             if (disp) {
                 if (savedFlushCb_) {
@@ -1891,6 +1961,7 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
                 }
                 if (disp->refr_timer) lv_timer_resume(disp->refr_timer);
                 lv_obj_invalidate(lv_screen_active());
+                lv_refr_now(disp);
             }
 #endif
             kbSetMode(false);
