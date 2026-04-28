@@ -406,13 +406,15 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 if (accepted) {
                     LOG_INFO("[MonsterMesh] MMT Y from 0x%08X — deferring battle start\n",
                              (unsigned)partner);
-                    // Defer terminal LVGL work to runOnce; sending DMs here is fine.
+                    // Defer EVERYTHING to runOnce — sending sendTextDM from the
+                    // mesh-receive thread (re-entrant under the router) appears
+                    // to wedge the TX queue (b104 diag: enqueue but no Started Tx
+                    // for 80s, then reset). Set pending fields and let runOnce
+                    // both send MMT:ACCEPT and start the battle on OSThread.
                     uint32_t seed = (uint32_t)millis();
-                    char buf[32];
-                    snprintf(buf, sizeof(buf), "MMT:ACCEPT:%08X", (unsigned)seed);
-                    sendTextDM(partner, buf);
                     pendingMmtStartPartner_ = partner;
                     pendingMmtStartSeed_    = seed;
+                    pendingMmtSendAccept_   = true;  // initiator: runOnce will send MMT:ACCEPT
                 } else {
                     LOG_INFO("[MonsterMesh] MMT N from 0x%08X — declined\n", (unsigned)partner);
                     pendingMmtReject_ = partner;  // terminal work happens in runOnce
@@ -1129,8 +1131,17 @@ int32_t MonsterMeshModule::runOnce()
     if (pendingMmtStartPartner_ != 0 && terminal_.ready()) {
         uint32_t partner = pendingMmtStartPartner_;
         uint32_t seed    = pendingMmtStartSeed_;
+        bool sendAccept  = pendingMmtSendAccept_;
         pendingMmtStartPartner_ = 0;
         pendingMmtStartSeed_    = 0;
+        pendingMmtSendAccept_   = false;
+        // Initiator (received Y): send MMT:ACCEPT to partner. Responder
+        // (received MMT:ACCEPT): just start local battle — do NOT echo.
+        if (sendAccept) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "MMT:ACCEPT:%08X", (unsigned)seed);
+            sendTextDM(partner, buf);
+        }
         // Reset MMT:ACT seq state for fresh battle so seq numbers don't
         // collide with leftovers from a previous match.
         mmtActOutSeq_       = 0;

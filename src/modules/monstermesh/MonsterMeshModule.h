@@ -140,6 +140,7 @@ private:
     // so LVGL terminal work happens on the OSThread context, not the mesh-receive thread.
     uint32_t pendingMmtStartPartner_ = 0;
     uint32_t pendingMmtStartSeed_    = 0;
+    bool     pendingMmtSendAccept_   = false; // initiator only: send MMT:ACCEPT in runOnce after Y
     uint32_t pendingMmtReject_       = 0;
     uint8_t  pendingMmtActType_      = 0;
     uint8_t  pendingMmtActIdx_       = 0;
