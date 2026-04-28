@@ -121,9 +121,7 @@ extern "C" const char *monstermesh_get_status(void)
 
 MonsterMeshModule::MonsterMeshModule()
     : SinglePortModule("MonsterMesh", meshtastic_PortNum_PRIVATE_APP),
-      concurrency::OSThread("MonsterMesh"),
-      shim_(transport_),
-      lobby_(transport_, emu_)
+      concurrency::OSThread("MonsterMesh")
 {
     // We want to see all PRIVATE_APP packets on any channel, not just "our" channel,
     // because wantPacket filters by channel anyway.
@@ -248,10 +246,9 @@ bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
             (txt[1] == 'o' || txt[1] == 'O')) {
             return true;
         }
-        // Single Y/N reply when we are the initiator waiting for a response
-        // (cable club legacy path OR MMT text-battle)
+        // Single Y/N reply when we are the initiator waiting for an MMT response
         if (sz == 1 &&
-            (waitingForAcceptFrom_ != 0 || mmtWaitingForAcceptFrom_ != 0) &&
+            mmtWaitingForAcceptFrom_ != 0 &&
             (txt[0] == 'Y' || txt[0] == 'y' || txt[0] == 'N' || txt[0] == 'n')) {
             return true;
         }
@@ -323,83 +320,9 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             return ProcessMessage::CONTINUE;
         }
 
-        // ── Cable Club DM handlers disabled ───────────────────────────────
-        // Bisect identified cable-club paths as the cause of mid-play freeze.
-        // Short-circuit all cable/link/mmc/mml strings so shim state machines
-        // never get triggered.
-        if (strstr(low, "cable") || strstr(low, "mmc") || strstr(low, "mm link") ||
-            strstr(low, "mml on") || strstr(low, "mmlon") || strstr(low, "mm waiting")) {
-            return ProcessMessage::CONTINUE;
-        }
-
-        // ── PERSON 2: receives "mmc on" from Person 1 ────────────────────
-        // Store pending challenge, send "MM waiting" ack so Person 1 knows
-        // we received it and can then send us the formatted challenge message.
-        if (strstr(low, "mmc on") || strstr(low, "cable on")) {
-            if (cableOffMs_ && (millis() - cableOffMs_ < 10000))
-                return ProcessMessage::CONTINUE;
-            pendingChallengerFrom_ = mp.from;
-            pendingChallengeMs_    = millis();
-            sendTextDM(mp.from, "MM waiting");
-            snprintf(setupStatusBuf_, sizeof(setupStatusBuf_),
-                     "[%s] wants to link! Reply Y or N", getShortName(mp.from));
-            setupStatus_ = setupStatusBuf_;
-            LOG_INFO("[MonsterMesh] 'mmc on' from 0x%08X — sent MM waiting\n", (unsigned)mp.from);
-            return ProcessMessage::CONTINUE;
-        }
-
-        // ── PERSON 1: receives "MM waiting" from Person 2 ────────────────
-        // Person 2 got our "mmc on". Now send the human-readable challenge
-        // to Person 2 so it appears in their chat.
-        if (strstr(low, "mm waiting")) {
-            if (cableOffMs_ && (millis() - cableOffMs_ < 10000))
-                return ProcessMessage::CONTINUE;
-            waitingForAcceptFrom_ = mp.from;
-            char msg[64];
-            snprintf(msg, sizeof(msg), "[%s] wants to link! Reply Y or N",
-                     getShortName(nodeDB->getNodeNum()));
-            sendTextDM(mp.from, msg);
-            snprintf(setupStatusBuf_, sizeof(setupStatusBuf_),
-                     "MM: Waiting for [%s]...", getShortName(mp.from));
-            setupStatus_ = setupStatusBuf_;
-            LOG_INFO("[MonsterMesh] MM waiting from 0x%08X — challenge sent\n", (unsigned)mp.from);
-            return ProcessMessage::CONTINUE;
-        }
-
-        // ── PERSON 2: receives "mmc off" — show fled, send disconnected ack ──
-        if (strstr(low, "mmc off") || strstr(low, "cable off")) {
-            shim_.cancel();
-            cableOffMs_ = millis();
-            waitingForAcceptFrom_ = 0;
-            pendingChallengerFrom_ = 0;
-            snprintf(setupStatusBuf_, sizeof(setupStatusBuf_),
-                     "[%s] fled!", getShortName(mp.from));
-            setupStatus_ = setupStatusBuf_;
-            sendTextDM(mp.from, "MM disconnected");
-            LOG_INFO("[MonsterMesh] 'mmc off' from 0x%08X — sent MM disconnected\n", (unsigned)mp.from);
-            return ProcessMessage::CONTINUE;
-        }
-
-        // ── "MM disconnected" — Person 1 gets confirmation, sends fled to Person 2 ──
-        if (strstr(low, "mm disconnected")) {
-            LOG_INFO("[MonsterMesh] MM disconnected from 0x%08X\n", (unsigned)mp.from);
-            shim_.cancel();
-            cableOffMs_ = millis();
-            waitingForAcceptFrom_ = 0;
-            pendingChallengerFrom_ = 0;
-            setupStatus_ = "MM disconnected";
-            // Send "[Name] fled!" to Person 2 so they see it in chat
-            char msg[32];
-            snprintf(msg, sizeof(msg), "[%s] fled!", getShortName(nodeDB->getNodeNum()));
-            sendTextDM(mp.from, msg);
-            return ProcessMessage::CONTINUE;
-        }
-
-        // ── Y/N reply: Person 2 sent Y or N DM to Person 1 ───────────────
+        // ── Y/N reply: response to our MMT:ON challenge ──────────────────
         if (len == 1 && (txt[0] == 'Y' || txt[0] == 'y' || txt[0] == 'N' || txt[0] == 'n')) {
             bool accepted = (txt[0] == 'Y' || txt[0] == 'y');
-            // MMT path — P2 (challenged) replied Y/N to P1's MMT:ON DM.
-            // P1 (us) is the challenger; we're waiting for them.
             if (mmtWaitingForAcceptFrom_ != 0 && mp.from == mmtWaitingForAcceptFrom_) {
                 uint32_t partner = mmtWaitingForAcceptFrom_;
                 mmtWaitingForAcceptFrom_ = 0;
@@ -408,89 +331,16 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                              (unsigned)partner);
                     // Defer EVERYTHING to runOnce — sending sendTextDM from the
                     // mesh-receive thread (re-entrant under the router) appears
-                    // to wedge the TX queue (b104 diag: enqueue but no Started Tx
-                    // for 80s, then reset). Set pending fields and let runOnce
+                    // to wedge the TX queue. Set pending fields and let runOnce
                     // both send MMT:ACCEPT and start the battle on OSThread.
                     uint32_t seed = (uint32_t)millis();
                     pendingMmtStartPartner_ = partner;
                     pendingMmtStartSeed_    = seed;
-                    pendingMmtSendAccept_   = true;  // initiator: runOnce will send MMT:ACCEPT
+                    pendingMmtSendAccept_   = true;
                 } else {
                     LOG_INFO("[MonsterMesh] MMT N from 0x%08X — declined\n", (unsigned)partner);
-                    pendingMmtReject_ = partner;  // terminal work happens in runOnce
+                    pendingMmtReject_ = partner;
                 }
-                return ProcessMessage::CONTINUE;
-            }
-            if (waitingForAcceptFrom_ != 0 && mp.from == waitingForAcceptFrom_) {
-                uint32_t partner = waitingForAcceptFrom_;
-                waitingForAcceptFrom_ = 0;
-                if (accepted) {
-                    LOG_INFO("[MonsterMesh] Y from 0x%08X — pairing\n", (unsigned)partner);
-                    shim_.pairWith(partner);
-                    snprintf(setupStatusBuf_, sizeof(setupStatusBuf_),
-                             "MonsterMesh linked!");
-                    setupStatus_ = setupStatusBuf_;
-                    sendTextDM(partner, "MonsterMesh linked!");
-                } else {
-                    LOG_INFO("[MonsterMesh] N from 0x%08X — declined\n", (unsigned)partner);
-                    snprintf(setupStatusBuf_, sizeof(setupStatusBuf_),
-                             "[%s] fled!", getShortName(partner));
-                    setupStatus_ = setupStatusBuf_;
-                    // Ask Person 2 to send "[Name] fled!" so it appears in Person 1's chat
-                    sendTextDM(partner, "MM rejected");
-                }
-            }
-            return ProcessMessage::CONTINUE;
-        }
-
-        // ── "MM rejected" — Person 2 sends "[Name] fled!" to Person 1's chat ──
-        if (strstr(low, "mm rejected")) {
-            LOG_INFO("[MonsterMesh] MM rejected from 0x%08X — sending fled\n", (unsigned)mp.from);
-            pendingChallengerFrom_ = 0;
-            pendingChallengeMs_    = 0;
-            char msg[32];
-            snprintf(msg, sizeof(msg), "[%s] fled!", getShortName(nodeDB->getNodeNum()));
-            sendTextDM(mp.from, msg);
-            return ProcessMessage::CONTINUE;
-        }
-
-        // ── "MonsterMesh linked!" — Person 2 pairs; if already paired, just ack ──
-        if (strstr(low, "monstermesh linked")) {
-            LOG_INFO("[MonsterMesh] MonsterMesh linked from 0x%08X\n", (unsigned)mp.from);
-            if (pendingChallengerFrom_ == mp.from) {
-                // We are Person 2 — pair and send back confirmation
-                pendingChallengerFrom_ = 0;
-                pendingChallengeMs_    = 0;
-                shim_.pairWith(mp.from);
-                sendTextDM(mp.from, "MonsterMesh linked!");
-            }
-            setupStatus_ = "MonsterMesh linked!";
-            return ProcessMessage::CONTINUE;
-        }
-
-        // ── "fled!" — partner disconnected ───────────────────────────────
-        if (strstr(low, "fled!")) {
-            LOG_INFO("[MonsterMesh] partner disconnected\n");
-            shim_.cancel();
-            cableOffMs_ = millis();
-            waitingForAcceptFrom_ = 0;
-            pendingChallengerFrom_ = 0;
-            snprintf(setupStatusBuf_, sizeof(setupStatusBuf_),
-                     "[%s] fled!", getShortName(mp.from));
-            setupStatus_ = setupStatusBuf_;
-            return ProcessMessage::CONTINUE;
-        }
-
-        // ── mml on — link cable alias (same as mmc on) ───────────────────
-        if (strstr(low, "mml on") || strstr(low, "mmlon") || strstr(low, "mm link on")) {
-            // Treat as mmc on — rewrite and fall through by re-entering same handler
-            if (mp.from != nodeDB->getNodeNum()) {
-                // From another node: treat as cable challenge
-                if (cableOffMs_ && (millis() - cableOffMs_ < 10000))
-                    return ProcessMessage::CONTINUE;
-                pendingChallengerFrom_ = mp.from;
-                pendingChallengeMs_    = millis();
-                sendTextDM(mp.from, "MM waiting");
             }
             return ProcessMessage::CONTINUE;
         }
@@ -663,15 +513,6 @@ int32_t MonsterMeshModule::runOnce()
             // ── Transport ────────────────────────────────────────────────────
             transport_.begin();
             transport_.setNodeId(nodeDB->getNodeNum());
-
-            // ── Shim + Lobby ─────────────────────────────────────────────────
-            shim_.begin();
-            shim_.setLobby(&lobby_);
-            lobby_.setShim(&shim_);
-            lobby_.loadStats();
-
-            // ── Wire serial link ─────────────────────────────────────────────
-            emu_.setSerialLink(&shim_);
 
             // ── Ensure MonsterMesh channel exists ────────────────────────────
             ensureMonsterMeshChannel();
@@ -1091,14 +932,6 @@ int32_t MonsterMeshModule::runOnce()
         }
     }
 
-    // Lobby tick — only in Meshtastic mode (not while emu/browser active).
-    // Beacons player presence for matchmaking and expires stale peers.
-    // Self-gates on lobby state (CLOSED → no-op) so this is cheap when the
-    // lobby UI isn't open.
-    if (!emulatorActive_ && !browserActive_) {
-        lobby_.tick(millis());
-    }
-
     // Daycare tick — only in Meshtastic mode (not while emu/browser active).
     // Generates events every 5 min, sends beacons, autosaves. Skipping it
     // during ROM play prevents background mesh/SD work from competing with
@@ -1123,8 +956,6 @@ int32_t MonsterMeshModule::runOnce()
             }
         }
     }
-
-    drainTxQueue();
 
     // Process deferred MMT battle-start from handleReceived Y path.
     // We land here on the OSThread, which is safe for LVGL terminal_ calls.
@@ -1198,32 +1029,8 @@ int32_t MonsterMeshModule::runOnce()
         pendingArrivalTargetNode_ = 0;
     }
 
-    // Expire pending challenge after 60s — send "fled" to initiator
-    if (pendingChallengerFrom_ != 0 &&
-        (millis() - pendingChallengeMs_ > 60000)) {
-        char msg[32];
-        snprintf(msg, sizeof(msg), "[%s] fled!", getShortName(nodeDB->getNodeNum()));
-        sendTextDM(pendingChallengerFrom_, msg);
-        pendingChallengerFrom_ = 0;
-        pendingChallengeMs_    = 0;
-        LOG_INFO("[MonsterMesh] challenge timed out\n");
-    }
-
-    // Update status overlay to reflect LoRa cable link state while emulator is running
     if (setupDone_ && emu_.isRunning()) {
-        auto shimState = shim_.state();
-        if (shimState == MonsterMeshBattleShim::State::ADVERTISING) {
-            setupStatus_ = "MM: Seeking link...";
-        } else if (shimState == MonsterMeshBattleShim::State::CONNECTED ||
-                   shimState == MonsterMeshBattleShim::State::IN_BATTLE) {
-            snprintf(setupStatusBuf_, sizeof(setupStatusBuf_),
-                     "MM: Linked! %08X", (unsigned)shim_.remoteId());
-            setupStatus_ = setupStatusBuf_;
-        } else if (shimState == MonsterMeshBattleShim::State::DONE) {
-            setupStatus_ = "MM: Link closed";
-        } else {
-            setupStatus_ = "Playing!";
-        }
+        setupStatus_ = "Playing!";
     }
 
     return 50;
@@ -1257,32 +1064,6 @@ void MonsterMeshModule::sendTextDM(uint32_t to, const char *text)
     p->decoded.payload.size = len;
     service->sendToMesh(p);
     LOG_INFO("[MonsterMesh] sent DM to 0x%08X: %s\n", (unsigned)to, text);
-}
-
-void MonsterMeshModule::drainTxQueue()
-{
-    uint8_t buf[237];
-    size_t len = 0;
-
-    // Send ONE packet per call — don't flood the router TX queue.
-    // The while-loop was sending all queued packets at once, overflowing the 16-slot TX queue.
-    if (!transport_.hasPendingSend()) return;
-    if (!transport_.dequeueSend(buf, len, sizeof(buf))) return;
-
-    uint32_t remoteId = shim_.remoteId();
-    meshtastic_MeshPacket *p = router->allocForSending();
-    if (!p) {
-        LOG_WARN("[MonsterMesh] drainTxQueue: packet pool exhausted, dropping\n");
-        return;
-    }
-    p->to = (remoteId != 0) ? remoteId : NODENUM_BROADCAST;
-    // Battle serial data: use primary channel (0) for DM. PRIVATE_APP portnum means it
-    // won't appear in the Meshtastic app UI. ch=255 was invalid and caused decryption failures.
-    p->channel = (remoteId != 0) ? 0 : MONSTERMESH_CHANNEL;
-    p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
-    p->decoded.payload.size = len;
-    memcpy(p->decoded.payload.bytes, buf, len);
-    service->sendToMesh(p);
 }
 
 // ── Keyboard ─────────────────────────────────────────────────────────────────
@@ -1821,46 +1602,12 @@ void MonsterMeshModule::emuTaskLoop()
         }
         renderFrame_ = false;
 
-        // BattleShim tick disabled — cable-club feature neutralized;
-        // running this per-frame was a suspected contributor to the mid-play
-        // crash/freeze since it pokes at shared state every emu frame.
-        // shim_.tick();
-
-        // ── Auto-save on battle end + ELO ────────────────────────────────
+        // ── Auto-save on battle end ──────────────────────────────────────
         uint8_t curBattle = emu_.readWRAM(Gen1::wIsInBattle);
-
-        if (prevBattle_ == 0 && curBattle == 2 && opponentElo_ == 0) {
-            uint16_t sid = shim_.sessionId();
-            if (sid != 0) {
-                uint32_t myId = transport_.nodeId();
-                for (uint8_t i = 0; i < lobby_.peerCount(); i++) {
-                    uint16_t testSid = (uint16_t)(myId ^ lobby_.peer(i).chipId);
-                    if (testSid == sid) {
-                        opponentElo_ = lobby_.peer(i).elo;
-                        break;
-                    }
-                }
-            }
-        }
-
         if (prevBattle_ != 0 && curBattle == 0) {
             emu_.save();
-            if (opponentElo_ > 0) {
-                uint8_t partyCount = emu_.readWRAM(Gen1::wPartyCount);
-                bool won = false;
-                for (uint8_t i = 0; i < partyCount && i < 6; i++) {
-                    uint16_t hp = ((uint16_t)emu_.readWRAM(Gen1::wPartyMons + i * 44 + 1) << 8) |
-                                  emu_.readWRAM(Gen1::wPartyMons + i * 44 + 2);
-                    if (hp > 0) { won = true; break; }
-                }
-                lobby_.recordResult(won, opponentElo_);
-                opponentElo_ = 0;
-            }
         }
         prevBattle_ = curBattle;
-
-        // Lobby tick disabled — cable club neutralized.
-        // lobby_.tick(millis());
 
         // ── Viewport scroll ──────────────────────────────────────────────
         if (viewportRecenter_) {
@@ -1871,23 +1618,6 @@ void MonsterMeshModule::emuTaskLoop()
         if (vd != 0) {
             emu_.scrollViewport(vd);
             viewportDelta_ = 0;
-        }
-
-        // ── Lobby key input ──────────────────────────────────────────────
-        uint8_t lk = lobbyKey_;
-        if (lk) {
-            lobbyKey_ = 0;
-            // Process lobby key
-            if (lobbyOpen_) {
-                switch (lk) {
-                    case 'w': case 'W': lobby_.navigateUp();   break;
-                    case 's': case 'S': lobby_.navigateDown(); break;
-                    case 'k': case 'K': lobby_.selectPeer();   break;
-                    case 'l': case 'L':
-                        // Lobby disabled (Cable Club neutralized)
-                        break;
-                }
-            }
         }
 
         // ── Auto-release keys after KEY_RELEASE_MS ──────────────────────
@@ -2185,15 +1915,6 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
     // as the source of the emulator video freeze. All entry points neutralized.
     if (ascii == 'p' || ascii == 'P') {
         return;
-    }
-
-    // ── Lobby capture mode ─────────────────────────────────────────────
-    if (lobbyOpen_) {
-        if (ascii == 'w' || ascii == 'W' || ascii == 's' || ascii == 'S' ||
-            ascii == 'k' || ascii == 'K' || ascii == 'l' || ascii == 'L') {
-            lobbyKey_ = ascii;
-            return;
-        }
     }
 
     // ── Game Boy button mapping ────────────────────────────────────────

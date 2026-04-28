@@ -12,8 +12,6 @@
 #include "Observer.h"
 #include "MeshtasticTransport.h"
 #include "MonsterMeshEmulator.h"
-#include "MonsterMeshBattleShim.h"
-#include "MonsterMeshLobby.h"
 #include "MonsterMeshFileBrowser.h"
 #include "PokemonDaycare.h"
 #include "MonsterMeshTerminal.h"
@@ -67,8 +65,6 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
   private:
     MeshtasticTransport   transport_;
     MonsterMeshEmulator      emu_;
-    MonsterMeshBattleShim    shim_;
-    MonsterMeshLobby         lobby_;
     MonsterMeshFileBrowser   browser_;
     PokemonDaycare           daycare_;
     MonsterMeshTerminal      terminal_;
@@ -115,10 +111,6 @@ private:
     volatile uint8_t joypadState_ = 0;
     uint8_t kbMask_ = 0;
 
-    // Lobby UI state
-    bool lobbyOpen_ = false;
-    volatile uint8_t lobbyKey_ = 0;
-
     // Buffered browser key (set by LVGL callback, consumed by runOnce)
     volatile uint8_t pendingBrowserKey_ = 0;
     // Deferred browser open (set by LVGL callback, executed in runOnce to avoid SD on LVGL task)
@@ -126,15 +118,8 @@ private:
 
     // Auto-save tracking
     uint8_t prevBattle_ = 0;
-    uint16_t opponentElo_ = 0;
-
-    // Cable disconnect cooldown — ignore stale "cable on" for 10s after disconnect
-    uint32_t cableOffMs_ = 0;
 
     // Pending challenge — waiting for Y/N reply from receiver
-    uint32_t pendingChallengerFrom_ = 0;  // RECEIVER: node that sent us "mmc on" (waiting for our Y/N)
-    uint32_t pendingChallengeMs_    = 0;  // RECEIVER: time challenge arrived (60s timeout)
-    uint32_t waitingForAcceptFrom_  = 0;  // INITIATOR: node we sent "mmc on" to (waiting for Y/N back)
     uint32_t mmtWaitingForAcceptFrom_ = 0; // INITIATOR: sent MMT:ON, awaiting Y/N DM reply
     // Deferred battle-start: set from handleReceived (router thread), consumed in runOnce
     // so LVGL terminal work happens on the OSThread context, not the mesh-receive thread.
@@ -199,15 +184,12 @@ private:
 
     // Send queued packets to mesh
     void sendTextDM(uint32_t to, const char *text);
-    void drainTxQueue();
-
     // Ensure channel 1 is configured as "MonsterMesh Center"
     void ensureMonsterMeshChannel();
 
     // handleKeyPress declared public above for LVGL callback access
 
     // Render overlays on top of emulator
-    void renderLobbyOverlay();
     void renderStatusOverlay();
     void renderDebugOverlay();
 

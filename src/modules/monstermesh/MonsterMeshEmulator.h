@@ -1,7 +1,6 @@
 #pragma once
 #include <Arduino.h>
 #include <FS.h>
-#include "ISerialLink.h"
 
 // Forward declarations — full headers only included in MonsterMeshEmulator.cpp
 struct gb_s;
@@ -45,8 +44,6 @@ public:
     bool isRunning() const { return running_; }
     void save() { if (running_) writeSaveFile(romPath_); }
 
-    void setSerialLink(ISerialLink *link) { serialLink_ = link; }
-
     // ── Joypad input ────────────────────────────────────────────────────────
     void setJoypad(uint8_t activeHighBits) { joypadState_ = activeHighBits; }
 
@@ -79,7 +76,6 @@ public:
     size_t       romSize_     = 0;
     uint8_t      cartRam_[0x8000];
     bool         running_     = false;
-    ISerialLink *serialLink_  = nullptr;
     char         romPath_[256] = {};
     int16_t      viewportY_   = 0;
     uint16_t     lineBuf_[PM_DISP_W];
