@@ -12,8 +12,6 @@
 #include "Observer.h"
 #include "MeshtasticTransport.h"
 #include "MonsterMeshEmulator.h"
-#include "MonsterMeshBattleShim.h"
-#include "MonsterMeshLobby.h"
 #include "MonsterMeshFileBrowser.h"
 
 // ── MonsterMeshModule ──────────────────────────────────────────────────────────
@@ -65,8 +63,6 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
   private:
     MeshtasticTransport   transport_;
     MonsterMeshEmulator      emu_;
-    MonsterMeshBattleShim    shim_;
-    MonsterMeshLobby         lobby_;
     MonsterMeshFileBrowser   browser_;
 
     bool emulatorActive_     = false;
@@ -110,16 +106,11 @@ private:
     volatile uint8_t joypadState_ = 0;
     uint8_t kbMask_ = 0;
 
-    // Lobby UI state
-    bool lobbyOpen_ = false;
-    volatile uint8_t lobbyKey_ = 0;
-
     // Buffered browser key (set by LVGL callback, consumed by runOnce)
     volatile uint8_t pendingBrowserKey_ = 0;
 
     // Auto-save tracking
     uint8_t prevBattle_ = 0;
-    uint16_t opponentElo_ = 0;
 
     // Viewport
     volatile int8_t viewportDelta_ = 0;
@@ -162,7 +153,6 @@ private:
     // handleKeyPress declared public above for LVGL callback access
 
     // Render overlays on top of emulator
-    void renderLobbyOverlay();
     void renderStatusOverlay();
     void renderDebugOverlay();
 

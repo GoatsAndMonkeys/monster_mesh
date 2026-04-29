@@ -170,21 +170,11 @@ static void pm_lcdDrawLine(struct gb_s *gb, const uint8_t *pixels,
 }
 
 static void pm_serialTx(struct gb_s *gb, const uint8_t tx) {
-    MonsterMeshEmulator *self = static_cast<MonsterMeshEmulator *>(gb->direct.priv);
-    if (self->serialLink_) {
-        self->serialLink_->onSerialTx(tx);
-    }
+    (void)gb; (void)tx;
 }
 
 static enum gb_serial_rx_ret_e pm_serialRx(struct gb_s *gb, uint8_t *rx) {
-    MonsterMeshEmulator *self = static_cast<MonsterMeshEmulator *>(gb->direct.priv);
-    if (self->serialLink_) {
-        uint8_t b;
-        if (self->serialLink_->onSerialRx(b)) {
-            *rx = b;
-            return GB_SERIAL_RX_SUCCESS;
-        }
-    }
+    (void)gb;
     *rx = 0xFF;
     return GB_SERIAL_RX_NO_CONNECTION;
 }

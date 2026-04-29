@@ -70,9 +70,7 @@ extern "C" const char *monstermesh_get_status(void)
 
 MonsterMeshModule::MonsterMeshModule()
     : SinglePortModule("MonsterMesh", meshtastic_PortNum_PRIVATE_APP),
-      concurrency::OSThread("MonsterMesh"),
-      shim_(transport_),
-      lobby_(transport_, emu_)
+      concurrency::OSThread("MonsterMesh")
 {
     // We want to see all PRIVATE_APP packets on any channel, not just "our" channel,
     // because wantPacket filters by channel anyway.
@@ -167,15 +165,8 @@ bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
 
 ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp)
 {
-    // Push the raw payload into transport for BattleShim/Lobby to process
-    if (mp.decoded.payload.size > 0) {
-        transport_.pushReceivedPacket(
-            mp.decoded.payload.bytes,
-            mp.decoded.payload.size,
-            mp.rx_rssi
-        );
-    }
-    return ProcessMessage::STOP;  // consumed — don't pass to other modules
+    (void)mp;
+    return ProcessMessage::STOP;
 }
 
 // ── runOnce() — OSThread periodic drain of tx queue ─────────────────────────
@@ -200,18 +191,8 @@ int32_t MonsterMeshModule::runOnce()
 
         // ── One-time subsystem init (guarded so retries don't re-init) ────────
         if (setupRetries_ == 0) {
-            // ── Transport ────────────────────────────────────────────────────
             transport_.begin();
             transport_.setNodeId(nodeDB->getNodeNum());
-
-            // ── Shim + Lobby ─────────────────────────────────────────────────
-            shim_.begin();
-            shim_.setLobby(&lobby_);
-            lobby_.setShim(&shim_);
-            lobby_.loadStats();
-
-            // ── Wire serial link ─────────────────────────────────────────────
-            emu_.setSerialLink(&shim_);
         }
 
 
@@ -690,44 +671,12 @@ void MonsterMeshModule::emuTaskLoop()
         }
         renderFrame_ = false;
 
-        // BattleShim tick (drives state machine + serial batch flush)
-        shim_.tick();
-
-        // ── Auto-save on battle end + ELO ────────────────────────────────
+        // ── Auto-save on battle end ───────────────────────────────────────
         uint8_t curBattle = emu_.readWRAM(Gen1::wIsInBattle);
-
-        if (prevBattle_ == 0 && curBattle == 2 && opponentElo_ == 0) {
-            uint16_t sid = shim_.sessionId();
-            if (sid != 0) {
-                uint32_t myId = transport_.nodeId();
-                for (uint8_t i = 0; i < lobby_.peerCount(); i++) {
-                    uint16_t testSid = (uint16_t)(myId ^ lobby_.peer(i).chipId);
-                    if (testSid == sid) {
-                        opponentElo_ = lobby_.peer(i).elo;
-                        break;
-                    }
-                }
-            }
-        }
-
         if (prevBattle_ != 0 && curBattle == 0) {
             emu_.save();
-            if (opponentElo_ > 0) {
-                uint8_t partyCount = emu_.readWRAM(Gen1::wPartyCount);
-                bool won = false;
-                for (uint8_t i = 0; i < partyCount && i < 6; i++) {
-                    uint16_t hp = ((uint16_t)emu_.readWRAM(Gen1::wPartyMons + i * 44 + 1) << 8) |
-                                  emu_.readWRAM(Gen1::wPartyMons + i * 44 + 2);
-                    if (hp > 0) { won = true; break; }
-                }
-                lobby_.recordResult(won, opponentElo_);
-                opponentElo_ = 0;
-            }
         }
         prevBattle_ = curBattle;
-
-        // ── Lobby tick ───────────────────────────────────────────────────
-        lobby_.tick(millis());
 
         // ── Viewport scroll ──────────────────────────────────────────────
         if (viewportRecenter_) {
@@ -738,28 +687,6 @@ void MonsterMeshModule::emuTaskLoop()
         if (vd != 0) {
             emu_.scrollViewport(vd);
             viewportDelta_ = 0;
-        }
-
-        // ── Lobby key input ──────────────────────────────────────────────
-        uint8_t lk = lobbyKey_;
-        if (lk) {
-            lobbyKey_ = 0;
-            // Process lobby key
-            if (lobbyOpen_) {
-                switch (lk) {
-                    case 'w': case 'W': lobby_.navigateUp();   break;
-                    case 's': case 'S': lobby_.navigateDown(); break;
-                    case 'k': case 'K': lobby_.selectPeer();   break;
-                    case 'l': case 'L':
-                        if (lobby_.state() == MonsterMeshLobby::State::INCOMING)
-                            lobby_.rejectIncoming();
-                        else if (lobby_.state() == MonsterMeshLobby::State::CHALLENGING) {
-                            lobby_.close();
-                            lobby_.open();
-                        }
-                        break;
-                }
-            }
         }
 
         // ── Auto-release keys after KEY_RELEASE_MS ──────────────────────
@@ -982,27 +909,6 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
     if (ascii == 0x09) {
         debugActive_ = !debugActive_;
         return;
-    }
-
-    // ── P: lobby toggle ────────────────────────────────────────────────
-    if (ascii == 'p' || ascii == 'P') {
-        if (lobbyOpen_) {
-            lobby_.close();
-            lobbyOpen_ = false;
-        } else {
-            lobby_.open();
-            lobbyOpen_ = true;
-        }
-        return;
-    }
-
-    // ── Lobby capture mode ─────────────────────────────────────────────
-    if (lobbyOpen_) {
-        if (ascii == 'w' || ascii == 'W' || ascii == 's' || ascii == 'S' ||
-            ascii == 'k' || ascii == 'K' || ascii == 'l' || ascii == 'L') {
-            lobbyKey_ = ascii;
-            return;
-        }
     }
 
     // ── Game Boy button mapping ────────────────────────────────────────
