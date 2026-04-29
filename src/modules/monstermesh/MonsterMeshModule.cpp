@@ -248,15 +248,14 @@ int32_t MonsterMeshModule::runOnce()
         // ROM browser on demand — that path parks radios cleanly. Auto-open
         // at boot raced with LoRa/WiFi init and froze the device.
         setupStatus_ = "SD ready";
-        LOG_INFO("[MonsterMesh] SD ready — Ctrl+E to open ROM browser\n");
+        LOG_INFO("[MonsterMesh] SD ready — press ALT to open ROM browser\n");
     }
     // Trackball press toggle is handled in handleInputEvent() via INPUT_BROKER_SELECT
 
-    // Keep keyboard hook installed at all times — needed to detect mic button
-    // even when emulator/browser is inactive (to toggle back on)
-    if (emuInitialized_ || browserActive_ || emulatorActive_) {
-        installKeyboardHook();
-    }
+    // Keep keyboard hook installed at all times. installKeyboardHook is now
+    // idempotent and re-walks the indev list every call, so device-ui
+    // recreating the keypad indev won't strand us without ALT detection.
+    installKeyboardHook();
 
     // Keep PowerFSM awake while emulator or browser is active
     if (emulatorActive_ || browserActive_) {
@@ -425,6 +424,7 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
             if (now - g_micLastToggleMs > 600) {
                 g_micLastToggleMs = now;
                 g_altWasPressed = true;
+                LOG_INFO("[MonsterMesh] ALT pressed (KEY-mode peek) → toggle\n");
                 monsterMeshModule->handleKeyFromLVGL(0x05);
                 return;
             }
@@ -578,29 +578,26 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
 void MonsterMeshModule::installKeyboardHook()
 {
 #if HAS_TFT
-    // Already hooked — don't reset keyboard MCU again
-    if (g_kbIndev) return;
-
-    // Guarantee keyboard MCU starts in KEY mode
-    Wire.beginTransmission(0x55);
-    Wire.write(0x04);
-    Wire.endTransmission();
-    g_rawMode    = false;
-    g_symActive  = false;
-    g_symEConsumed = false;
-
-    // Find the KEYPAD indev (type 2) — that's the keyboard.
-    // Type 3 (ENCODER) is the trackball — don't hook that.
+    // Walk the indev list every time. If device-ui ever recreates the keypad
+    // indev, our cached pointer goes stale — re-walk catches that.
     lv_indev_t *indev = nullptr;
     while ((indev = lv_indev_get_next(indev)) != nullptr) {
-        if (lv_indev_get_type(indev) == LV_INDEV_TYPE_KEYPAD) {
-            g_kbIndev = indev;
-            lv_indev_set_read_cb(indev, monsterMeshKeyboardRead);
-            LOG_INFO("[MonsterMesh] LVGL kb hook installed (indev=%p)\n", indev);
-            return;
+        if (lv_indev_get_type(indev) != LV_INDEV_TYPE_KEYPAD) continue;
+        if (indev == g_kbIndev && lv_indev_get_read_cb(indev) == monsterMeshKeyboardRead) {
+            return;  // already hooked on this indev
         }
+        // First install (or re-install on a new indev) — set MCU to KEY mode.
+        Wire.beginTransmission(0x55);
+        Wire.write(0x04);
+        Wire.endTransmission();
+        g_rawMode    = false;
+        g_symActive  = false;
+        g_symEConsumed = false;
+        g_kbIndev = indev;
+        lv_indev_set_read_cb(indev, monsterMeshKeyboardRead);
+        LOG_INFO("[MonsterMesh] LVGL kb hook installed (indev=%p)\n", indev);
+        return;
     }
-    LOG_WARN("[MonsterMesh] No LVGL keypad indev found — hook not installed\n");
 #endif
 }
 
