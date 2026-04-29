@@ -257,9 +257,19 @@ int32_t MonsterMeshModule::runOnce()
     // recreating the keypad indev won't strand us without ALT detection.
     installKeyboardHook();
 
-    // Keep PowerFSM awake while emulator or browser is active
-    if (emulatorActive_ || browserActive_) {
+    // Keep PowerFSM awake while emulator or browser is active. Throttle —
+    // every runOnce was logging "State: ON" and burying everything else.
+    static uint32_t lastWakeMs = 0;
+    if ((emulatorActive_ || browserActive_) && (millis() - lastWakeMs > 5000)) {
+        lastWakeMs = millis();
         powerFSM.trigger(EVENT_INPUT);
+    }
+    // One-shot probe so we can see boot-time state on serial
+    static bool probeLogged = false;
+    if (!probeLogged && setupDone_) {
+        probeLogged = true;
+        LOG_INFO("[MonsterMesh] boot complete — emu=%d browser=%d\n",
+                 (int)emulatorActive_, (int)browserActive_);
     }
 
     // Re-suppress LVGL flush if emulator or browser is active — screen sleep/wake
