@@ -244,26 +244,11 @@ int32_t MonsterMeshModule::runOnce()
             installKeyboardHook(); // re-run hook install in case LVGL indev wasn't ready yet
         }
 
-        // Auto-open file browser now that SD is ready
-        setupStatus_ = "Opening browser...";
-        LOG_INFO("[MonsterMesh] SD ready — opening file browser\n");
-        browserActive_ = true;
-        enterEmulatorMode();  // park radios — boot transitions Meshtastic UI → browser
-        {
-            concurrency::LockGuard g(spiLock);
-            browser_.open("/");
-        }
-#if HAS_TFT
-        {
-            lv_display_t *disp = lv_display_get_default();
-            if (disp && !savedFlushCb_) {
-                savedFlushCb_ = (void *)disp->flush_cb;
-                lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
-                    lv_display_flush_ready(d);
-                });
-            }
-        }
-#endif
+        // Stay in Meshtastic UI at boot. User presses Ctrl+E to open the
+        // ROM browser on demand — that path parks radios cleanly. Auto-open
+        // at boot raced with LoRa/WiFi init and froze the device.
+        setupStatus_ = "SD ready";
+        LOG_INFO("[MonsterMesh] SD ready — Ctrl+E to open ROM browser\n");
     }
     // Trackball press toggle is handled in handleInputEvent() via INPUT_BROKER_SELECT
 
