@@ -156,6 +156,14 @@ private:
     void renderStatusOverlay();
     void renderDebugOverlay();
 
+    // ── Hard radio kill on emulator/browser entry ──────────────────────────
+    // Called on edge transitions between Meshtastic UI ↔ emulator/browser.
+    // Puts LoRa to sleep + WiFi.mode(WIFI_OFF) on entry, brings them back
+    // on exit. BLE is independent and stays on.
+    void enterEmulatorMode();
+    void exitEmulatorMode();
+    bool radioParked_ = false;  // tracks current park state to avoid double-toggle
+
     // File browser
     void renderBrowser();
     void launchROM(const char *path);

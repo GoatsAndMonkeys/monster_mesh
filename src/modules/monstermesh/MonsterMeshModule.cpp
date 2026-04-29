@@ -18,6 +18,13 @@
 #include "MonsterMeshAudio.h"
 #include "PokemonData.h"
 #include "Gen1Species.h"
+#include "RadioLibInterface.h"
+
+// Provided by src/mesh/wifi/WiFiAPClient.cpp — used to park/unpark WiFi
+// alongside LoRa when entering/exiting emulator or browser modes.
+extern bool needReconnect;
+extern void deinitWifi();
+extern bool initWifi();
 
 // LovyanGFX is available on T-Deck in both t-deck and t-deck-tft builds
 #include <LovyanGFX.hpp>
@@ -241,6 +248,7 @@ int32_t MonsterMeshModule::runOnce()
         setupStatus_ = "Opening browser...";
         LOG_INFO("[MonsterMesh] SD ready — opening file browser\n");
         browserActive_ = true;
+        enterEmulatorMode();  // park radios — boot transitions Meshtastic UI → browser
         {
             concurrency::LockGuard g(spiLock);
             browser_.open("/");
@@ -806,6 +814,7 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
         if (browserActive_) {
             // ── Exit browser → Meshtastic UI ──────────────────────────────
             browserActive_ = false;
+            exitEmulatorMode();  // emulatorActive_ already false
 #if HAS_TFT
             lv_display_t *disp = lv_display_get_default();
             if (disp && savedFlushCb_) {
@@ -826,6 +835,7 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
         if (!emuInitialized_) {
             // ── No ROM loaded → open file browser ─────────────────────────
             browserActive_ = true;
+            enterEmulatorMode();  // park radios — Meshtastic UI → browser
             {
                 concurrency::LockGuard g(spiLock);
                 browser_.open("/");
@@ -844,6 +854,8 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
 
         // ── Toggle emulator on/off ────────────────────────────────────────
         emulatorActive_ = !emulatorActive_;
+        if (emulatorActive_) enterEmulatorMode();   // Meshtastic UI → emulator
+        else                 exitEmulatorMode();     // emulator → Meshtastic UI
         // Flag save for runOnce() — don't save here (SD write blocks LVGL callback)
         if (!emulatorActive_ && emu_.isRunning()) {
             pendingSave_ = true;
@@ -887,6 +899,7 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
         // disabled in browser mode to avoid eating keypresses)
         if (ascii == 0x08) {
             browserActive_ = false;
+            exitEmulatorMode();  // browser → Meshtastic UI
 #if HAS_TFT
             lv_display_t *disp2 = lv_display_get_default();
             if (disp2 && savedFlushCb_) {
@@ -1110,6 +1123,35 @@ void MonsterMeshModule::launchROM(const char *path)
     kbSetMode(true);  // RAW mode for held-key d-pad input
     setupStatus_ = "Playing!";
     LOG_INFO("[MonsterMesh] ROM loaded, emulator started\n");
+}
+
+// ── Hard radio kill on mode switch ───────────────────────────────────────────
+// Called on edge transitions (Meshtastic UI ↔ emulator/browser). Replaces all
+// the soft TX-gate / IRQ-disable scaffolding from prior branches: when the
+// user opens the emulator or ROM browser, both LoRa and WiFi are physically
+// off until they ALT back. BLE is independent and stays on always.
+
+void MonsterMeshModule::enterEmulatorMode()
+{
+    if (radioParked_) return;
+    LOG_INFO("MonsterMesh: entering emulator mode — sleeping radios\n");
+    if (RadioLibInterface::instance) {
+        RadioLibInterface::instance->sleep();
+    }
+    deinitWifi();
+    radioParked_ = true;
+}
+
+void MonsterMeshModule::exitEmulatorMode()
+{
+    if (!radioParked_) return;
+    LOG_INFO("MonsterMesh: exiting emulator mode — bringing radios back\n");
+    if (RadioLibInterface::instance) {
+        RadioLibInterface::instance->startReceive();
+    }
+    needReconnect = true;
+    initWifi();
+    radioParked_ = false;
 }
 
 #endif // T_DECK && !MESHTASTIC_EXCLUDE_MONSTERMESH
