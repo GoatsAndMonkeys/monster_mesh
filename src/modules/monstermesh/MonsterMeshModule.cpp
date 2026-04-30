@@ -335,6 +335,13 @@ int32_t MonsterMeshModule::runOnce()
 
     // Process buffered browser keys and render
     if (browserActive_) {
+        static uint32_t lastBrowserTick = 0;
+        uint32_t now2 = millis();
+        if (now2 - lastBrowserTick > 2000) {
+            lastBrowserTick = now2;
+            LOG_INFO("[MonsterMesh] browser tick: dirty=%d count=%d gfx=%p\n",
+                     (int)browser_.isDirty(), browser_.count(), (void *)g_deviceUiLgfx);
+        }
         uint8_t key = pendingBrowserKey_;
         if (key != 0) {
             pendingBrowserKey_ = 0;
@@ -1174,7 +1181,9 @@ void MonsterMeshModule::enterEmulatorMode()
     if (RadioLibInterface::instance) {
         RadioLibInterface::instance->sleep();
     }
+    LOG_INFO("MonsterMesh: radio asleep, calling deinitWifi\n");
     deinitWifi();
+    LOG_INFO("MonsterMesh: deinitWifi returned — radios parked\n");
     radioParked_ = true;
 }
 
