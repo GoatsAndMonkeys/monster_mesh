@@ -994,6 +994,8 @@ void MonsterMeshModule::renderBrowser()
 
     lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
     if (!gfx) return;
+    LOG_INFO("[MonsterMesh] renderBrowser: drawing count=%d w=%d h=%d rot=%d\n",
+             browser_.count(), gfx->width(), gfx->height(), (int)gfx->getRotation());
 
     // At textSize(1): 6x8px per char → 53 chars/line, 30 rows
     // Row layout: 14px per row, max ~26 chars with textSize(1) scaled x2 would wrap

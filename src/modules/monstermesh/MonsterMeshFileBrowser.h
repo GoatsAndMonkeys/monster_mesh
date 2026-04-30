@@ -3,6 +3,7 @@
 #include <SD.h>
 #include <SPI.h>
 #include <cstring>
+#include "configuration.h"
 #include "variant.h"
 
 #define FB_MAX_ENTRIES 64
@@ -98,10 +99,11 @@ private:
         SD.end();
         SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
         if (!SD.begin(SDCARD_CS, SPI)) {
-            log_w("[FileBrowser] SD reinit failed");
+            LOG_WARN("[FileBrowser] SD reinit failed dir='%s'\n", dir_);
             dirty_ = true;
             return;
         }
+        LOG_INFO("[FileBrowser] SD reinit OK, scanning '%s'\n", dir_);
 
         // Use Arduino SD library API for directory listing
         // (POSIX opendir/readdir doesn't work with Arduino SD VFS)
