@@ -257,6 +257,40 @@ int32_t MonsterMeshModule::runOnce()
     // recreating the keypad indev won't strand us without ALT detection.
     installKeyboardHook();
 
+    // ── Direct ALT poll (Meshtastic UI only) ────────────────────────────────
+    // The LVGL hook's peek-at-RAW was unreliable — LVGL's keypad indev poll
+    // rate depends on UI state and theme. Owning the I2C bus here every
+    // ~120ms guarantees ALT presses are caught while in the Meshtastic UI.
+    // When emulator/browser is active, the LVGL hook owns I2C (RAW mode for
+    // emu, KEY mode for browser) and we don't poll.
+    if (setupDone_ && !emulatorActive_ && !browserActive_) {
+        static uint32_t lastAltPoll = 0;
+        static bool     altWas      = false;
+        static uint32_t lastAltFire = 0;
+        uint32_t now = millis();
+        if (now - lastAltPoll >= 120) {
+            lastAltPoll = now;
+            // Switch to RAW mode, read byte[0] (contains ALT at bit 0x10), revert.
+            Wire.beginTransmission(0x55);
+            Wire.write(0x03);
+            Wire.endTransmission();
+            Wire.requestFrom((uint8_t)0x55, (uint8_t)5);
+            uint8_t b[5] = {};
+            for (int i = 0; i < 5 && Wire.available(); i++) b[i] = Wire.read();
+            Wire.beginTransmission(0x55);
+            Wire.write(0x04);
+            Wire.endTransmission();
+
+            bool altNow = (b[0] & 0x10) != 0;
+            if (altNow && !altWas && (now - lastAltFire > 600)) {
+                lastAltFire = now;
+                LOG_INFO("[MonsterMesh] ALT pressed (runOnce poll) → toggle\n");
+                handleKeyPress(0x05);
+            }
+            altWas = altNow;
+        }
+    }
+
     // Keep PowerFSM awake while emulator or browser is active. Throttle —
     // every runOnce was logging "State: ON" and burying everything else.
     static uint32_t lastWakeMs = 0;
