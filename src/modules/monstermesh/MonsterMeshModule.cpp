@@ -267,19 +267,29 @@ int32_t MonsterMeshModule::runOnce()
         static uint32_t lastAltPoll = 0;
         static bool     altWas      = false;
         static uint32_t lastAltFire = 0;
+        static uint32_t pollCount   = 0;
+        static uint32_t lastDumpMs  = 0;
         uint32_t now = millis();
         if (now - lastAltPoll >= 120) {
             lastAltPoll = now;
+            pollCount++;
             // Switch to RAW mode, read byte[0] (contains ALT at bit 0x10), revert.
             Wire.beginTransmission(0x55);
             Wire.write(0x03);
-            Wire.endTransmission();
-            Wire.requestFrom((uint8_t)0x55, (uint8_t)5);
+            uint8_t st1 = Wire.endTransmission();
+            uint8_t got = Wire.requestFrom((uint8_t)0x55, (uint8_t)5);
             uint8_t b[5] = {};
             for (int i = 0; i < 5 && Wire.available(); i++) b[i] = Wire.read();
             Wire.beginTransmission(0x55);
             Wire.write(0x04);
-            Wire.endTransmission();
+            uint8_t st2 = Wire.endTransmission();
+
+            // Dump raw state every 2s so we can confirm bus is live
+            if (now - lastDumpMs > 2000) {
+                lastDumpMs = now;
+                LOG_INFO("[MonsterMesh] kb poll #%u st=%u/%u got=%u b=%02X %02X %02X %02X %02X\n",
+                         (unsigned)pollCount, st1, st2, got, b[0], b[1], b[2], b[3], b[4]);
+            }
 
             bool altNow = (b[0] & 0x10) != 0;
             if (altNow && !altWas && (now - lastAltFire > 600)) {
