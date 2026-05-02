@@ -150,6 +150,30 @@ projenv.Append(
 for lb in env.GetLibBuilders():
     if lb.name == "meshtastic-device-ui":
         lb.env.Append(CPPDEFINES=[("APP_VERSION", verObj["long"])])
+        # MonsterMesh: copy our patched device-ui sources over the upstream
+        # ones before they are compiled. The patches/ tree mirrors the
+        # device-ui source tree. Currently used to neuter the map tile SD
+        # accesses that fight the LoRa SPI bus and crash the device.
+        import os
+        import shutil
+        patches_root = os.path.join(env["PROJECT_DIR"], "patches", "device-ui")
+        if os.path.isdir(patches_root):
+            lib_root = lb.path
+            for kind in ("source", "include"):
+                src_root = os.path.join(patches_root, kind)
+                dst_root = os.path.join(lib_root, kind)
+                if not os.path.isdir(src_root):
+                    continue
+                for dirpath, _, files in os.walk(src_root):
+                    rel = os.path.relpath(dirpath, src_root)
+                    for fn in files:
+                        src = os.path.join(dirpath, fn)
+                        dst = os.path.join(dst_root, rel, fn)
+                        try:
+                            shutil.copyfile(src, dst)
+                            print(f"  patched device-ui: {kind}/{os.path.join(rel, fn)}")
+                        except Exception as e:
+                            print(f"  patch FAILED {src} -> {dst}: {e}")
         break
 
 # Get the display resolution from macros

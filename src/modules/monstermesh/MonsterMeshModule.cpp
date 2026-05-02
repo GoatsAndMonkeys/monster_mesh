@@ -502,9 +502,10 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
     // ── ALT + Mic button peek ──────────────────────────────────────────
     // ALT (byte[0] bit 0x10) = toggle screens, Mic (byte[0] bit 0x40) = toggle sound.
     // Peek at RAW mode every few cycles to check them, then switch back to KEY mode.
-    // Skip when browser is active — the mode switching eats buffered keypresses.
-    bool browserUp = monsterMeshModule && monsterMeshModule->isBrowserActive();
-    if (!g_rawMode && monsterMeshModule && !browserUp && (++g_micPollCounter >= 3)) {
+    // The brief RAW window may drop a key the user presses during it, but this
+    // is the only way to detect ALT-alone (ALT+E in KEY mode produces 0x05 but
+    // ALT alone produces nothing). Run in browser mode too so users can ALT-out.
+    if (!g_rawMode && monsterMeshModule && (++g_micPollCounter >= 3)) {
         g_micPollCounter = 0;
         // Quick switch to RAW, read button bits, switch back to KEY
         Wire.beginTransmission(0x55);
@@ -556,6 +557,21 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
         Wire.requestFrom((uint8_t)0x55, (uint8_t)5);
         uint8_t b[5] = {};
         for (int i = 0; i < 5 && Wire.available(); i++) b[i] = Wire.read();
+
+        // SYM+ALT held → eject ROM, return to browser. Check BEFORE ALT-alone
+        // so the user can hold both without triggering the Meshtastic-exit path.
+        bool symAltHeld = (b[0] & 0x14) == 0x14;  // SYM=0x04 + ALT=0x10
+        static bool g_symAltConsumed = false;
+        if (symAltHeld && !g_symAltConsumed) {
+            g_symAltConsumed = true;
+            if (monsterMeshModule) {
+                monsterMeshModule->setJoypadDirect(0);
+                monsterMeshModule->ejectROM();
+                kbSetMode(false);  // browser uses KEY mode
+            }
+            return;
+        }
+        if (!symAltHeld) g_symAltConsumed = false;
 
         // ALT button in RAW mode — toggle screens (exit emulator)
         bool altHeld = (b[0] & 0x10) != 0;
@@ -717,6 +733,19 @@ void MonsterMeshModule::toggleSound()
         emu_.audio_->setMuted(!emu_.audio_->isMuted());
         LOG_INFO("[MonsterMesh] Sound %s\n", emu_.audio_->isMuted() ? "OFF" : "ON");
     }
+}
+
+void MonsterMeshModule::ejectROM()
+{
+    LOG_INFO("[MonsterMesh] Eject ROM — saving and returning to browser\n");
+    if (emu_.isRunning()) {
+        pendingSave_ = true;  // runOnce will handle the SD write off-thread
+    }
+    emulatorActive_ = false;     // stops emuTaskLoop runFrame (and audio)
+    emuInitialized_ = false;     // next ALT opens browser instead of toggling
+    browserActive_ = true;       // show browser
+    browserNeedsScan_ = true;    // re-scan SD for ROM list
+    setJoypadDirect(0);          // release any held GB buttons
 }
 
 void MonsterMeshModule::adjustVolume(int8_t delta)

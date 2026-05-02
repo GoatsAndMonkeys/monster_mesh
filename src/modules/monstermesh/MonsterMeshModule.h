@@ -97,6 +97,7 @@ public:
     void toggleSound();
     void adjustVolume(int8_t delta);
     void adjustBrightness(int8_t delta);
+    void ejectROM();  // SYM+ALT: save current, return to ROM browser
     const char *getSetupStatus() const { return setupStatus_; }
     // RAW mode: set joypad directly from bitmask (bypasses press/release timer)
     void setJoypadDirect(uint8_t mask) { joypadState_ = mask; kbMask_ = 0; }
