@@ -131,12 +131,32 @@ for pref in userPrefs:
 current_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 build_epoch = int(current_date.timestamp())
 
+# MonsterMesh build number from git rev-list --count HEAD (matches the
+# number we use in firmware-builds/ archive filenames) and current branch
+# name. Both fall back to safe defaults if git isn't available.
+try:
+    mm_build = subprocess.check_output(
+        ["git", "rev-list", "--count", "HEAD"],
+        cwd=env["PROJECT_DIR"], stderr=subprocess.DEVNULL
+    ).decode().strip()
+except Exception:
+    mm_build = "0"
+try:
+    mm_branch = subprocess.check_output(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=env["PROJECT_DIR"], stderr=subprocess.DEVNULL
+    ).decode().strip()
+except Exception:
+    mm_branch = "unknown"
+
 flags = [
         "-DAPP_VERSION=" + verObj["long"],
         "-DAPP_VERSION_SHORT=" + verObj["short"],
         "-DAPP_ENV=" + env.get("PIOENV"),
         "-DAPP_REPO=" + repo_owner,
         "-DBUILD_EPOCH=" + str(build_epoch),
+        "-DMONSTERMESH_BUILD=" + mm_build,
+        "-DMONSTERMESH_BRANCH=" + env.StringifyMacro(mm_branch),
     ] + pref_flags
 
 print ("Using flags:")
@@ -150,6 +170,8 @@ projenv.Append(
 for lb in env.GetLibBuilders():
     if lb.name == "meshtastic-device-ui":
         lb.env.Append(CPPDEFINES=[("APP_VERSION", verObj["long"])])
+        lb.env.Append(CPPDEFINES=[("MONSTERMESH_BUILD", mm_build)])
+        lb.env.Append(CPPDEFINES=[("MONSTERMESH_BRANCH", lb.env.StringifyMacro(mm_branch))])
         # MonsterMesh: copy our patched device-ui sources over the upstream
         # ones before they are compiled. The patches/ tree mirrors the
         # device-ui source tree. Currently used to neuter the map tile SD
@@ -159,7 +181,7 @@ for lb in env.GetLibBuilders():
         patches_root = os.path.join(env["PROJECT_DIR"], "patches", "device-ui")
         if os.path.isdir(patches_root):
             lib_root = lb.path
-            for kind in ("source", "include"):
+            for kind in ("source", "include", "generated", "locale"):
                 src_root = os.path.join(patches_root, kind)
                 dst_root = os.path.join(lib_root, kind)
                 if not os.path.isdir(src_root):
