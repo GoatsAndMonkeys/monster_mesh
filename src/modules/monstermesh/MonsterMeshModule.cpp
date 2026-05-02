@@ -329,15 +329,15 @@ int32_t MonsterMeshModule::runOnce()
                  (int)emulatorActive_, (int)browserActive_);
     }
 
-    // Deferred WiFi auto-start: WiFi is suppressed at boot to keep ALT-into-emu
-    // safe. Once the user has been stable in Meshtastic mode for 30s without
-    // entering emu/browser, bring WiFi up cleanly. radioParked_ is the
-    // authoritative gate — emulatorActive_/browserActive_ are flipped only
-    // AFTER enterEmulatorMode() returns, so they can lie during the slow
-    // entry transition.
-    if (!wifiBooted_ && millis() > 30000 && !radioParked_ && !emulatorActive_ && !browserActive_) {
+    // WiFi state sync on the LoRa thread. LVGL thread only flips radioParked_;
+    // we reconcile WiFi here so LVGL stays snappy (deinit ~50ms+, init ~4s).
+    if (radioParked_ && wifiBooted_) {
+        LOG_INFO("[MonsterMesh] sync: tearing WiFi down\n");
+        ::deinitWifi();
+        wifiBooted_ = false;
+    } else if (!radioParked_ && !wifiBooted_ && millis() > 30000) {
         wifiBooted_ = true;
-        LOG_INFO("[MonsterMesh] 30s elapsed in Meshtastic mode — initWifi()\n");
+        LOG_INFO("[MonsterMesh] sync: bringing WiFi up\n");
         wifiSuppressed = false;
         needReconnect = true;
         ::initWifi();
@@ -362,6 +362,14 @@ int32_t MonsterMeshModule::runOnce()
 
     // Process buffered browser keys and render
     if (browserActive_) {
+        // Deferred SD scan — LVGL thread sets browserNeedsScan_ on entry.
+        // We do the scan here on the LoRa thread so the LVGL thread doesn't
+        // race with renderBrowser for spiLock and end up wedged.
+        if (browserNeedsScan_) {
+            browserNeedsScan_ = false;
+            concurrency::LockGuard g(spiLock);
+            browser_.open("/");
+        }
         static uint32_t lastBrowserTick = 0;
         uint32_t now2 = millis();
         if (now2 - lastBrowserTick > 2000) {
@@ -744,6 +752,15 @@ void MonsterMeshModule::emuTaskLoop()
     uint8_t frameCount = 0;
 
     while (true) {
+        // Idle while emulator is not the foreground mode. Without this, runFrame
+        // keeps generating audio and rendering on Core 1 after the user ALTs back
+        // to Meshtastic — the screen would appear frozen on the emulator and the
+        // music would keep playing.
+        if (!emulatorActive_) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            lastWake = xTaskGetTickCount();
+            continue;
+        }
         // Write to framebuffer every 3rd frame — render task blits to TFT separately
         frameCount++;
         renderFrame_ = (emulatorActive_ && frameCount >= 3);
@@ -915,10 +932,12 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
             // SX126x sleep() races SD/TFT reads on the shared SPI bus.
             enterEmulatorMode();
             browserActive_ = true;
-            {
-                concurrency::LockGuard g(spiLock);
-                browser_.open("/");
-            }
+            // Defer browser_.open() to runOnce on the LoRa thread. Doing the
+            // SD reinit + scan inline here on the LVGL thread races with the
+            // renderBrowser call that runOnce fires immediately when
+            // browserActive_ flips true, and we end up wedged on spiLock with
+            // an empty browser. runOnce will see browserNeedsScan_ and scan.
+            browserNeedsScan_ = true;
 #if HAS_TFT
             lv_display_t *disp = lv_display_get_default();
             if (disp && !savedFlushCb_) {
@@ -1207,27 +1226,26 @@ void MonsterMeshModule::enterEmulatorMode()
     }
 
     LOG_INFO("MonsterMesh: entering emulator mode — suspending Meshtastic\n");
-    // Order: gate first (no new TX queued), park radio second (immediate quiesce
-    // on the SPI bus), then tear down WiFi. WiFi teardown is the slowest step
-    // and must run with the radio already inert — otherwise a NodeInfo or
-    // beacon TX can fire into a half-deinit'd state.
+    // Snappy path: gate flags + radio sleep ONLY (~few ms). WiFi deinit (~50ms+)
+    // is deferred to runOnce on the LoRa thread so the user sees the browser
+    // come up instantly after pressing ALT.
     wifiSuppressed = true;
     g_meshSuspended = true;
+    // Yield so any in-flight LoRa SPI tx completes and spiLock is released
+    // before we take it for the chip sleep command. Skipping this caused
+    // SX126x sleep() to hang waiting for the bus.
     vTaskDelay(pdMS_TO_TICKS(20));
-    LOG_INFO("MonsterMesh: parking LoRa radio\n");
+    LOG_INFO("MonsterMesh: parking LoRa radio (IRQ disable)\n");
     if (RadioLibInterface::instance) {
-        // Do NOT wrap in LockGuard(spiLock): RadioLib's own
-        // LockingArduinoHal::spiBeginTransaction acquires spiLock per-transaction,
-        // and spiLock is non-recursive — wrapping deadlocks at the first SPI write.
-        RadioLibInterface::instance->sleep();
+        // Soft park: just disable the DIO1 IRQ. The full chip sleep() path
+        // (setStandby → checkNotification → standby command → SetSleep) was
+        // hanging mid-call on the LVGL thread. Disabling IRQ is one SPI op
+        // (clearDio1Action) and matches what the older firmware did.
+        // RX packets won't be processed, and TX is already gated by
+        // g_meshSuspended in MeshService::handleToRadio.
+        RadioLibInterface::instance->disableInterrupt();
     }
     LOG_INFO("MonsterMesh: radios parked\n");
-    if (wifiBooted_) {
-        LOG_INFO("MonsterMesh: tearing down WiFi\n");
-        deinitWifi();
-        wifiBooted_ = false;
-        LOG_INFO("MonsterMesh: deinitWifi returned\n");
-    }
 }
 
 void MonsterMeshModule::exitEmulatorMode()
@@ -1242,17 +1260,18 @@ void MonsterMeshModule::exitEmulatorMode()
     }
 
     LOG_INFO("MonsterMesh: exiting emulator mode — bringing radios back\n");
-    // Order mirrors entry in reverse: bring WiFi up first (it's slow, can
-    // overlap with quiet radio), then ungate, then start radio RX last so
-    // the first packet arrives into a fully-restored stack.
-    wifiSuppressed = false;
-    needReconnect = true;
-    initWifi();
-    wifiBooted_ = true;
+    // Stay fast: this runs on the LVGL thread. Do only the cheap steps here
+    // (ungate flags, start radio RX). WiFi initWifi() is slow (~4s for cert
+    // generation on first boot) and would freeze the UI right when the user
+    // expects ALT-back to feel snappy. Leave wifiBooted_=false; the 30s
+    // deferred-init block in runOnce() will pick it up on the LoRa thread.
     g_meshSuspended = false;
     if (RadioLibInterface::instance) {
         RadioLibInterface::instance->startReceive();
     }
+    wifiSuppressed = false;
+    needReconnect = true;
+    // wifiBooted_ stays false → runOnce() will call initWifi() asynchronously.
 }
 
 #endif // T_DECK && !MESHTASTIC_EXCLUDE_MONSTERMESH

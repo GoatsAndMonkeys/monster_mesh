@@ -109,6 +109,10 @@ private:
     // Buffered browser key (set by LVGL callback, consumed by runOnce)
     volatile uint8_t pendingBrowserKey_ = 0;
 
+    // Set true by LVGL thread on browser entry; consumed by runOnce on LoRa
+    // thread which then runs the SD reinit + scan. Keeps LVGL thread fast.
+    volatile bool browserNeedsScan_ = false;
+
     // Auto-save tracking
     uint8_t prevBattle_ = 0;
 
