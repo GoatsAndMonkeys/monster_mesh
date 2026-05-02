@@ -56,6 +56,7 @@ unsigned long lastrun_ntp = 0;
 
 bool needReconnect = true;   // If we create our reconnector, run it once at the beginning
 bool isReconnecting = false; // If we are currently reconnecting
+bool wifiSuppressed = false; // MonsterMesh sets this true when emulator/browser parks radios
 
 WiFiUDP syslogClient;
 Syslog syslog(syslogClient);
@@ -156,7 +157,7 @@ static int32_t reconnectWiFi()
     const char *wifiName = config.network.wifi_ssid;
     const char *wifiPsw = config.network.wifi_psk;
 
-    if (config.network.wifi_enabled && needReconnect) {
+    if (config.network.wifi_enabled && needReconnect && !wifiSuppressed) {
 
         if (!*wifiPsw) // Treat empty password as no password
             wifiPsw = NULL;
@@ -392,7 +393,7 @@ static void WiFiEvent(WiFiEvent_t event)
 #ifdef WIFI_LED
         digitalWrite(WIFI_LED, LOW);
 #endif
-        if (!isReconnecting) {
+        if (!isReconnecting && !wifiSuppressed) {
             WiFi.disconnect(false, true);
             syslog.disable();
             needReconnect = true;
@@ -417,7 +418,7 @@ static void WiFiEvent(WiFiEvent_t event)
         break;
     case ARDUINO_EVENT_WIFI_STA_LOST_IP:
         LOG_INFO("Lost IP address and IP address is reset to 0");
-        if (!isReconnecting) {
+        if (!isReconnecting && !wifiSuppressed) {
             WiFi.disconnect(false, true);
             syslog.disable();
             needReconnect = true;

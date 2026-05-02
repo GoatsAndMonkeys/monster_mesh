@@ -23,6 +23,7 @@
 // Provided by src/mesh/wifi/WiFiAPClient.cpp — used to park/unpark WiFi
 // alongside LoRa when entering/exiting emulator or browser modes.
 extern bool needReconnect;
+extern bool wifiSuppressed;
 extern void deinitWifi();
 extern bool initWifi();
 
@@ -291,15 +292,20 @@ int32_t MonsterMeshModule::runOnce()
                          (unsigned)pollCount, st1, st2, got, b[0], b[1], b[2], b[3], b[4]);
             }
 
-            bool altNow = (b[0] & 0x10) != 0;
-            static bool altSeenLow = false;  // require a clean "not pressed" baseline before firing
-            if (!altNow) altSeenLow = true;
-            if (altNow && !altWas && altSeenLow && (now - lastAltFire > 600)) {
-                lastAltFire = now;
-                LOG_INFO("[MonsterMesh] ALT pressed (runOnce poll) → toggle\n");
-                handleKeyPress(0x05);
+            // Ignore garbage reads (I2C bus error returns 0xFF on every byte,
+            // or NACK gives got<5). Only trust valid frames.
+            bool valid = (st1 == 0 && got == 5 && b[0] != 0xFF);
+            if (valid) {
+                bool altNow = (b[0] & 0x10) != 0;
+                static bool altSeenLow = false;  // require a clean low baseline before firing
+                if (!altNow) altSeenLow = true;
+                if (altNow && !altWas && altSeenLow && (now - lastAltFire > 600)) {
+                    lastAltFire = now;
+                    LOG_INFO("[MonsterMesh] ALT pressed (runOnce poll) → toggle\n");
+                    handleKeyPress(0x05);
+                }
+                altWas = altNow;
             }
-            altWas = altNow;
         }
     }
 
@@ -1158,6 +1164,7 @@ void MonsterMeshModule::enterEmulatorMode()
         RadioLibInterface::instance->sleep();
     }
     LOG_INFO("MonsterMesh: radio asleep, calling deinitWifi\n");
+    wifiSuppressed = true;  // block auto-reconnect from WiFiEvent
     deinitWifi();
     LOG_INFO("MonsterMesh: deinitWifi returned — radios parked\n");
     radioParked_ = true;
@@ -1170,6 +1177,7 @@ void MonsterMeshModule::exitEmulatorMode()
     if (RadioLibInterface::instance) {
         RadioLibInterface::instance->startReceive();
     }
+    wifiSuppressed = false;  // unblock auto-reconnect
     needReconnect = true;
     initWifi();
     radioParked_ = false;
