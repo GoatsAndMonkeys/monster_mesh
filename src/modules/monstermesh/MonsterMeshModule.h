@@ -113,6 +113,12 @@ private:
     // thread which then runs the SD reinit + scan. Keeps LVGL thread fast.
     volatile bool browserNeedsScan_ = false;
 
+    // Set true by LVGL thread on emu/browser exit; consumed by runOnce on
+    // LoRa thread which then runs RadioLibInterface::startReceive(). The
+    // startReceive call goes through setStandby/checkNotification which
+    // hangs on the LVGL thread.
+    volatile bool radioNeedsRx_ = false;
+
     // Auto-save tracking
     uint8_t prevBattle_ = 0;
 

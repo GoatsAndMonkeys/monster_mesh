@@ -329,8 +329,15 @@ int32_t MonsterMeshModule::runOnce()
                  (int)emulatorActive_, (int)browserActive_);
     }
 
-    // WiFi state sync on the LoRa thread. LVGL thread only flips radioParked_;
-    // we reconcile WiFi here so LVGL stays snappy (deinit ~50ms+, init ~4s).
+    // Radio + WiFi state sync on the LoRa thread. LVGL thread only flips
+    // radioParked_/radioNeedsRx_; we reconcile here so LVGL stays snappy.
+    if (radioNeedsRx_) {
+        radioNeedsRx_ = false;
+        if (RadioLibInterface::instance) {
+            LOG_INFO("[MonsterMesh] sync: re-arming LoRa RX\n");
+            RadioLibInterface::instance->startReceive();
+        }
+    }
     if (radioParked_ && wifiBooted_) {
         LOG_INFO("[MonsterMesh] sync: tearing WiFi down\n");
         ::deinitWifi();
@@ -1260,18 +1267,15 @@ void MonsterMeshModule::exitEmulatorMode()
     }
 
     LOG_INFO("MonsterMesh: exiting emulator mode — bringing radios back\n");
-    // Stay fast: this runs on the LVGL thread. Do only the cheap steps here
-    // (ungate flags, start radio RX). WiFi initWifi() is slow (~4s for cert
-    // generation on first boot) and would freeze the UI right when the user
-    // expects ALT-back to feel snappy. Leave wifiBooted_=false; the 30s
-    // deferred-init block in runOnce() will pick it up on the LoRa thread.
+    // LVGL thread: only the cheap atomic flag flips. The actual radio
+    // startReceive() goes through setStandby() → checkNotification() which
+    // can hang on the LVGL thread (same hang we saw with sleep()). The
+    // initWifi cert work is also slow (~4s). Both run in runOnce() on the
+    // LoRa thread, which sees !radioParked_ and reconciles state.
     g_meshSuspended = false;
-    if (RadioLibInterface::instance) {
-        RadioLibInterface::instance->startReceive();
-    }
     wifiSuppressed = false;
     needReconnect = true;
-    // wifiBooted_ stays false → runOnce() will call initWifi() asynchronously.
+    radioNeedsRx_ = true;
 }
 
 #endif // T_DECK && !MESHTASTIC_EXCLUDE_MONSTERMESH
