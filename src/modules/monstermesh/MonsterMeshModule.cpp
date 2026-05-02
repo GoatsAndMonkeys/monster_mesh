@@ -292,7 +292,9 @@ int32_t MonsterMeshModule::runOnce()
             }
 
             bool altNow = (b[0] & 0x10) != 0;
-            if (altNow && !altWas && (now - lastAltFire > 600)) {
+            static bool altSeenLow = false;  // require a clean "not pressed" baseline before firing
+            if (!altNow) altSeenLow = true;
+            if (altNow && !altWas && altSeenLow && (now - lastAltFire > 600)) {
                 lastAltFire = now;
                 LOG_INFO("[MonsterMesh] ALT pressed (runOnce poll) → toggle\n");
                 handleKeyPress(0x05);
@@ -480,7 +482,9 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
         // ALT button → toggle screens
         bool altPressed = (rb[0] & 0x10) != 0;
         static bool g_altWasPressed = false;
-        if (altPressed && !g_altWasPressed) {
+        static bool g_altSeenLow = false;
+        if (!altPressed) g_altSeenLow = true;
+        if (altPressed && !g_altWasPressed && g_altSeenLow) {
             uint32_t now = millis();
             if (now - g_micLastToggleMs > 600) {
                 g_micLastToggleMs = now;
@@ -515,7 +519,9 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
         // ALT button in RAW mode — toggle screens (exit emulator)
         bool altHeld = (b[0] & 0x10) != 0;
         static bool g_altWasHeldRaw = false;
-        if (altHeld && !g_altWasHeldRaw) {
+        static bool g_altSeenLowRaw = false;
+        if (!altHeld) g_altSeenLowRaw = true;
+        if (altHeld && !g_altWasHeldRaw && g_altSeenLowRaw) {
             uint32_t now = millis();
             if (now - g_micLastToggleMs > 600) {
                 g_micLastToggleMs = now;
@@ -1065,38 +1071,6 @@ void MonsterMeshModule::renderBrowser()
             }
             gfx->print(dispName);
         }
-    }
-
-    // Footer with status
-    gfx->setTextColor(0x528A);
-    gfx->setCursor(4, 212);
-    gfx->print("W/S:Nav  K:Open  L:Back  ALT:Exit");
-    // Show error/status if any
-    if (setupStatus_ && strstr(setupStatus_, "FAIL")) {
-        gfx->setCursor(4, 222);
-        gfx->setTextColor(0xF800);  // red
-        gfx->print(setupStatus_);
-    }
-
-    // Debug: show indev info
-    gfx->setCursor(4, 232);
-    gfx->setTextColor(0xF800);  // red
-    {
-        int nIndev = 0;
-        char types[32] = {};
-        lv_indev_t *ind = nullptr;
-        while ((ind = lv_indev_get_next(ind)) != nullptr) {
-            if (nIndev < 8) {
-                char t[4];
-                snprintf(t, sizeof(t), "%d ", (int)lv_indev_get_type(ind));
-                strcat(types, t);
-            }
-            nIndev++;
-        }
-        char dbg[64];
-        snprintf(dbg, sizeof(dbg), "indevs:%d types:[%s] hook:%s", nIndev, types,
-                 g_kbIndev ? "YES" : "NO");
-        gfx->print(dbg);
     }
 
     gfx->clearClipRect();
