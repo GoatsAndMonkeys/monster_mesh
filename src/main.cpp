@@ -1432,7 +1432,17 @@ void setup()
 
         // Initialize Wifi
 #if HAS_WIFI
+#if defined(T_DECK) && !MESHTASTIC_EXCLUDE_MONSTERMESH
+    // MonsterMesh defers WiFi init: tearing down a half-initialized WiFi stack
+    // (mDNS/NTP/syslog still settling) when the user opens the emulator hangs
+    // the device. Mark suppressed; runOnce kicks initWifi() once the user is
+    // stable in Meshtastic mode (or on first emulator-exit).
+    extern bool wifiSuppressed;
+    wifiSuppressed = true;
+    LOG_INFO("MonsterMesh: deferring initWifi() at boot — runOnce will start WiFi when stable\n");
+#else
     initWifi();
+#endif
 #endif
 
 #if HAS_ETHERNET

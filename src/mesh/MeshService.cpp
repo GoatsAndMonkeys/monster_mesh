@@ -177,6 +177,8 @@ NodeNum MeshService::getNodenumFromRequestId(uint32_t request_id)
  */
 void MeshService::handleToRadio(meshtastic_MeshPacket &p)
 {
+    extern bool g_meshSuspended;
+    if (g_meshSuspended) return; // emulator owns the device — drop outbound mesh traffic
 #if defined(ARCH_PORTDUINO)
     if (SimRadio::instance && p.decoded.portnum == meshtastic_PortNum_SIMULATOR_APP) {
         // Simulates device received a packet via the LoRa chip

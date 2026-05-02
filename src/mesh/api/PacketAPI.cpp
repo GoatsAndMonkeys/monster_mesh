@@ -7,6 +7,7 @@
 #include "modules/NodeInfoModule.h"
 
 PacketAPI *packetAPI = nullptr;
+extern bool g_meshSuspended;
 
 PacketAPI *PacketAPI::create(PacketServer *_server)
 {
@@ -24,6 +25,7 @@ PacketAPI::PacketAPI(PacketServer *_server)
 
 int32_t PacketAPI::runOnce()
 {
+    if (g_meshSuspended) return 500; // emulator owns the device — drain nothing, idle slow
     bool success = false;
 #ifndef ARCH_PORTDUINO
     if (config.bluetooth.enabled) {

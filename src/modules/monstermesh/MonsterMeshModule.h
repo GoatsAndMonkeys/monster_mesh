@@ -163,6 +163,7 @@ private:
     void enterEmulatorMode();
     void exitEmulatorMode();
     bool radioParked_ = false;  // tracks current park state to avoid double-toggle
+    bool wifiBooted_  = false;  // deferred WiFi: false until first auto-init or emu-exit
 
     // File browser
     void renderBrowser();

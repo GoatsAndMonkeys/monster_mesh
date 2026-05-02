@@ -26,6 +26,11 @@ extern bool needReconnect;
 extern bool wifiSuppressed;
 extern bool g_meshSuspended;
 extern void deinitWifi();
+
+// Shared ALT-press debounce: both the runOnce poll path and the LVGL KEY-mode
+// peek path can see the same I2C kb-byte microseconds apart, otherwise.
+// One global timestamp prevents enterEmulatorMode being called twice.
+static uint32_t g_lastAltFireMs = 0;
 extern bool initWifi();
 
 // LovyanGFX is available on T-Deck in both t-deck and t-deck-tft builds
@@ -268,7 +273,6 @@ int32_t MonsterMeshModule::runOnce()
     if (setupDone_ && !emulatorActive_ && !browserActive_) {
         static uint32_t lastAltPoll = 0;
         static bool     altWas      = false;
-        static uint32_t lastAltFire = 0;
         static uint32_t pollCount   = 0;
         static uint32_t lastDumpMs  = 0;
         uint32_t now = millis();
@@ -300,15 +304,10 @@ int32_t MonsterMeshModule::runOnce()
                 bool altNow = (b[0] & 0x10) != 0;
                 static bool altSeenLow = false;  // require a clean low baseline before firing
                 if (!altNow) altSeenLow = true;
-                if (altNow && !altWas && altSeenLow && (now - lastAltFire > 600)) {
-                    lastAltFire = now;
-                    if (millis() < 30000) {
-                        LOG_INFO("[MonsterMesh] ALT ignored — boot grace (%us left)\n",
-                                 (unsigned)((30000 - millis()) / 1000));
-                    } else {
-                        LOG_INFO("[MonsterMesh] ALT pressed (runOnce poll) → toggle\n");
-                        handleKeyPress(0x05);
-                    }
+                if (altNow && !altWas && altSeenLow && (now - g_lastAltFireMs > 2000)) {
+                    g_lastAltFireMs = now;
+                    LOG_INFO("[MonsterMesh] ALT pressed (runOnce poll) → toggle\n");
+                    handleKeyPress(0x05);
                 }
                 altWas = altNow;
             }
@@ -328,6 +327,20 @@ int32_t MonsterMeshModule::runOnce()
         probeLogged = true;
         LOG_INFO("[MonsterMesh] boot complete — emu=%d browser=%d\n",
                  (int)emulatorActive_, (int)browserActive_);
+    }
+
+    // Deferred WiFi auto-start: WiFi is suppressed at boot to keep ALT-into-emu
+    // safe. Once the user has been stable in Meshtastic mode for 30s without
+    // entering emu/browser, bring WiFi up cleanly. radioParked_ is the
+    // authoritative gate — emulatorActive_/browserActive_ are flipped only
+    // AFTER enterEmulatorMode() returns, so they can lie during the slow
+    // entry transition.
+    if (!wifiBooted_ && millis() > 30000 && !radioParked_ && !emulatorActive_ && !browserActive_) {
+        wifiBooted_ = true;
+        LOG_INFO("[MonsterMesh] 30s elapsed in Meshtastic mode — initWifi()\n");
+        wifiSuppressed = false;
+        needReconnect = true;
+        ::initWifi();
     }
 
     // Re-suppress LVGL flush if emulator or browser is active — screen sleep/wake
@@ -498,14 +511,10 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
         if (!altPressed) g_altSeenLow = true;
         if (altPressed && !g_altWasPressed && g_altSeenLow) {
             uint32_t now = millis();
-            if (now - g_micLastToggleMs > 600) {
+            if (now - g_lastAltFireMs > 2000) {
+                g_lastAltFireMs = now;
                 g_micLastToggleMs = now;
                 g_altWasPressed = true;
-                if (millis() < 30000) {
-                    LOG_INFO("[MonsterMesh] ALT ignored — boot grace (%us left)\n",
-                             (unsigned)((30000 - millis()) / 1000));
-                    return;
-                }
                 LOG_INFO("[MonsterMesh] ALT pressed (KEY-mode peek) → toggle\n");
                 monsterMeshModule->handleKeyFromLVGL(0x05);
                 return;
@@ -900,8 +909,12 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
 
         if (!emuInitialized_) {
             // ── No ROM loaded → open file browser ─────────────────────────
+            // Park radios BEFORE flipping browserActive_, so other tasks
+            // (DeviceUI map tile loader, LVGL flush) have already quiesced
+            // by the time the browser tick task starts rendering. Otherwise
+            // SX126x sleep() races SD/TFT reads on the shared SPI bus.
+            enterEmulatorMode();
             browserActive_ = true;
-            enterEmulatorMode();  // park radios — Meshtastic UI → browser
             {
                 concurrency::LockGuard g(spiLock);
                 browser_.open("/");
@@ -919,9 +932,17 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
         }
 
         // ── Toggle emulator on/off ────────────────────────────────────────
-        emulatorActive_ = !emulatorActive_;
-        if (emulatorActive_) enterEmulatorMode();   // Meshtastic UI → emulator
-        else                 exitEmulatorMode();     // emulator → Meshtastic UI
+        // For ENTRY, park radios BEFORE flipping the active flag so concurrent
+        // tasks (LVGL/DeviceUI/SD) quiesce before the emulator render task
+        // takes over the SPI bus. For EXIT, flip BEFORE wake so the emulator
+        // render task stops first, then Meshtastic resumes.
+        if (!emulatorActive_) {
+            enterEmulatorMode();
+            emulatorActive_ = true;
+        } else {
+            emulatorActive_ = false;
+            exitEmulatorMode();
+        }
         // Flag save for runOnce() — don't save here (SD write blocks LVGL callback)
         if (!emulatorActive_ && emu_.isRunning()) {
             pendingSave_ = true;
@@ -1167,33 +1188,71 @@ void MonsterMeshModule::launchROM(const char *path)
 // user opens the emulator or ROM browser, both LoRa and WiFi are physically
 // off until they ALT back. BLE is independent and stays on always.
 
+// Atomic guard for mode-switch transitions. The two ALT-detection paths
+// (runOnce poll + LVGL KEY-mode peek) can fire on the same physical press
+// up to ~1s apart. Without an atomic claim the slow enterEmulatorMode body
+// (~1s of WiFi teardown + radio sleep) runs twice, racing on deinitWifi
+// and SPI access — which freezes the device.
+static portMUX_TYPE s_mmModeMux = portMUX_INITIALIZER_UNLOCKED;
+
 void MonsterMeshModule::enterEmulatorMode()
 {
-    if (radioParked_) return;
-    LOG_INFO("MonsterMesh: entering emulator mode — sleeping radios\n");
+    portENTER_CRITICAL(&s_mmModeMux);
+    bool already = radioParked_;
+    if (!already) radioParked_ = true;
+    portEXIT_CRITICAL(&s_mmModeMux);
+    if (already) {
+        LOG_INFO("MonsterMesh: enterEmulatorMode already in progress — skip\n");
+        return;
+    }
+
+    LOG_INFO("MonsterMesh: entering emulator mode — suspending Meshtastic\n");
+    // Order: gate first (no new TX queued), park radio second (immediate quiesce
+    // on the SPI bus), then tear down WiFi. WiFi teardown is the slowest step
+    // and must run with the radio already inert — otherwise a NodeInfo or
+    // beacon TX can fire into a half-deinit'd state.
+    wifiSuppressed = true;
+    g_meshSuspended = true;
+    vTaskDelay(pdMS_TO_TICKS(20));
+    LOG_INFO("MonsterMesh: parking LoRa radio\n");
     if (RadioLibInterface::instance) {
+        // Do NOT wrap in LockGuard(spiLock): RadioLib's own
+        // LockingArduinoHal::spiBeginTransaction acquires spiLock per-transaction,
+        // and spiLock is non-recursive — wrapping deadlocks at the first SPI write.
         RadioLibInterface::instance->sleep();
     }
-    LOG_INFO("MonsterMesh: radio asleep, calling deinitWifi\n");
-    wifiSuppressed = true;  // block auto-reconnect from WiFiEvent
-    g_meshSuspended = true; // drop phone API traffic while in emulator
-    deinitWifi();
-    LOG_INFO("MonsterMesh: deinitWifi returned — radios parked\n");
-    radioParked_ = true;
+    LOG_INFO("MonsterMesh: radios parked\n");
+    if (wifiBooted_) {
+        LOG_INFO("MonsterMesh: tearing down WiFi\n");
+        deinitWifi();
+        wifiBooted_ = false;
+        LOG_INFO("MonsterMesh: deinitWifi returned\n");
+    }
 }
 
 void MonsterMeshModule::exitEmulatorMode()
 {
-    if (!radioParked_) return;
+    portENTER_CRITICAL(&s_mmModeMux);
+    bool wasParked = radioParked_;
+    if (wasParked) radioParked_ = false;
+    portEXIT_CRITICAL(&s_mmModeMux);
+    if (!wasParked) {
+        LOG_INFO("MonsterMesh: exitEmulatorMode already in progress — skip\n");
+        return;
+    }
+
     LOG_INFO("MonsterMesh: exiting emulator mode — bringing radios back\n");
+    // Order mirrors entry in reverse: bring WiFi up first (it's slow, can
+    // overlap with quiet radio), then ungate, then start radio RX last so
+    // the first packet arrives into a fully-restored stack.
+    wifiSuppressed = false;
+    needReconnect = true;
+    initWifi();
+    wifiBooted_ = true;
+    g_meshSuspended = false;
     if (RadioLibInterface::instance) {
         RadioLibInterface::instance->startReceive();
     }
-    wifiSuppressed = false;  // unblock auto-reconnect
-    g_meshSuspended = false; // re-enable phone API traffic
-    needReconnect = true;
-    initWifi();
-    radioParked_ = false;
 }
 
 #endif // T_DECK && !MESHTASTIC_EXCLUDE_MONSTERMESH
