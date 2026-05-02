@@ -241,6 +241,12 @@ ErrorCode MeshService::sendQueueStatusToPhone(const meshtastic_QueueStatus &qs, 
 
 void MeshService::sendToMesh(meshtastic_MeshPacket *p, RxSource src, bool ccToPhone)
 {
+    extern bool g_meshSuspended;
+    if (g_meshSuspended) {
+        LOG_INFO("[MM gate] dropped sendToMesh portnum=%d to=0x%x", (int)p->decoded.portnum, p->to);
+        releaseToPool(p);
+        return;
+    }
     uint32_t mesh_packet_id = p->id;
     nodeDB->updateFrom(*p); // update our local DB for this packet (because phone might have sent position packets etc...)
 

@@ -25,7 +25,15 @@ PacketAPI::PacketAPI(PacketServer *_server)
 
 int32_t PacketAPI::runOnce()
 {
-    if (g_meshSuspended) return 500; // emulator owns the device — drain nothing, idle slow
+    if (g_meshSuspended) {
+        // Emulator owns the device. We MUST still drain receivePacket() so
+        // the phone client's to-radio queue doesn't fill up — packets get
+        // dropped on the floor at MeshService::handleToRadio's gate. If we
+        // skip draining, after ~16 unread heartbeats the queue is full, and
+        // ~3 minutes in the device crashes from whatever DeviceUI does next.
+        receivePacket();
+        return 500;
+    }
     bool success = false;
 #ifndef ARCH_PORTDUINO
     if (config.bluetooth.enabled) {

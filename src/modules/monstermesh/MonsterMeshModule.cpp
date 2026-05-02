@@ -321,6 +321,19 @@ int32_t MonsterMeshModule::runOnce()
         lastWakeMs = millis();
         powerFSM.trigger(EVENT_INPUT);
     }
+
+    // Heartbeat: every 10s, log free heap + thread state so we can see if
+    // and when the LoRa thread stops ticking. Emu-mode soak crashes look
+    // like runOnce going silent at some point — this tells us when.
+    static uint32_t lastHeartbeatMs = 0;
+    if ((emulatorActive_ || browserActive_) && (millis() - lastHeartbeatMs > 10000)) {
+        lastHeartbeatMs = millis();
+        LOG_INFO("[MM heartbeat] free=%u psram=%u largest=%u up=%u",
+                 (unsigned)ESP.getFreeHeap(),
+                 (unsigned)ESP.getFreePsram(),
+                 (unsigned)ESP.getMaxAllocHeap(),
+                 (unsigned)millis());
+    }
     // One-shot probe so we can see boot-time state on serial
     static bool probeLogged = false;
     if (!probeLogged && setupDone_) {
@@ -813,6 +826,17 @@ void MonsterMeshModule::emuTaskLoop()
             emu_.save();
         }
         prevBattle_ = curBattle;
+
+        // Yield briefly every few frames so other Core-1 tasks (MonsterMesh
+        // runOnce, PacketAPI, RadioLib worker) aren't starved. Without ANY
+        // yield they wedge after ~30-60s. A 60fps cap stutters audio because
+        // runFrame() was naturally running >60fps; vTaskDelay(1) is just a
+        // 1ms tick yield that doesn't pace the framerate.
+        static uint8_t s_yieldCount = 0;
+        if (++s_yieldCount >= 4) {
+            s_yieldCount = 0;
+            vTaskDelay(1);
+        }
 
         // ── Viewport scroll ──────────────────────────────────────────────
         if (viewportRecenter_) {

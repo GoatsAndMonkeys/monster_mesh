@@ -141,6 +141,12 @@ bool RadioLibInterface::receiveDetected(uint16_t irq, ulong syncWordHeaderValidF
 /// bluetooth comms code.  If the txmit queue is empty it might return an error
 ErrorCode RadioLibInterface::send(meshtastic_MeshPacket *p)
 {
+    extern bool g_meshSuspended;
+    if (g_meshSuspended) {
+        LOG_INFO("[MM gate] dropped RadioLib::send portnum=%d to=0x%x", (int)p->decoded.portnum, p->to);
+        packetPool.release(p);
+        return ERRNO_DISABLED;
+    }
 
 #ifndef DISABLE_WELCOME_UNSET
 
