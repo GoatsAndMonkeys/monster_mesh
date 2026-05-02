@@ -24,6 +24,7 @@
 // alongside LoRa when entering/exiting emulator or browser modes.
 extern bool needReconnect;
 extern bool wifiSuppressed;
+extern bool g_meshSuspended;
 extern void deinitWifi();
 extern bool initWifi();
 
@@ -301,8 +302,13 @@ int32_t MonsterMeshModule::runOnce()
                 if (!altNow) altSeenLow = true;
                 if (altNow && !altWas && altSeenLow && (now - lastAltFire > 600)) {
                     lastAltFire = now;
-                    LOG_INFO("[MonsterMesh] ALT pressed (runOnce poll) → toggle\n");
-                    handleKeyPress(0x05);
+                    if (millis() < 30000) {
+                        LOG_INFO("[MonsterMesh] ALT ignored — boot grace (%us left)\n",
+                                 (unsigned)((30000 - millis()) / 1000));
+                    } else {
+                        LOG_INFO("[MonsterMesh] ALT pressed (runOnce poll) → toggle\n");
+                        handleKeyPress(0x05);
+                    }
                 }
                 altWas = altNow;
             }
@@ -495,6 +501,11 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
             if (now - g_micLastToggleMs > 600) {
                 g_micLastToggleMs = now;
                 g_altWasPressed = true;
+                if (millis() < 30000) {
+                    LOG_INFO("[MonsterMesh] ALT ignored — boot grace (%us left)\n",
+                             (unsigned)((30000 - millis()) / 1000));
+                    return;
+                }
                 LOG_INFO("[MonsterMesh] ALT pressed (KEY-mode peek) → toggle\n");
                 monsterMeshModule->handleKeyFromLVGL(0x05);
                 return;
@@ -1165,6 +1176,7 @@ void MonsterMeshModule::enterEmulatorMode()
     }
     LOG_INFO("MonsterMesh: radio asleep, calling deinitWifi\n");
     wifiSuppressed = true;  // block auto-reconnect from WiFiEvent
+    g_meshSuspended = true; // drop phone API traffic while in emulator
     deinitWifi();
     LOG_INFO("MonsterMesh: deinitWifi returned — radios parked\n");
     radioParked_ = true;
@@ -1178,6 +1190,7 @@ void MonsterMeshModule::exitEmulatorMode()
         RadioLibInterface::instance->startReceive();
     }
     wifiSuppressed = false;  // unblock auto-reconnect
+    g_meshSuspended = false; // re-enable phone API traffic
     needReconnect = true;
     initWifi();
     radioParked_ = false;

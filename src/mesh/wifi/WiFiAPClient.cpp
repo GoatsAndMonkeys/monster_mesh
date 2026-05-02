@@ -355,6 +355,7 @@ IPv6Address GlobalIPv6()
 // Called by the Espressif SDK to
 static void WiFiEvent(WiFiEvent_t event)
 {
+    if (wifiSuppressed) return;
     LOG_DEBUG("Network-Event %d: ", event);
 
     switch (event) {

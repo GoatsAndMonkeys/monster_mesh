@@ -23,6 +23,8 @@
 #error FromRadio is too big
 #endif
 
+bool g_meshSuspended = false; // MonsterMesh sets true while emulator/browser parks Meshtastic
+
 #if ToRadio_size > MAX_TO_FROM_RADIO_SIZE
 #error ToRadio is too big
 #endif
@@ -148,6 +150,7 @@ bool PhoneAPI::checkConnectionTimeout()
  */
 bool PhoneAPI::handleToRadio(const uint8_t *buf, size_t bufLength)
 {
+    if (g_meshSuspended) return true; // emulator owns the device — drop phone traffic
     powerFSM.trigger(EVENT_CONTACT_FROM_PHONE); // As long as the phone keeps talking to us, don't let the radio go to sleep
     lastContactMsec = millis();
 
@@ -223,6 +226,7 @@ bool PhoneAPI::handleToRadio(const uint8_t *buf, size_t bufLength)
 
 size_t PhoneAPI::getFromRadio(uint8_t *buf)
 {
+    if (g_meshSuspended) return 0; // emulator owns the device — no FromRadio output
     // Respond to heartbeat by sending queue status
     if (heartbeatReceived) {
         memset(&fromRadioScratch, 0, sizeof(fromRadioScratch));
