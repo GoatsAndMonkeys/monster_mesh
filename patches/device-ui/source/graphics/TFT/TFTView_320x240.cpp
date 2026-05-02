@@ -458,7 +458,7 @@ void TFTView_320x240::ui_set_active(lv_obj_t *b, lv_obj_t *p, lv_obj_t *tp)
 {
     if (activeButton) {
         lv_obj_set_style_border_width(activeButton, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-        if (Themes::get() == Themes::eDark)
+        if (Themes::get() == Themes::ePokemonRed)
             lv_obj_set_style_bg_img_recolor_opa(activeButton, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_bg_img_recolor(activeButton, colorGray, LV_PART_MAIN | LV_STATE_DEFAULT);
     }
@@ -675,7 +675,7 @@ void TFTView_320x240::updateTheme(void)
     Themes::recolorText(objects.home_sd_card_label, cardDetected);
     Themes::recolorText(objects.home_memory_label, (bool)objects.home_memory_button->user_data);
 
-    lv_opa_t opa = (Themes::get() == Themes::eDark) ? 0 : 255;
+    lv_opa_t opa = (Themes::get() == Themes::ePokemonRed) ? 0 : 255;
     lv_obj_set_style_bg_img_recolor_opa(objects.home_button, opa, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_img_recolor_opa(objects.nodes_button, opa, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_img_recolor_opa(objects.groups_button, opa, LV_PART_MAIN | LV_STATE_DEFAULT);
