@@ -59,10 +59,10 @@ Themes::Theme Themes::get(void)
     return theme;
 }
 
-// Helper: is current theme one of the green themes?
-static inline bool isGreen() {
-    return theme >= Themes::eDmgGreen;
-}
+// All themes use cozette pixel fonts — return true unconditionally so the
+// existing isGreen() font/line-spacing gates apply to Dark, Light, Red, and
+// Blue too. Originally only the 3 green themes used cozette.
+static inline bool isGreen() { return true; }
 
 enum ThemeColor {
     eMainScreenStyle,
@@ -270,7 +270,7 @@ void apply_style_home_container_style(void)
     lv_style_set_border_side(style, LV_BORDER_SIDE_FULL);
     lv_style_set_bg_color(style, lv_color_hex(THEME(eHomeContainerBg)));
     lv_style_set_shadow_color(style, lv_color_hex(THEME(eHomeContainerShadow)));
-    lv_style_set_text_font(style, isGreen() ? &lv_font_cozette_13 : &ui_font_montserrat_16);
+    lv_style_set_text_font(style, &lv_font_cozette_13);
     lv_style_set_radius(style, 10);
     lv_style_set_text_color(style, lv_color_hex(THEME(eHomeContainerText)));
     if (isGreen())
@@ -290,7 +290,7 @@ void apply_style_node_panel_style(void)
     lv_style_t *style = get_style_node_panel_style_MAIN_DEFAULT();
     lv_style_set_bg_color(style, lv_color_hex(THEME(eNodePanelBg)));
     lv_style_set_border_color(style, lv_color_hex(THEME(eNodePanelBorder)));
-    lv_style_set_text_font(style, isGreen() ? &lv_font_cozette_13 : &ui_font_montserrat_12);
+    lv_style_set_text_font(style, &lv_font_cozette_13);
     lv_style_set_text_color(style, lv_color_hex(THEME(eNodePanelText)));
     if (isGreen())
         lv_style_set_text_line_space(style, 16);
@@ -365,6 +365,7 @@ void apply_style_tab_view_style(void)
     lv_style_t *style = get_style_tab_view_style_MAIN_DEFAULT();
     lv_style_set_bg_color(style, lv_color_hex(THEME(eTabViewBg)));
     lv_style_set_text_color(style, lv_color_hex(THEME(eTabViewText)));
+    lv_style_set_text_font(style, &lv_font_cozette_13);
 };
 void apply_style_drop_down_style(void){};
 void apply_style_bw_label_style(void)

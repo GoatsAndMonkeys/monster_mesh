@@ -110,6 +110,13 @@ enum ScrollDirection {
 
 extern const char *firmware_version;
 
+// Cozette pixel fonts patched into generated/ui_320x240/. Declared here so
+// the runtime code (e.g. addNode short-name labels) that previously hardcoded
+// montserrat can use cozette regardless of theme.
+LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_13;
+LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_20;
+LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_26;
+
 TFTView_320x240 *TFTView_320x240::gui = nullptr;
 lv_obj_t *TFTView_320x240::currentPanel = nullptr;
 lv_obj_t *TFTView_320x240::spinnerButton = nullptr;
@@ -535,7 +542,7 @@ void TFTView_320x240::enterProgrammingMode(void)
         state = MeshtasticView::eProgrammingMode;
         lv_label_set_text(objects.meshtastic_url, _(">> Programming mode <<"));
         lv_label_set_text_fmt(objects.firmware_label, "%06d", db.config.bluetooth.fixed_pin);
-        lv_obj_set_style_text_font(objects.firmware_label, &ui_font_montserrat_20, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_font(objects.firmware_label, &lv_font_cozette_20, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_add_flag(objects.boot_logo, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(objects.boot_logo_button, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(objects.bluetooth_button, LV_OBJ_FLAG_HIDDEN);
@@ -585,7 +592,7 @@ void TFTView_320x240::apply_hotfix(void)
         buttonSize = 36;
     }
     if (h > 400) {
-        lv_obj_set_style_text_font(objects.home_qr_label, &ui_font_montserrat_16, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_font(objects.home_qr_label, &lv_font_cozette_13, LV_PART_MAIN | LV_STATE_DEFAULT);
     }
 
     lv_obj_move_foreground(objects.keyboard);
@@ -4445,7 +4452,7 @@ void TFTView_320x240::addMessage(lv_obj_t *container, uint32_t msgTime, uint32_t
 
     lv_obj_t *textLabel = lv_label_create(hiddenPanel);
     // calculate expected size of text bubble, to make it look nicer
-    lv_coord_t width = lv_txt_get_width(buf, strlen(buf), &ui_font_montserrat_12, 0);
+    lv_coord_t width = lv_txt_get_width(buf, strlen(buf), &lv_font_cozette_13, 0);
     lv_obj_set_width(textLabel, std::max<int32_t>(std::min<int32_t>(width, 200) + 10, 40));
     lv_obj_set_height(textLabel, LV_SIZE_CONTENT);
     lv_obj_set_y(textLabel, 0);
@@ -4560,9 +4567,9 @@ void TFTView_320x240::addNode(uint32_t nodeNum, uint8_t ch, const char *userShor
     lv_obj_set_size(sn_lbl, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_label_set_long_mode(sn_lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_align(sn_lbl, LV_ALIGN_TOP_LEFT, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_font(sn_lbl, &ui_font_montserrat_14, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(sn_lbl, &lv_font_cozette_20, LV_PART_MAIN | LV_STATE_DEFAULT);
     // if short name contains only non-printable glyphs replace with short id
-    if (lv_txt_get_width(userShort, strlen(userShort), &ui_font_montserrat_14, 0) <= 4) {
+    if (lv_txt_get_width(userShort, strlen(userShort), &lv_font_cozette_20, 0) <= 4) {
         lv_label_set_text_fmt(sn_lbl, "%04x", nodeNum & 0xffff);
     } else {
         lv_label_set_text(sn_lbl, userShort);
@@ -6400,7 +6407,7 @@ void TFTView_320x240::newMessage(uint32_t nodeNum, lv_obj_t *container, uint8_t 
 
     lv_obj_t *msgLabel = lv_label_create(hiddenPanel);
     // calculate expected size of text bubble, to make it look nicer
-    lv_coord_t width = lv_txt_get_width(msg, strlen(msg), &ui_font_montserrat_14, 0);
+    lv_coord_t width = lv_txt_get_width(msg, strlen(msg), &lv_font_cozette_13, 0);
     lv_obj_set_width(msgLabel, std::max<int32_t>(std::min<int32_t>((int32_t)(width), 160) + 10, 40));
     lv_obj_set_height(msgLabel, LV_SIZE_CONTENT);
     lv_obj_set_align(msgLabel, LV_ALIGN_LEFT_MID);

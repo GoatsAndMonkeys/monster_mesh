@@ -97,7 +97,8 @@ public:
     void toggleSound();
     void adjustVolume(int8_t delta);
     void adjustBrightness(int8_t delta);
-    void ejectROM();  // SYM+ALT: save current, return to ROM browser
+    void ejectROM();   // SYM+ALT: pause to browser, keep cart loaded
+    void clearCart();  // [Eject Cart] entry in browser: actually unload
     const char *getSetupStatus() const { return setupStatus_; }
     // RAW mode: set joypad directly from bitmask (bypasses press/release timer)
     void setJoypadDirect(uint8_t mask) { joypadState_ = mask; kbMask_ = 0; }
@@ -113,6 +114,10 @@ private:
     // Set true by LVGL thread on browser entry; consumed by runOnce on LoRa
     // thread which then runs the SD reinit + scan. Keeps LVGL thread fast.
     volatile bool browserNeedsScan_ = false;
+
+    // True when the user has scrolled up to the virtual [Eject Cart] row at
+    // the top of the browser (only visible when emuInitialized_ is true).
+    bool ejectFocused_ = false;
 
     // Set true by LVGL thread on emu/browser exit; consumed by runOnce on
     // LoRa thread which then runs RadioLibInterface::startReceive(). The

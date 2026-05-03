@@ -133,7 +133,7 @@ private:
         }
         root.close();
 
-        // Second pass: collect all files
+        // Second pass: ROM files (.gb / .gbc)
         root = SD.open(dir_);
         if (!root) { dirty_ = true; return; }
         entry = root.openNextFile();
@@ -141,7 +141,26 @@ private:
             const char *name = entry.name();
             const char *slash = strrchr(name, '/');
             const char *fname = slash ? slash + 1 : name;
-            if (fname[0] != '.' && !entry.isDirectory()) {
+            if (fname[0] != '.' && !entry.isDirectory() && isGBFile(fname)) {
+                strncpy(entries_[count_].name, fname, FB_MAX_NAME - 1);
+                entries_[count_].name[FB_MAX_NAME - 1] = '\0';
+                entries_[count_].isDir = false;
+                count_++;
+            }
+            entry.close();
+            entry = root.openNextFile();
+        }
+        root.close();
+
+        // Third pass: everything else (non-ROM files)
+        root = SD.open(dir_);
+        if (!root) { dirty_ = true; return; }
+        entry = root.openNextFile();
+        while (entry && count_ < FB_MAX_ENTRIES) {
+            const char *name = entry.name();
+            const char *slash = strrchr(name, '/');
+            const char *fname = slash ? slash + 1 : name;
+            if (fname[0] != '.' && !entry.isDirectory() && !isGBFile(fname)) {
                 strncpy(entries_[count_].name, fname, FB_MAX_NAME - 1);
                 entries_[count_].name[FB_MAX_NAME - 1] = '\0';
                 entries_[count_].isDir = false;

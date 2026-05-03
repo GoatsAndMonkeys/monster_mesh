@@ -440,8 +440,31 @@ int32_t MonsterMeshModule::runOnce()
         uint8_t key = pendingBrowserKey_;
         if (key != 0) {
             pendingBrowserKey_ = 0;
-            LOG_DEBUG("[MonsterMesh] browser key=0x%02X cursor=%d count=%d\n",
-                      key, browser_.cursor(), browser_.count());
+            LOG_DEBUG("[MonsterMesh] browser key=0x%02X cursor=%d count=%d eject=%d\n",
+                      key, browser_.cursor(), browser_.count(), (int)ejectFocused_);
+            // [Eject Cart] virtual row at top of browser, only when a ROM is loaded.
+            if (emuInitialized_) {
+                if ((key == 'w' || key == 'W') && browser_.cursor() == 0 && !ejectFocused_) {
+                    ejectFocused_ = true;
+                    browser_.markDirty();
+                    renderBrowser();
+                    return 100;
+                }
+                if (ejectFocused_) {
+                    if (key == 's' || key == 'S') {
+                        ejectFocused_ = false;
+                        browser_.markDirty();
+                        renderBrowser();
+                        return 100;
+                    }
+                    if (key == 'k' || key == 'K' || key == '\r' || key == '\n') {
+                        ejectFocused_ = false;
+                        clearCart();
+                        renderBrowser();
+                        return 100;
+                    }
+                }
+            }
             bool selected;
             {
                 concurrency::LockGuard g(spiLock);
@@ -790,15 +813,28 @@ void MonsterMeshModule::toggleSound()
 
 void MonsterMeshModule::ejectROM()
 {
-    LOG_INFO("[MonsterMesh] Eject ROM — saving and returning to browser\n");
+    // SYM+ALT: pause cartridge into the browser. We keep emuInitialized_=true
+    // and the loaded ROM, so the user can pick a different cart OR explicitly
+    // eject via the [Eject Cart] entry that the browser surfaces when a cart
+    // is loaded.
+    LOG_INFO("[MonsterMesh] Pause to ROM browser — cart kept loaded\n");
     if (emu_.isRunning()) {
-        pendingSave_ = true;  // runOnce will handle the SD write off-thread
+        pendingSave_ = true;
     }
     emulatorActive_ = false;     // stops emuTaskLoop runFrame (and audio)
-    emuInitialized_ = false;     // next ALT opens browser instead of toggling
     browserActive_ = true;       // show browser
     browserNeedsScan_ = true;    // re-scan SD for ROM list
-    setJoypadDirect(0);          // release any held GB buttons
+    setJoypadDirect(0);
+}
+
+void MonsterMeshModule::clearCart()
+{
+    // [Eject Cart] entry inside the browser: actually unload the ROM. Stay
+    // in browser afterward so the user can pick another cart.
+    LOG_INFO("[MonsterMesh] Eject cart — unloading ROM\n");
+    if (emu_.isRunning()) pendingSave_ = true;
+    emuInitialized_ = false;
+    browser_.markDirty();  // redraw without [Eject Cart] row
 }
 
 void MonsterMeshModule::adjustVolume(int8_t delta)
@@ -1213,24 +1249,38 @@ void MonsterMeshModule::renderBrowser()
 
     gfx->setTextSize(1);
 
+    // [Eject Cart] virtual row above the list when a ROM is loaded
+    int ejectRowY = -1;
+    if (emuInitialized_) {
+        ejectRowY = LIST_Y;
+        if (ejectFocused_) gfx->fillRect(0, ejectRowY, 320, ROW_H, cHi);
+        gfx->setTextSize(1);
+        gfx->setTextColor(cAccent);
+        gfx->setCursor(4, ejectRowY + 3);
+        gfx->print("[Eject Cart]");
+    }
+
     if (browser_.count() == 0) {
         gfx->setTextSize(2);
         gfx->setTextColor(cAccent);
-        gfx->setCursor(4, LIST_Y + 20);
+        gfx->setCursor(4, LIST_Y + (emuInitialized_ ? ROW_H : 0) + 20);
         gfx->print("No files found");
         gfx->setTextSize(1);
         gfx->setTextColor(cText);
-        gfx->setCursor(4, LIST_Y + 44);
+        gfx->setCursor(4, LIST_Y + (emuInitialized_ ? ROW_H : 0) + 44);
         gfx->print("Path: ");
         gfx->print(browser_.currentDir());
     } else {
         int scroll = browser_.scroll();
         int cursor = browser_.cursor();
-        for (int i = 0; i < MAX_ROWS && (scroll + i) < browser_.count(); i++) {
+        // When [Eject Cart] is shown above, push the file list down by one row.
+        int yOffset = emuInitialized_ ? ROW_H : 0;
+        int maxRows = emuInitialized_ ? MAX_ROWS - 1 : MAX_ROWS;
+        for (int i = 0; i < maxRows && (scroll + i) < browser_.count(); i++) {
             int idx = scroll + i;
-            int y = LIST_Y + i * ROW_H;
+            int y = LIST_Y + yOffset + i * ROW_H;
 
-            if (idx == cursor) {
+            if (idx == cursor && !ejectFocused_) {
                 gfx->fillRect(0, y, 320, ROW_H, cHi);
             }
 
