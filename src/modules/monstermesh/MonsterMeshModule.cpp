@@ -232,6 +232,43 @@ void MonsterMeshModule::sendTextDM(uint32_t to, const char *text)
     LOG_INFO("[MonsterMesh] sent DM to 0x%08X: %s\n", (unsigned)to, text);
 }
 
+void MonsterMeshModule::daycareStatusString(char *buf, size_t bufLen)
+{
+    if (!buf || bufLen == 0) return;
+    size_t off = 0;
+    #define DC_APPEND(...) do { \
+        if (off < bufLen - 1) { \
+            int _w = snprintf(buf + off, bufLen - off, __VA_ARGS__); \
+            if (_w > 0) off += (size_t)_w; \
+            if (off >= bufLen) off = bufLen - 1; \
+        } \
+    } while (0)
+
+    DC_APPEND("Daycare: %s\n", daycare_.isActive() ? "active" : "idle");
+
+    uint8_t nc = daycare_.getNeighborCount();
+    DC_APPEND("Neighbors: %u\n", (unsigned)nc);
+    const auto *ns = daycare_.getNeighbors();
+    for (uint8_t i = 0; i < nc && i < 6; ++i) {
+        DC_APPEND("  %s/%s Lv%u\n",
+                  ns[i].shortName[0] ? ns[i].shortName : "?",
+                  ns[i].nickname[0]  ? ns[i].nickname  : "?",
+                  (unsigned)ns[i].level);
+    }
+
+    const auto &evt = daycare_.getLastEvent();
+    if (evt.message[0]) {
+        uint32_t ago = (millis() - daycare_.getLastEventTime()) / 1000;
+        DC_APPEND("Last event %us ago:\n", (unsigned)ago);
+        DC_APPEND("  %s\n", evt.message);
+        if (evt.xp) DC_APPEND("  +%u xp\n", (unsigned)evt.xp);
+    } else {
+        DC_APPEND("No events yet.\n");
+    }
+    buf[off] = '\0';
+    #undef DC_APPEND
+}
+
 void MonsterMeshModule::daycareCheckInFromStagedParty()
 {
     // Use the most recently-staged party (loaded from SAV) to check in.
@@ -327,6 +364,10 @@ int32_t MonsterMeshModule::runOnce()
         // early-boot PacketAPI/NodeInfo window caused a ~10s reset loop. The
         // periodic beacon timer fires on its own cadence later.
         daycare_.init();
+        terminal_.setDaycareStatusFn(
+            [](void *ctx, char *buf, size_t n) {
+                static_cast<MonsterMeshModule *>(ctx)->daycareStatusString(buf, n);
+            }, this);
         daycare_.setSendDm([](uint32_t dest, const char *msg, void *ctx) {
             auto *self = static_cast<MonsterMeshModule *>(ctx);
             self->sendTextDM(dest, msg);

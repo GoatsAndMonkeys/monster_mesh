@@ -118,6 +118,10 @@ public:
     // Run an in-game daycare check-in for the most recent party loaded from
     // SAV. Safe to call when no ROM is loaded — silently no-ops.
     void daycareCheckInFromStagedParty();
+
+    // Fill `buf` with a multi-line daycare status report (newline-separated).
+    // Used by the terminal `daycare` command.
+    void daycareStatusString(char *buf, size_t bufLen);
     const char *getSetupStatus() const { return setupStatus_; }
     // RAW mode: set joypad directly from bitmask (bypasses press/release timer)
     void setJoypadDirect(uint8_t mask) { joypadState_ = mask; kbMask_ = 0; }

@@ -41,6 +41,16 @@ class MonsterMeshTerminal {
     bool hasParty() const { return partyLoaded_; }
     const Gen1Party &getParty() const { return party_; }
 
+    // Callback used to fill `buf` with the current daycare status (multiline,
+    // newline-separated). Invoked when the user types `daycare` in the
+    // terminal. Set by the module so the terminal stays decoupled from
+    // PokemonDaycare's headers.
+    typedef void (*DaycareStatusFn)(void *ctx, char *buf, size_t bufLen);
+    void setDaycareStatusFn(DaycareStatusFn fn, void *ctx) {
+        daycareStatusFn_ = fn;
+        daycareStatusCtx_ = ctx;
+    }
+
     // Called by the module when the deferred SAV-load finishes on the LoRa
     // thread. Wipes the existing scrollback and reprints the party block so
     // the user sees the freshly-loaded data without having to type "party".
@@ -64,4 +74,7 @@ class MonsterMeshTerminal {
 
     Gen1Party party_ = {};
     bool partyLoaded_ = false;
+
+    DaycareStatusFn daycareStatusFn_ = nullptr;
+    void           *daycareStatusCtx_ = nullptr;
 };

@@ -210,8 +210,31 @@ void MonsterMeshTerminal::executeLine(const char *line)
         println("  help        - this list");
         println("  version     - firmware build");
         println("  party       - show your loaded SAV party");
+        println("  daycare     - daycare status + neighbors");
         println("  echo <text> - print <text>");
         println("  clear       - wipe screen");
+        return;
+    }
+    if (strncmp(line, "daycare", 7) == 0) {
+        if (!daycareStatusFn_) {
+            println("daycare not wired.");
+            return;
+        }
+        char buf[1024] = {};
+        daycareStatusFn_(daycareStatusCtx_, buf, sizeof(buf));
+        // Print line by line; daycareStatusFn fills buf with '\n'-separated text.
+        const char *p = buf;
+        while (*p) {
+            const char *nl = p;
+            while (*nl && *nl != '\n') ++nl;
+            char tmp[128];
+            size_t n = (size_t)(nl - p);
+            if (n >= sizeof(tmp)) n = sizeof(tmp) - 1;
+            memcpy(tmp, p, n);
+            tmp[n] = '\0';
+            println(tmp);
+            p = (*nl == '\n') ? (nl + 1) : nl;
+        }
         return;
     }
     if (strncmp(line, "version", 7) == 0) {
