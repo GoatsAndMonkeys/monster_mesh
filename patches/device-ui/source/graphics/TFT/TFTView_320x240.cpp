@@ -117,6 +117,13 @@ LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_13;
 LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_20;
 LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_26;
 
+// MonsterMesh terminal hook — module registers a callback that we invoke
+// when the user taps the map button, repurposing it as the terminal entry.
+extern "C" {
+static void (*g_mm_terminal_cb)(void *parent) = nullptr;
+void monstermesh_set_terminal_cb(void (*cb)(void *parent)) { g_mm_terminal_cb = cb; }
+}
+
 TFTView_320x240 *TFTView_320x240::gui = nullptr;
 lv_obj_t *TFTView_320x240::currentPanel = nullptr;
 lv_obj_t *TFTView_320x240::spinnerButton = nullptr;
@@ -1143,6 +1150,17 @@ void TFTView_320x240::ui_event_MapButton(lv_event_t *e)
 {
     static bool ignoreClicked = false;
     lv_event_code_t event_code = lv_event_get_code(e);
+    // MonsterMesh: the "map" button is repurposed as the terminal entry.
+    // Map tile loading is disabled (SD reads contend with LoRa SPI), so this
+    // tap activates the map_panel (which keeps the left nav strip visible)
+    // and forwards to the registered terminal callback that fills it.
+    if (event_code == LV_EVENT_CLICKED && THIS->activeSettings == eNone) {
+        if (g_mm_terminal_cb) {
+            THIS->ui_set_active(objects.map_button, objects.map_panel, objects.top_map_panel);
+            g_mm_terminal_cb(objects.map_panel);
+            return;
+        }
+    }
     if (event_code == LV_EVENT_CLICKED && THIS->activeSettings == eNone) {
         if (ignoreClicked) { // prevent long press to enter this setting
             ignoreClicked = false;

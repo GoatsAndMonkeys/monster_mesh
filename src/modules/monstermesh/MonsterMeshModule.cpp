@@ -34,6 +34,11 @@ extern void deinitWifi();
 // peek path can see the same I2C kb-byte microseconds apart, otherwise.
 // One global timestamp prevents enterEmulatorMode being called twice.
 static uint32_t g_lastAltFireMs = 0;
+
+// KEY-mode peek edge-detector state (file-scope so the SYM+ALT eject path can
+// reset it: a still-held ALT after eject must NOT be seen as a fresh edge).
+static bool g_keyPeekAltWasPressed = false;
+static bool g_keyPeekAltSeenLow    = false;
 extern bool initWifi();
 
 // LovyanGFX is available on T-Deck in both t-deck and t-deck-tft builds
@@ -61,6 +66,16 @@ static void mmToggle()
     if (monsterMeshModule) {
         monsterMeshModule->handleKeyFromLVGL(0x05); // toggle emulator on/off
     }
+}
+
+// Called from device-ui's map button (we repurposed it as the terminal entry).
+// device-ui hands us the LVGL panel to parent into so the left nav stays visible.
+extern "C" __attribute__((weak)) void monstermesh_set_terminal_cb(void (*cb)(void *parent)) { (void)cb; }
+static lv_obj_t *g_terminalParent = nullptr;
+static void mmTerminalToggle(void *parent)
+{
+    g_terminalParent = static_cast<lv_obj_t *>(parent);
+    if (monsterMeshModule) monsterMeshModule->toggleTerminal();
 }
 
 // Status getter for device-ui debug overlay
@@ -96,6 +111,7 @@ MonsterMeshModule::MonsterMeshModule()
 
     // Register toggle callback for device-ui tools menu button
     monstermesh_set_toggle_cb(mmToggle);
+    monstermesh_set_terminal_cb(mmTerminalToggle);
 }
 
 // ── setup() — called once after mesh is initialized ─────────────────────────
@@ -598,21 +614,19 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
 
         // ALT button → toggle screens
         bool altPressed = (rb[0] & 0x10) != 0;
-        static bool g_altWasPressed = false;
-        static bool g_altSeenLow = false;
-        if (!altPressed) g_altSeenLow = true;
-        if (altPressed && !g_altWasPressed && g_altSeenLow) {
+        if (!altPressed) g_keyPeekAltSeenLow = true;
+        if (altPressed && !g_keyPeekAltWasPressed && g_keyPeekAltSeenLow) {
             uint32_t now = millis();
             if (now - g_lastAltFireMs > 2000) {
                 g_lastAltFireMs = now;
                 g_micLastToggleMs = now;
-                g_altWasPressed = true;
+                g_keyPeekAltWasPressed = true;
                 LOG_INFO("[MonsterMesh] ALT pressed (KEY-mode peek) → toggle\n");
                 monsterMeshModule->handleKeyFromLVGL(0x05);
                 return;
             }
         }
-        g_altWasPressed = altPressed;
+        g_keyPeekAltWasPressed = altPressed;
 
         // Mic button → toggle sound
         bool micPressed = (rb[0] & 0x40) != 0;
@@ -645,6 +659,11 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
                 monsterMeshModule->ejectROM();
                 kbSetMode(false);  // browser uses KEY mode
             }
+            // Force the KEY-mode peek's edge detector to require a fresh
+            // release+press. Otherwise the still-held ALT after eject looks
+            // like a rising edge and toggles the user back to Meshtastic.
+            g_keyPeekAltSeenLow = false;
+            g_keyPeekAltWasPressed = true;
             return;
         }
         if (!symAltHeld) g_symAltConsumed = false;
@@ -825,6 +844,116 @@ void MonsterMeshModule::ejectROM()
     browserActive_ = true;       // show browser
     browserNeedsScan_ = true;    // re-scan SD for ROM list
     setJoypadDirect(0);
+}
+
+// Load party directly from the .sav file on SD that matches the last-launched
+// ROM. This works even when the emulator isn't currently running — gives the
+// terminal a usable party from "the last save used" rather than only when
+// emulator memory is live.
+static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out)
+{
+    if (!romPath || !romPath[0]) return false;
+
+    // SAV file lives next to the ROM with .sav extension. romPath is the VFS
+    // path like "/sd/pokemon.gb" — convert to "/sd/pokemon.sav".
+    char savPath[256];
+    strncpy(savPath, romPath, sizeof(savPath) - 1);
+    savPath[sizeof(savPath) - 1] = '\0';
+    char *dot = strrchr(savPath, '.');
+    if (!dot) return false;
+    if (sizeof(savPath) - (dot - savPath) < 5) return false;
+    strcpy(dot, ".sav");
+
+    // SAV path uses VFS prefix "/sd"; SD library expects path without "/sd".
+    const char *sdRel = savPath;
+    if (strncmp(sdRel, "/sd", 3) == 0) sdRel += 3;
+
+    // Same reinit dance the emulator does — SD library state is "ended" after
+    // every SD operation in this codebase, so SD.open silently returns null
+    // unless we re-begin first.
+    SD.end();
+    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+    if (!SD.begin(SDCARD_CS, SPI)) {
+        LOG_WARN("[MonsterMesh] terminal SAV load: SD.begin failed\n");
+        return false;
+    }
+
+    File f = SD.open(sdRel, FILE_READ);
+    if (!f) {
+        LOG_WARN("[MonsterMesh] terminal SAV load: SD.open('%s') failed\n", sdRel);
+        return false;
+    }
+
+    // Gen 1 SAV is 32KB. We only need the party block.
+    static constexpr uint16_t SAV_PARTY_COUNT  = 0x2F2C;
+    static constexpr uint16_t SAV_SPECIES_LIST = 0x2F2D;
+    static constexpr uint16_t SAV_POKEMON_DATA = 0x2F34;
+    static constexpr uint16_t SAV_NICKNAMES    = 0x307E;
+    static constexpr uint8_t  SAV_NAME_SIZE    = 11;
+    static constexpr uint8_t  SAV_TERMINATOR   = 0x50;
+    static constexpr uint16_t SAV_PARTY_END    = 0x307E + 11 * 6;  // ~12.5KB
+
+    // Read the party region into a small buffer.
+    uint8_t *buf = (uint8_t *)heap_caps_malloc(SAV_PARTY_END, MALLOC_CAP_8BIT);
+    if (!buf) { f.close(); return false; }
+    f.seek(0);
+    int n = f.read(buf, SAV_PARTY_END);
+    f.close();
+    if (n < SAV_PARTY_END) { free(buf); return false; }
+
+    memset(&out, 0, sizeof(out));
+    uint8_t count = buf[SAV_PARTY_COUNT];
+    if (count > 6) count = 6;
+    out.count = count;
+    memcpy(out.species,   &buf[SAV_SPECIES_LIST],  7);
+    memcpy((uint8_t *)out.mons, &buf[SAV_POKEMON_DATA], (size_t)count * 44);
+    for (uint8_t i = 0; i < count; ++i) {
+        const uint8_t *nick = &buf[SAV_NICKNAMES + i * SAV_NAME_SIZE];
+        for (int j = 0; j < SAV_NAME_SIZE; ++j) {
+            out.nicknames[i][j] = nick[j];
+            if (nick[j] == SAV_TERMINATOR) break;
+        }
+    }
+    free(buf);
+    return true;
+}
+
+void MonsterMeshModule::toggleTerminal()
+{
+#if HAS_TFT
+    // The map button (>_ icon) always SHOWS the terminal — no toggle. The
+    // terminal stays alive when the user navigates to other panels (Nodes,
+    // Settings, etc.); coming back to this nav button must re-show it, not
+    // close it. The user closes by navigating away or by ALT'ing into the
+    // emulator.
+    {
+        lv_obj_t *parent = g_terminalParent ? g_terminalParent : lv_screen_active();
+        if (!parent) return;
+        terminal_.open(parent);
+        terminalActive_ = true;
+        // Try the .sav file on disk first — that gives the user "the last
+        // save used" even if the emulator isn't currently running. Fall back
+        // to live WRAM read if SAV isn't available.
+        Gen1Party p = {};
+        bool loaded = false;
+        if (emu_.romPath()[0]) {
+            concurrency::LockGuard g(spiLock);
+            loaded = loadPartyFromSavOnSd(emu_.romPath(), p);
+        }
+        if (!loaded && emu_.isRunning()) {
+            p.count = emu_.readWRAM(Gen1::wPartyCount);
+            if (p.count > 6) p.count = 6;
+            emu_.readWRAMRange(Gen1::wPartySpecies,  p.species,                7);
+            emu_.readWRAMRange(Gen1::wPartyMons,     (uint8_t *)p.mons,        sizeof(p.mons));
+            emu_.readWRAMRange(Gen1::wPartyMonOT,    (uint8_t *)p.otNames,     sizeof(p.otNames));
+            emu_.readWRAMRange(Gen1::wPartyMonNicks, (uint8_t *)p.nicknames,   sizeof(p.nicknames));
+            loaded = true;
+        }
+        if (loaded) terminal_.setParty(p);
+        LOG_INFO("[MonsterMesh] terminal opened (party_loaded=%d count=%d)\n",
+                 (int)loaded, (int)p.count);
+    }
+#endif
 }
 
 void MonsterMeshModule::clearCart()
@@ -1032,13 +1161,25 @@ void MonsterMeshModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *stat
 
 void MonsterMeshModule::handleKeyPress(uint8_t ascii)
 {
+    // Terminal: route ASCII keys to it ONLY when terminal is the foreground
+    // (i.e. emulator and browser are both inactive). When the user ALT's into
+    // ROM browser or emulator, terminalActive_ stays true so the terminal
+    // remains "running in background" with its session preserved, but we let
+    // browser/emu own the keyboard. ALT itself always falls through.
+    if (terminalActive_ && !emulatorActive_ && !browserActive_ && ascii != 0x05) {
+        terminal_.onKey(ascii);
+        powerFSM.trigger(EVENT_INPUT);
+        return;
+    }
+
     // Keep screen awake on any keypress while emulator or browser is active
     if (emulatorActive_ || browserActive_) {
         powerFSM.trigger(EVENT_INPUT);
     }
 
     // ── Ctrl+E / mic button: toggle display modes ──────────────────────
-    if (ascii == 0x05) {  // Ctrl+E
+    if (ascii == 0x05) {  // Ctrl+E — terminal stays open in background; only
+                          // routes keys when emulator + browser are inactive.
         if (browserActive_) {
             // ── Exit browser → Meshtastic UI ──────────────────────────────
             browserActive_ = false;
@@ -1318,6 +1459,32 @@ void MonsterMeshModule::launchROM(const char *path)
     char vfsPath[FB_MAX_PATH + 4];
     snprintf(vfsPath, sizeof(vfsPath), "/sd%s", path);
     LOG_INFO("[MonsterMesh] Launching ROM: %s\n", vfsPath);
+
+    // Small "Loading..." dialog in the GBC green palette so it matches the
+    // ROM browser regardless of active theme.
+#if HAS_TFT
+    if (g_deviceUiLgfx) {
+        concurrency::LockGuard g(spiLock);
+        lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
+        gfx->startWrite();
+        const int boxW = 96, boxH = 24;
+        const int boxX = (gfx->width()  - boxW) / 2;
+        const int boxY = (gfx->height() - boxH) / 2;
+        auto rgb565 = [](uint32_t v) -> uint16_t {
+            return ((v >> 8) & 0xF800) | ((v >> 5) & 0x07E0) | ((v >> 3) & 0x001F);
+        };
+        uint16_t fill   = rgb565(0xff081820);  // GBC darkest
+        uint16_t border = rgb565(0xff88C070);  // GBC light
+        uint16_t text   = rgb565(0xffE0F8D0);  // GBC lightest
+        gfx->fillRect(boxX, boxY, boxW, boxH, fill);
+        gfx->drawRect(boxX, boxY, boxW, boxH, border);
+        gfx->setTextSize(1);
+        gfx->setTextColor(text);
+        gfx->setCursor(boxX + 18, boxY + 8);
+        gfx->print("Loading...");
+        gfx->endWrite();
+    }
+#endif
 
     // Don't hold spiLock here — SD.open() needs SPI access internally
     bool romOk = emu_.begin(vfsPath);

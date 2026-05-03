@@ -383,7 +383,9 @@ void create_screen_main_screen() {
                     lv_obj_set_style_bg_image_src(obj, &img_messages_button_image, LV_PART_MAIN | LV_STATE_DEFAULT);
                 }
                 {
-                    // MapButton
+                    // MapButton — repurposed as MonsterMesh terminal entry.
+                    // Original map icon kept for now (was causing touch issues
+                    // when replaced with a ">_" label child).
                     lv_obj_t *obj = lv_btn_create(parent_obj);
                     objects.map_button = obj;
                     lv_obj_set_pos(obj, 0, 0);
@@ -2659,26 +2661,20 @@ void create_screen_main_screen() {
             {
                 lv_obj_t *parent_obj = obj;
                 {
-                    // TopMapLabel
+                    // TopMapLabel — repurposed as MonsterMesh Terminal title.
                     lv_obj_t *obj = lv_label_create(parent_obj);
                     objects.top_map_label = obj;
-                    lv_obj_set_pos(obj, 25, 0);
+                    lv_obj_set_pos(obj, 5, 0);
                     lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
                     lv_label_set_long_mode(obj, LV_LABEL_LONG_SCROLL_CIRCULAR);
-                    lv_label_set_text(obj, _("Locations Map"));
+                    lv_label_set_text(obj, "MonsterMesh Terminal");
                     lv_obj_set_style_align(obj, LV_ALIGN_LEFT_MID, LV_PART_MAIN | LV_STATE_DEFAULT);
                 }
                 {
-                    // TopMapImage
+                    // TopMapImage — hidden (the title alone is the marker).
                     lv_obj_t *obj = lv_img_create(parent_obj);
-                                objects.top_map_image = obj;
-                    lv_obj_set_pos(obj, -5, 0);
-                    lv_obj_set_size(obj, 24, 24);
-                    lv_img_set_pivot(obj, 0, 0);
-                    lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
-                    add_style_top_image_style(obj);
-                    lv_obj_set_style_bg_image_src(obj, &img_top_map_image, LV_PART_MAIN | LV_STATE_DEFAULT);
-                    lv_obj_set_style_align(obj, LV_ALIGN_LEFT_MID, LV_PART_MAIN | LV_STATE_DEFAULT);
+                    objects.top_map_image = obj;
+                    lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
                 }
             }
         }

@@ -42,6 +42,9 @@ public:
 
     bool isRunning() const { return running_; }
     void save() { if (running_) writeSaveFile(romPath_); }
+    // Path to the last-launched ROM (or empty string if none). Used by
+    // MonsterMeshModule to derive the matching .sav path for the terminal.
+    const char *romPath() const { return romPath_; }
 
     // ── Joypad input ────────────────────────────────────────────────────────
     void setJoypad(uint8_t activeHighBits) { joypadState_ = activeHighBits; }

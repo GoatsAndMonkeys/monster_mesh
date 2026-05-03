@@ -13,6 +13,7 @@
 #include "MeshtasticTransport.h"
 #include "MonsterMeshEmulator.h"
 #include "MonsterMeshFileBrowser.h"
+#include "MonsterMeshTerminal.h"
 
 // ── MonsterMeshModule ──────────────────────────────────────────────────────────
 // Meshtastic module that runs a Game Boy Pokemon emulator with LoRa-based
@@ -64,8 +65,10 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     MeshtasticTransport   transport_;
     MonsterMeshEmulator      emu_;
     MonsterMeshFileBrowser   browser_;
+    MonsterMeshTerminal      terminal_;
 
     bool emulatorActive_     = false;
+    bool terminalActive_     = false;
     uint8_t brightness_      = 255;
     volatile bool pendingSave_ = false;  // deferred save — done in runOnce() not callback
     bool browserActive_      = false;
@@ -99,6 +102,7 @@ public:
     void adjustBrightness(int8_t delta);
     void ejectROM();   // SYM+ALT: pause to browser, keep cart loaded
     void clearCart();  // [Eject Cart] entry in browser: actually unload
+    void toggleTerminal();  // map-button hook from device-ui
     const char *getSetupStatus() const { return setupStatus_; }
     // RAW mode: set joypad directly from bitmask (bypasses press/release timer)
     void setJoypadDirect(uint8_t mask) { joypadState_ = mask; kbMask_ = 0; }
