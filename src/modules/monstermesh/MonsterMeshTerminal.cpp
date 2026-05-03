@@ -139,6 +139,14 @@ void MonsterMeshTerminal::setParty(const Gen1Party &p)
     partyLoaded_ = (p.count > 0 && p.count <= 6);
 }
 
+void MonsterMeshTerminal::refreshParty()
+{
+    if (!output_) return;
+    clearOutput();
+    showParty();
+    prompt();
+}
+
 void MonsterMeshTerminal::println(const char *s)
 {
     if (!output_) return;
@@ -168,11 +176,18 @@ void MonsterMeshTerminal::showParty()
     for (uint8_t i = 0; i < party_.count && i < 6; i++) {
         char nick[12] = {};
         gen1NameToAscii(party_.nicknames[i], 11, nick, sizeof(nick));
-        snprintf(buf, sizeof(buf), "  %u. %s  Lv%u  spc=%u",
+        // Gen 1 stores HP and maxHP as big-endian 2-byte values in the SAV.
+        const Gen1Pokemon &m = party_.mons[i];
+        uint16_t hp    = ((uint16_t)m.hp[0]    << 8) | m.hp[1];
+        uint16_t maxHp = ((uint16_t)m.maxHp[0] << 8) | m.maxHp[1];
+        // Cozette is monospace — pad to fixed widths so columns line up:
+        //   "1. NICKNAME    Lv 50  120/200"
+        snprintf(buf, sizeof(buf), "%u. %-10s Lv %3u  %3u/%3u",
                  (unsigned)(i + 1),
-                 nick[0] ? nick : "(no nickname)",
-                 (unsigned)party_.mons[i].level,
-                 (unsigned)party_.species[i]);
+                 nick[0] ? nick : "(noname)",
+                 (unsigned)m.level,
+                 (unsigned)hp,
+                 (unsigned)maxHp);
         println(buf);
     }
 }

@@ -40,6 +40,11 @@ class MonsterMeshTerminal {
     void setParty(const Gen1Party &p);
     bool hasParty() const { return partyLoaded_; }
 
+    // Called by the module when the deferred SAV-load finishes on the LoRa
+    // thread. Wipes the existing scrollback and reprints the party block so
+    // the user sees the freshly-loaded data without having to type "party".
+    void refreshParty();
+
   private:
     void println(const char *s);
     void prompt();

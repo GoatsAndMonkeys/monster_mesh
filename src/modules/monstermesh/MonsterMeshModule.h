@@ -103,6 +103,11 @@ public:
     void ejectROM();   // SYM+ALT: pause to browser, keep cart loaded
     void clearCart();  // [Eject Cart] entry in browser: actually unload
     void toggleTerminal();  // map-button hook from device-ui
+
+    // Called by the LVGL indev tick on the LVGL thread. If a SAV-loaded
+    // party has been staged by runOnce, push it into the terminal widget
+    // here so all LVGL ops stay on the LVGL thread.
+    void tryConsumeStagedParty();
     const char *getSetupStatus() const { return setupStatus_; }
     // RAW mode: set joypad directly from bitmask (bypasses press/release timer)
     void setJoypadDirect(uint8_t mask) { joypadState_ = mask; kbMask_ = 0; }
@@ -118,6 +123,18 @@ private:
     // Set true by LVGL thread on browser entry; consumed by runOnce on LoRa
     // thread which then runs the SD reinit + scan. Keeps LVGL thread fast.
     volatile bool browserNeedsScan_ = false;
+
+    // Set true by LVGL thread when terminal opens; consumed by runOnce on LoRa
+    // thread which loads the party from SAV. Keeps the LVGL thread free of
+    // SD I/O so the panel paints immediately.
+    volatile bool terminalNeedsParty_ = false;
+
+    // Set by LoRa-thread runOnce after a successful SAV load. The LVGL
+    // keypad indev callback (which runs on the LVGL thread) consumes this
+    // and pushes the party into terminal_, so all LVGL widget ops happen
+    // on the LVGL thread.
+    Gen1Party terminalStagedParty_ = {};
+    volatile bool terminalPartyStaged_ = false;
 
     // True when the user has scrolled up to the virtual [Eject Cart] row at
     // the top of the browser (only visible when emuInitialized_ is true).

@@ -39,6 +39,11 @@ static uint32_t g_lastAltFireMs = 0;
 // reset it: a still-held ALT after eject must NOT be seen as a fresh edge).
 static bool g_keyPeekAltWasPressed = false;
 static bool g_keyPeekAltSeenLow    = false;
+
+// Forward declaration — definition lives further down in this TU but runOnce
+// needs to call it for the deferred terminal party load.
+static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out,
+                                 char *resolvedSavOut, size_t resolvedSavLen);
 extern bool initWifi();
 
 // LovyanGFX is available on T-Deck in both t-deck and t-deck-tft builds
@@ -501,6 +506,38 @@ int32_t MonsterMeshModule::runOnce()
         emu_.save();
     }
 
+    // Deferred terminal party load — runs on the LoRa thread so the LVGL
+    // thread can paint the terminal panel immediately without waiting on
+    // SD reinit + directory scan.
+    if (terminalNeedsParty_) {
+        terminalNeedsParty_ = false;
+        Gen1Party p = {};
+        bool loaded = false;
+        char resolvedSav[256] = {};
+        {
+            concurrency::LockGuard g(spiLock);
+            loaded = loadPartyFromSavOnSd(emu_.romPath(),
+                                          p, resolvedSav, sizeof(resolvedSav));
+        }
+        if (!loaded && emu_.isRunning()) {
+            p.count = emu_.readWRAM(Gen1::wPartyCount);
+            if (p.count > 6) p.count = 6;
+            emu_.readWRAMRange(Gen1::wPartySpecies,  p.species,                7);
+            emu_.readWRAMRange(Gen1::wPartyMons,     (uint8_t *)p.mons,        sizeof(p.mons));
+            emu_.readWRAMRange(Gen1::wPartyMonOT,    (uint8_t *)p.otNames,     sizeof(p.otNames));
+            emu_.readWRAMRange(Gen1::wPartyMonNicks, (uint8_t *)p.nicknames,   sizeof(p.nicknames));
+            loaded = true;
+        }
+        if (loaded) {
+            terminalStagedParty_ = p;
+            terminalPartyStaged_ = true;  // LVGL thread will pick this up
+        }
+        LOG_INFO("[MonsterMesh] terminal party load: loaded=%d count=%d sav='%s' rom='%s'\n",
+                 (int)loaded, (int)p.count,
+                 resolvedSav[0] ? resolvedSav : "(none)",
+                 emu_.romPath()[0] ? emu_.romPath() : "(none)");
+    }
+
     drainTxQueue();
     return 50;
 }
@@ -590,6 +627,10 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
     if (keepAlive) {
         lv_display_trigger_activity(NULL);
     }
+
+    // Pick up any SAV-loaded party that runOnce staged for us — this runs on
+    // the LVGL thread, so it's safe to mutate widgets here.
+    if (monsterMeshModule) monsterMeshModule->tryConsumeStagedParty();
 
     // ── ALT + Mic button peek ──────────────────────────────────────────
     // ALT (byte[0] bit 0x10) = toggle screens, Mic (byte[0] bit 0x40) = toggle sound.
@@ -846,27 +887,67 @@ void MonsterMeshModule::ejectROM()
     setJoypadDirect(0);
 }
 
+// Scan SD root for any .sav file and copy its SD-relative path into `out`.
+// Returns true on hit. Used when no ROM was launched in this boot session, so
+// the terminal can still load "the last save used" across reboots.
+static bool findFirstSavOnSd(char *out, size_t outLen)
+{
+    SD.end();
+    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+    if (!SD.begin(SDCARD_CS, SPI)) {
+        LOG_WARN("[MonsterMesh] sav scan: SD.begin failed\n");
+        return false;
+    }
+    File root = SD.open("/");
+    if (!root) {
+        LOG_WARN("[MonsterMesh] sav scan: SD.open('/') failed\n");
+        return false;
+    }
+    bool found = false;
+    while (true) {
+        File entry = root.openNextFile();
+        if (!entry) break;
+        const char *name = entry.name();
+        size_t nlen = name ? strlen(name) : 0;
+        if (!entry.isDirectory() && nlen >= 4 &&
+            strcasecmp(name + nlen - 4, ".sav") == 0) {
+            // SD library returns names with leading "/" already on this build.
+            if (name[0] == '/') {
+                strncpy(out, name, outLen - 1);
+            } else {
+                if (outLen >= 2) { out[0] = '/'; strncpy(out + 1, name, outLen - 2); }
+            }
+            out[outLen - 1] = '\0';
+            found = true;
+            entry.close();
+            break;
+        }
+        entry.close();
+    }
+    root.close();
+    return found;
+}
+
 // Load party directly from the .sav file on SD that matches the last-launched
 // ROM. This works even when the emulator isn't currently running — gives the
 // terminal a usable party from "the last save used" rather than only when
-// emulator memory is live.
-static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out)
+// emulator memory is live. If `romPath` is empty, scans SD for any .sav file.
+static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out, char *resolvedSavOut, size_t resolvedSavLen)
 {
-    if (!romPath || !romPath[0]) return false;
+    char savPath[256] = {};
+    const char *sdRel = nullptr;
 
-    // SAV file lives next to the ROM with .sav extension. romPath is the VFS
-    // path like "/sd/pokemon.gb" — convert to "/sd/pokemon.sav".
-    char savPath[256];
-    strncpy(savPath, romPath, sizeof(savPath) - 1);
-    savPath[sizeof(savPath) - 1] = '\0';
-    char *dot = strrchr(savPath, '.');
-    if (!dot) return false;
-    if (sizeof(savPath) - (dot - savPath) < 5) return false;
-    strcpy(dot, ".sav");
-
-    // SAV path uses VFS prefix "/sd"; SD library expects path without "/sd".
-    const char *sdRel = savPath;
-    if (strncmp(sdRel, "/sd", 3) == 0) sdRel += 3;
+    if (romPath && romPath[0]) {
+        // SAV file lives next to the ROM with .sav extension. romPath is the VFS
+        // path like "/sd/pokemon.gb" — convert to "/sd/pokemon.sav".
+        strncpy(savPath, romPath, sizeof(savPath) - 1);
+        char *dot = strrchr(savPath, '.');
+        if (!dot) return false;
+        if (sizeof(savPath) - (dot - savPath) < 5) return false;
+        strcpy(dot, ".sav");
+        sdRel = savPath;
+        if (strncmp(sdRel, "/sd", 3) == 0) sdRel += 3;
+    }
 
     // Same reinit dance the emulator does — SD library state is "ended" after
     // every SD operation in this codebase, so SD.open silently returns null
@@ -878,6 +959,17 @@ static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out)
         return false;
     }
 
+    // No ROM path → fall back to scanning SD for any .sav file.
+    if (!sdRel) {
+        if (!findFirstSavOnSd(savPath, sizeof(savPath))) {
+            LOG_WARN("[MonsterMesh] terminal SAV load: no ROM path, no .sav on SD\n");
+            return false;
+        }
+        sdRel = savPath;
+        // findFirstSavOnSd already calls SD.end()+SD.begin() — reopen state ok.
+    }
+
+    LOG_INFO("[MonsterMesh] terminal SAV load: trying '%s'\n", sdRel);
     File f = SD.open(sdRel, FILE_READ);
     if (!f) {
         LOG_WARN("[MonsterMesh] terminal SAV load: SD.open('%s') failed\n", sdRel);
@@ -915,7 +1007,25 @@ static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out)
         }
     }
     free(buf);
+    if (resolvedSavOut && resolvedSavLen) {
+        strncpy(resolvedSavOut, sdRel, resolvedSavLen - 1);
+        resolvedSavOut[resolvedSavLen - 1] = '\0';
+    }
     return true;
+}
+
+void MonsterMeshModule::tryConsumeStagedParty()
+{
+    if (!terminalPartyStaged_) return;
+    if (!terminalActive_) {
+        // Terminal isn't visible — drop the staged party rather than mutating
+        // a hidden panel. Next open will trigger a fresh load.
+        terminalPartyStaged_ = false;
+        return;
+    }
+    terminal_.setParty(terminalStagedParty_);
+    terminal_.refreshParty();
+    terminalPartyStaged_ = false;
 }
 
 void MonsterMeshModule::toggleTerminal()
@@ -931,27 +1041,10 @@ void MonsterMeshModule::toggleTerminal()
         if (!parent) return;
         terminal_.open(parent);
         terminalActive_ = true;
-        // Try the .sav file on disk first — that gives the user "the last
-        // save used" even if the emulator isn't currently running. Fall back
-        // to live WRAM read if SAV isn't available.
-        Gen1Party p = {};
-        bool loaded = false;
-        if (emu_.romPath()[0]) {
-            concurrency::LockGuard g(spiLock);
-            loaded = loadPartyFromSavOnSd(emu_.romPath(), p);
-        }
-        if (!loaded && emu_.isRunning()) {
-            p.count = emu_.readWRAM(Gen1::wPartyCount);
-            if (p.count > 6) p.count = 6;
-            emu_.readWRAMRange(Gen1::wPartySpecies,  p.species,                7);
-            emu_.readWRAMRange(Gen1::wPartyMons,     (uint8_t *)p.mons,        sizeof(p.mons));
-            emu_.readWRAMRange(Gen1::wPartyMonOT,    (uint8_t *)p.otNames,     sizeof(p.otNames));
-            emu_.readWRAMRange(Gen1::wPartyMonNicks, (uint8_t *)p.nicknames,   sizeof(p.nicknames));
-            loaded = true;
-        }
-        if (loaded) terminal_.setParty(p);
-        LOG_INFO("[MonsterMesh] terminal opened (party_loaded=%d count=%d)\n",
-                 (int)loaded, (int)p.count);
+        // Defer the SAV load to runOnce on the LoRa thread. Doing SD reinit
+        // + dir scan here on the LVGL thread blocks the panel paint and the
+        // user sees the terminal not opening at all.
+        terminalNeedsParty_ = true;
     }
 #endif
 }
