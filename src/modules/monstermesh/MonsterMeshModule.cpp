@@ -19,6 +19,9 @@
 #include "PokemonData.h"
 #include "Gen1Species.h"
 #include "RadioLibInterface.h"
+#if HAS_TFT
+#include "graphics/view/TFT/Themes.h"
+#endif
 
 // Provided by src/mesh/wifi/WiFiAPClient.cpp — used to park/unpark WiFi
 // alongside LoRa when entering/exiting emulator or browser modes.
@@ -321,6 +324,43 @@ int32_t MonsterMeshModule::runOnce()
         lastWakeMs = millis();
         powerFSM.trigger(EVENT_INPUT);
     }
+
+#if HAS_TFT
+    // Sync emulator palette to active theme. DMG/GBC/Pocket use their own
+    // 4 base shades; Pokemon Red/Blue use Pocket; Dark/Light keep the stock
+    // yellow-green DMG palette so the emulator looks like a real Game Boy.
+    static int lastThemeIdx = -1;
+    int curIdx = (int)Themes::get();
+    if (curIdx != lastThemeIdx) {
+        lastThemeIdx = curIdx;
+        auto rgb565 = [](uint32_t aarrggbb) -> uint16_t {
+            uint8_t r = (aarrggbb >> 16) & 0xFF, g = (aarrggbb >> 8) & 0xFF, b = aarrggbb & 0xFF;
+            return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+        };
+        // Each Game-Boy palette: lightest (bg) → darkest (ink). Bases match
+        // Themes.cpp shade tables exactly so the emulator and UI feel cohesive.
+        struct Pal { uint32_t lightest, light, dark, darkest; };
+        const Pal dmg    = { 0xff9BBC0F, 0xff8BAC0F, 0xff306230, 0xff0F380F };
+        const Pal gbc    = { 0xffE0F8D0, 0xff88C070, 0xff346856, 0xff081820 };
+        const Pal pocket = { 0xffC4E878, 0xff88D048, 0xff306230, 0xff0F380F };
+        const Pal red    = { 0xffFFE0E0, 0xffFF9090, 0xffB81818, 0xff300000 };
+        const Pal blue   = { 0xffE0E8FF, 0xff90B0F0, 0xff1838A0, 0xff000820 };
+        const Pal stock  = { 0xffFFFFFF, 0xffAAAAAA, 0xff555555, 0xff000000 }; // dark/light fallback
+        Pal p;
+        switch (Themes::get()) {
+            case Themes::eDmgGreen:    p = dmg;    break;
+            case Themes::eGbcGreen:    p = gbc;    break;
+            case Themes::ePocketGreen: p = pocket; break;
+            // Red/Blue keep the rest of the UI in their cartridge tint, but
+            // the emulator looks best in classic GBC shades (red/blue would
+            // make grass + water unreadable).
+            case Themes::ePokemonRed:
+            case Themes::ePokemonBlue: p = gbc;    break;
+            default:                   p = stock;  break;  // Dark/Light → stock GB
+        }
+        setEmulatorPalette(rgb565(p.lightest), rgb565(p.light), rgb565(p.dark), rgb565(p.darkest));
+    }
+#endif
 
     // Heartbeat: every 10s, log free heap + thread state so we can see if
     // and when the LoRa thread stops ticking. Emu-mode soak crashes look
@@ -1128,21 +1168,46 @@ void MonsterMeshModule::renderBrowser()
     static constexpr int MAX_ROWS = 14;
     static constexpr int MAX_CHARS = 52;  // 320px / 6px per char
 
+    // Pull palette from active Themes::set() — but force Red/Blue cartridge
+    // themes onto the GBC palette here (red/blue UI is hard to read for a
+    // file list with .gb file rows).
+    auto rgb565 = [](uint32_t aarrggbb) -> uint16_t {
+        uint8_t r = (aarrggbb >> 16) & 0xFF;
+        uint8_t g = (aarrggbb >> 8) & 0xFF;
+        uint8_t b = aarrggbb & 0xFF;
+        return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+    };
+    uint16_t cBg, cText, cDim, cHi, cAccent;
+    if (Themes::get() == Themes::ePokemonRed || Themes::get() == Themes::ePokemonBlue) {
+        // GBC base shades (matches Themes.cpp GBC_0..6).
+        cBg     = rgb565(0xff081820);  // GBC_0 darkest
+        cText   = rgb565(0xffE0F8D0);  // GBC_6 lightest
+        cDim    = rgb565(0xff88C070);  // GBC_5 light
+        cHi     = rgb565(0xff346856);  // GBC_3 dark
+        cAccent = rgb565(0xff5E9464);  // GBC_4 accent
+    } else {
+        cBg     = rgb565(Themes::darkest());
+        cText   = rgb565(Themes::lightest());
+        cDim    = rgb565(Themes::light());
+        cHi     = rgb565(Themes::dark());
+        cAccent = rgb565(Themes::accent());
+    }
+
     concurrency::LockGuard g(spiLock);
     gfx->startWrite();
     gfx->setClipRect(0, 0, 320, 240);
-    gfx->fillScreen(0x0000);
-    gfx->setTextWrap(false);  // prevent wrapping into next row
+    gfx->fillScreen(cBg);
+    gfx->setTextWrap(false);
 
     // Title
     gfx->setTextSize(2);
-    gfx->setTextColor(0x07E0);  // green
+    gfx->setTextColor(cText);
     gfx->setCursor(4, 2);
     gfx->print("Select ROM");
 
-    // Current directory (right-aligned, small)
+    // Current directory (right-aligned, small, dim)
     gfx->setTextSize(1);
-    gfx->setTextColor(0x7BEF);  // grey
+    gfx->setTextColor(cDim);
     gfx->setCursor(200, 8);
     gfx->print(browser_.currentDir());
 
@@ -1150,11 +1215,11 @@ void MonsterMeshModule::renderBrowser()
 
     if (browser_.count() == 0) {
         gfx->setTextSize(2);
-        gfx->setTextColor(0xF800);  // red
+        gfx->setTextColor(cAccent);
         gfx->setCursor(4, LIST_Y + 20);
         gfx->print("No files found");
         gfx->setTextSize(1);
-        gfx->setTextColor(0xFFFF);
+        gfx->setTextColor(cText);
         gfx->setCursor(4, LIST_Y + 44);
         gfx->print("Path: ");
         gfx->print(browser_.currentDir());
@@ -1166,23 +1231,22 @@ void MonsterMeshModule::renderBrowser()
             int y = LIST_Y + i * ROW_H;
 
             if (idx == cursor) {
-                gfx->fillRect(0, y, 320, ROW_H, 0x000F);  // dark blue highlight
+                gfx->fillRect(0, y, 320, ROW_H, cHi);
             }
 
             gfx->setCursor(4, y + 3);
 
             const auto &entry = browser_.entries()[idx];
-            // Truncate name to fit screen
             char dispName[MAX_CHARS + 1];
 
             if (entry.isDir) {
-                gfx->setTextColor(0xFFE0);  // yellow
+                gfx->setTextColor(cAccent);
                 snprintf(dispName, sizeof(dispName), "[%s]", entry.name);
             } else {
                 size_t nlen = strlen(entry.name);
                 bool isRom = (nlen >= 3 && strcasecmp(entry.name + nlen - 3, ".gb") == 0) ||
                              (nlen >= 4 && strcasecmp(entry.name + nlen - 4, ".gbc") == 0);
-                gfx->setTextColor(isRom ? 0x07E0 : 0x7BEF);  // green for ROMs, grey otherwise
+                gfx->setTextColor(isRom ? cText : cDim);
                 strncpy(dispName, entry.name, MAX_CHARS);
                 dispName[MAX_CHARS] = '\0';
             }

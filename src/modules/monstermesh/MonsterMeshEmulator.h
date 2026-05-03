@@ -17,10 +17,12 @@ class MonsterMeshAudio;
 #define VIEWPORT_CENTER      24
 #define VIEWPORT_SCROLL_STEP 4
 
-// DMG palette (RGB565)
-static const uint16_t DMG_PALETTE[4] = {
-    0xFFFF, 0xAD55, 0x52AA, 0x0000,
-};
+// 4-shade palette (RGB565) used to render the GB framebuffer. Mutable so
+// MonsterMeshModule can re-skin it per active Themes::set() — DMG/GBC/Pocket
+// each map to their 4 base shades; Pokemon Red/Blue fall back to Pocket;
+// Dark/Light keep the original yellow-green DMG palette.
+extern uint16_t DMG_PALETTE[4];
+void setEmulatorPalette(uint16_t lightest, uint16_t light, uint16_t dark, uint16_t darkest);
 
 // ── MonsterMesh Emulator ────────────────────────────────────────────────────────
 // Adapted from EmulatorApp. No longer owns TFT_eSPI directly — rendering goes

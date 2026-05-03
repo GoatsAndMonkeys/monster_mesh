@@ -115,7 +115,7 @@ void create_screen_boot_screen() {
         {
             // bootLogo
             lv_obj_t *obj = lv_img_create(parent_obj);
-            objects.boot_logo = obj;
+                objects.boot_logo = obj;
             lv_obj_set_pos(obj, 0, -24);
             lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
             lv_img_set_src(obj, &img_meshtastic_boot_logo_image);
@@ -874,7 +874,7 @@ void create_screen_main_screen() {
                         {
                             // NodeImage
                             lv_obj_t *obj = lv_img_create(parent_obj);
-                            objects.node_image = obj;
+                                                objects.node_image = obj;
                             lv_obj_set_pos(obj, -5, 3);
                             lv_obj_set_size(obj, 32, 32);
                             lv_img_set_src(obj, &img_node_client_image);
@@ -1439,7 +1439,7 @@ void create_screen_main_screen() {
                         {
                             // homeLocationImage
                             lv_obj_t *obj = lv_img_create(parent_obj);
-                            objects.home_location_image = obj;
+                                                objects.home_location_image = obj;
                             lv_obj_set_pos(obj, 0, 0);
                             lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
                             lv_img_set_src(obj, &img_location_pin_image);
@@ -1449,7 +1449,7 @@ void create_screen_main_screen() {
                         {
                             // gpsPositionImage
                             lv_obj_t *obj = lv_img_create(parent_obj);
-                            objects.gps_position_image = obj;
+                                                objects.gps_position_image = obj;
                             lv_obj_set_pos(obj, 0, 0);
                             lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
                             lv_img_set_src(obj, &img_gps_location_image);
@@ -2439,7 +2439,7 @@ void create_screen_main_screen() {
                 {
                     // MeshtasticImage
                     lv_obj_t *obj = lv_img_create(parent_obj);
-                    objects.meshtastic_image = obj;
+                                objects.meshtastic_image = obj;
                     lv_obj_set_pos(obj, -60, 0);
                     lv_obj_set_size(obj, 36, 17);
                     lv_img_set_src(obj, &img_meshtastic_logo_image);
@@ -2490,7 +2490,7 @@ void create_screen_main_screen() {
                 {
                     // TopNodesImage
                     lv_obj_t *obj = lv_img_create(parent_obj);
-                    objects.top_nodes_image = obj;
+                                objects.top_nodes_image = obj;
                     lv_obj_set_pos(obj, -5, 0);
                     lv_obj_set_size(obj, 24, 24);
                     lv_img_set_pivot(obj, 0, 0);
@@ -2527,7 +2527,7 @@ void create_screen_main_screen() {
                 {
                     // TopGroupImage
                     lv_obj_t *obj = lv_img_create(parent_obj);
-                    objects.top_group_image = obj;
+                                objects.top_group_image = obj;
                     lv_obj_set_pos(obj, -5, 0);
                     lv_obj_set_size(obj, 24, 24);
                     lv_img_set_pivot(obj, 0, 0);
@@ -2564,7 +2564,7 @@ void create_screen_main_screen() {
                 {
                     // TopGroupChatImage
                     lv_obj_t *obj = lv_img_create(parent_obj);
-                    objects.top_group_chat_image = obj;
+                                objects.top_group_chat_image = obj;
                     lv_obj_set_pos(obj, -5, 0);
                     lv_obj_set_size(obj, 24, 24);
                     lv_img_set_pivot(obj, 0, 0);
@@ -2600,7 +2600,7 @@ void create_screen_main_screen() {
                 {
                     // TopBasicSettingsImage
                     lv_obj_t *obj = lv_img_create(parent_obj);
-                    objects.top_basic_settings_image = obj;
+                                objects.top_basic_settings_image = obj;
                     lv_obj_set_pos(obj, -5, 0);
                     lv_obj_set_size(obj, 24, 24);
                     lv_img_set_pivot(obj, 0, 0);
@@ -2635,7 +2635,7 @@ void create_screen_main_screen() {
                 {
                     // TopAdvancedSettingsImage
                     lv_obj_t *obj = lv_img_create(parent_obj);
-                    objects.top_advanced_settings_image = obj;
+                                objects.top_advanced_settings_image = obj;
                     lv_obj_set_pos(obj, -5, 0);
                     lv_obj_set_size(obj, 24, 24);
                     lv_img_set_pivot(obj, 0, 0);
@@ -2671,7 +2671,7 @@ void create_screen_main_screen() {
                 {
                     // TopMapImage
                     lv_obj_t *obj = lv_img_create(parent_obj);
-                    objects.top_map_image = obj;
+                                objects.top_map_image = obj;
                     lv_obj_set_pos(obj, -5, 0);
                     lv_obj_set_size(obj, 24, 24);
                     lv_img_set_pivot(obj, 0, 0);
@@ -2708,7 +2708,7 @@ void create_screen_main_screen() {
                 {
                     // TopChatsImage
                     lv_obj_t *obj = lv_img_create(parent_obj);
-                    objects.top_chats_image = obj;
+                                objects.top_chats_image = obj;
                     lv_obj_set_pos(obj, -5, 0);
                     lv_obj_set_size(obj, 24, 24);
                     lv_img_set_pivot(obj, 0, 0);
@@ -2745,7 +2745,7 @@ void create_screen_main_screen() {
                 {
                     // TopMessagesNodeImage
                     lv_obj_t *obj = lv_img_create(parent_obj);
-                    objects.top_messages_node_image = obj;
+                                objects.top_messages_node_image = obj;
                     lv_obj_set_pos(obj, -5, 0);
                     lv_obj_set_size(obj, 24, 24);
                     lv_img_set_pivot(obj, 0, 0);
@@ -2781,7 +2781,7 @@ void create_screen_main_screen() {
                 {
                     // TopNodeSearchImage
                     lv_obj_t *obj = lv_img_create(parent_obj);
-                    objects.top_node_search_image = obj;
+                                objects.top_node_search_image = obj;
                     lv_obj_set_pos(obj, -5, 0);
                     lv_obj_set_size(obj, 24, 24);
                     lv_img_set_pivot(obj, 0, 0);
@@ -2817,7 +2817,7 @@ void create_screen_main_screen() {
                 {
                     // TopMeshDetectorImage
                     lv_obj_t *obj = lv_img_create(parent_obj);
-                    objects.top_mesh_detector_image = obj;
+                                objects.top_mesh_detector_image = obj;
                     lv_obj_set_pos(obj, -5, 0);
                     lv_obj_set_size(obj, 24, 24);
                     lv_img_set_pivot(obj, 0, 0);
@@ -2854,7 +2854,7 @@ void create_screen_main_screen() {
                 {
                     // TopSignalScannerImage
                     lv_obj_t *obj = lv_img_create(parent_obj);
-                    objects.top_signal_scanner_image = obj;
+                                objects.top_signal_scanner_image = obj;
                     lv_obj_set_pos(obj, -5, 0);
                     lv_obj_set_size(obj, 24, 24);
                     lv_img_set_pivot(obj, 0, 0);
@@ -2890,7 +2890,7 @@ void create_screen_main_screen() {
                 {
                     // TopTraceRouteImage
                     lv_obj_t *obj = lv_img_create(parent_obj);
-                    objects.top_trace_route_image = obj;
+                                objects.top_trace_route_image = obj;
                     lv_obj_set_pos(obj, -5, 0);
                     lv_obj_set_size(obj, 24, 24);
                     lv_img_set_pivot(obj, 0, 0);
@@ -2926,7 +2926,7 @@ void create_screen_main_screen() {
                 {
                     // TopNeighborsImage
                     lv_obj_t *obj = lv_img_create(parent_obj);
-                    objects.top_neighbors_image = obj;
+                                objects.top_neighbors_image = obj;
                     lv_obj_set_pos(obj, -5, 0);
                     lv_obj_set_size(obj, 24, 24);
                     lv_img_set_pivot(obj, 0, 0);
@@ -2962,7 +2962,7 @@ void create_screen_main_screen() {
                 {
                     // TopStatisticsImage
                     lv_obj_t *obj = lv_img_create(parent_obj);
-                    objects.top_statistics_image = obj;
+                                objects.top_statistics_image = obj;
                     lv_obj_set_pos(obj, -5, 0);
                     lv_obj_set_size(obj, 24, 24);
                     lv_img_set_pivot(obj, 0, 0);
@@ -2998,7 +2998,7 @@ void create_screen_main_screen() {
                 {
                     // TopPacketLogImage
                     lv_obj_t *obj = lv_img_create(parent_obj);
-                    objects.top_packet_log_image = obj;
+                                objects.top_packet_log_image = obj;
                     lv_obj_set_pos(obj, -5, 0);
                     lv_obj_set_size(obj, 24, 24);
                     lv_img_set_pivot(obj, 0, 0);
@@ -3062,7 +3062,7 @@ void create_screen_main_screen() {
                 {
                     // TopNodeOptionsImage
                     lv_obj_t *obj = lv_img_create(parent_obj);
-                    objects.top_node_options_image = obj;
+                                objects.top_node_options_image = obj;
                     lv_obj_set_pos(obj, -5, 0);
                     lv_obj_set_size(obj, 24, 24);
                     lv_img_set_pivot(obj, 0, 0);
@@ -3087,7 +3087,7 @@ void create_screen_main_screen() {
                 {
                     // BatteryImage
                     lv_obj_t *obj = lv_img_create(parent_obj);
-                    objects.battery_image = obj;
+                                objects.battery_image = obj;
                     lv_obj_set_pos(obj, 13, 0);
                     lv_obj_set_size(obj, 24, 24);
                     lv_img_set_pivot(obj, 0, 0);
@@ -3137,7 +3137,7 @@ void create_screen_main_screen() {
                 {
                     // TopLoraTxImage
                     lv_obj_t *obj = lv_img_create(parent_obj);
-                    objects.top_lora_tx_image = obj;
+                                objects.top_lora_tx_image = obj;
                     lv_obj_set_pos(obj, -5, 0);
                     lv_obj_set_size(obj, 24, 24);
                     lv_img_set_pivot(obj, 0, 0);
@@ -3972,7 +3972,7 @@ void create_screen_main_screen() {
                     objects.settings_theme_dropdown = obj;
                     lv_obj_set_pos(obj, 0, 0);
                     lv_obj_set_size(obj, 150, 30);
-                    lv_dropdown_set_options(obj, _("Dark\nLight\nDMG\nGBC\nPocket"));
+                    lv_dropdown_set_options(obj, _("Dark\nLight\nDMG\nGBC\nPocket\nP. Red\nP. Blue"));
                     add_style_drop_down_style(obj);
                     lv_obj_set_style_align(obj, LV_ALIGN_TOP_MID, LV_PART_MAIN | LV_STATE_DEFAULT);
                     lv_obj_set_style_border_color(obj, lv_color_hex(0xffe0e0e0), LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -5289,7 +5289,7 @@ void create_screen_main_screen() {
                         {
                             // radarBeam
                             lv_obj_t *obj = lv_img_create(parent_obj);
-                            objects.radar_beam = obj;
+                                                objects.radar_beam = obj;
                             lv_obj_set_pos(obj, 0, 0);
                             lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
                             lv_img_set_src(obj, &img_radar_beam_image);
@@ -5394,7 +5394,7 @@ void create_screen_main_screen() {
                         {
                             // DetectorContactImage
                             lv_obj_t *obj = lv_img_create(parent_obj);
-                            objects.detector_contact_image = obj;
+                                                objects.detector_contact_image = obj;
                             lv_obj_set_pos(obj, -5, -6);
                             lv_obj_set_size(obj, 32, 32);
                             lv_img_set_src(obj, &img_node_client_image);
@@ -5491,7 +5491,7 @@ void create_screen_main_screen() {
                         {
                             // DetectedNodeImage
                             lv_obj_t *obj = lv_img_create(parent_obj);
-                            objects.detected_node_image = obj;
+                                                objects.detected_node_image = obj;
                             lv_obj_set_pos(obj, -5, -6);
                             lv_obj_set_size(obj, 32, 32);
                             lv_img_set_src(obj, &img_node_client_image);
@@ -5567,7 +5567,7 @@ void create_screen_main_screen() {
                         {
                             // SignalScannerNodeImage
                             lv_obj_t *obj = lv_img_create(parent_obj);
-                            objects.signal_scanner_node_image = obj;
+                                                objects.signal_scanner_node_image = obj;
                             lv_obj_set_pos(obj, -5, -6);
                             lv_obj_set_size(obj, 32, 32);
                             lv_img_set_src(obj, &img_node_client_image);
@@ -5761,7 +5761,7 @@ void create_screen_main_screen() {
                         {
                             // TraceRouteToImage
                             lv_obj_t *obj = lv_img_create(parent_obj);
-                            objects.trace_route_to_image = obj;
+                                                objects.trace_route_to_image = obj;
                             lv_obj_set_pos(obj, -5, -6);
                             lv_obj_set_size(obj, 32, 32);
                             lv_img_set_src(obj, &img_node_client_image);
@@ -5940,7 +5940,7 @@ void create_screen_main_screen() {
                         {
                             // NodeDetailsImage
                             lv_obj_t *obj = lv_img_create(parent_obj);
-                            objects.node_details_image = obj;
+                                                objects.node_details_image = obj;
                             lv_obj_set_pos(obj, -5, 3);
                             lv_obj_set_size(obj, 32, 32);
                             lv_img_set_src(obj, &img_node_client_image);
@@ -6263,7 +6263,7 @@ void create_screen_main_screen() {
                 {
                     // TopSetupImage
                     lv_obj_t *obj = lv_img_create(parent_obj);
-                    objects.top_setup_image = obj;
+                                objects.top_setup_image = obj;
                     lv_obj_set_pos(obj, -5, 0);
                     lv_obj_set_size(obj, 24, 24);
                     lv_img_set_pivot(obj, 0, 0);

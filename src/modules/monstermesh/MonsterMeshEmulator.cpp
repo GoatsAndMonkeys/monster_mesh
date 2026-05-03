@@ -14,6 +14,19 @@
 #define ENABLE_SOUND 1
 #include "peanut_gb.h"
 
+// Default DMG yellow-green palette (RGB565). MonsterMeshModule overwrites
+// these on theme change via setEmulatorPalette().
+uint16_t DMG_PALETTE[4] = { 0xFFFF, 0xAD55, 0x52AA, 0x0000 };
+
+void setEmulatorPalette(uint16_t lightest, uint16_t light, uint16_t dark, uint16_t darkest) {
+    // Index 0 = lightest (background), index 3 = darkest (text/sprite ink),
+    // matching peanut_gb's pixel value 0..3 mapping.
+    DMG_PALETTE[0] = lightest;
+    DMG_PALETTE[1] = light;
+    DMG_PALETTE[2] = dark;
+    DMG_PALETTE[3] = darkest;
+}
+
 // Forward declarations for Peanut-GB callbacks (defined below)
 static uint8_t pm_romRead(struct gb_s *gb, const uint_fast32_t addr);
 static uint8_t pm_cartRamRead(struct gb_s *gb, const uint_fast32_t addr);
@@ -156,7 +169,8 @@ static void pm_lcdDrawLine(struct gb_s *gb, const uint8_t *pixels,
 
     if (y1 < 0 || y0 >= PM_DISP_H) return;
 
-    // 2x horizontal: 160 → 320
+    // 2x horizontal: 160 → 320 — DMG_PALETTE is now mutable so MonsterMeshModule
+    // can re-skin it per active Themes::set().
     uint16_t *buf = self->lineBuf_;
     for (int x = 0; x < GB_SCREEN_W; x++) {
         uint16_t c = DMG_PALETTE[pixels[x] & 0x03];
