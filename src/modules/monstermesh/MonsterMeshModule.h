@@ -150,6 +150,15 @@ private:
     Gen1Party terminalStagedParty_ = {};
     volatile bool terminalPartyStaged_ = false;
 
+    // Decoded Gen 1 trainer name from the most recent SAV load. 7 chars + NUL.
+    char stagedTrainerName_[8] = {};
+
+    // One-shot: at ~30s into runOnce (well past the PacketAPI/NodeInfo window
+    // that previously caused boot-time TX loops) we auto-trigger the party
+    // load so daycare check-in and the first beacon fire without the user
+    // having to open the terminal.
+    bool autoPartyLoadDone_ = false;
+
     // True when the user has scrolled up to the virtual [Eject Cart] row at
     // the top of the browser (only visible when emuInitialized_ is true).
     bool ejectFocused_ = false;

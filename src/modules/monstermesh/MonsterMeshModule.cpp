@@ -43,7 +43,8 @@ static bool g_keyPeekAltSeenLow    = false;
 // Forward declaration — definition lives further down in this TU but runOnce
 // needs to call it for the deferred terminal party load.
 static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out,
-                                 char *resolvedSavOut, size_t resolvedSavLen);
+                                 char *resolvedSavOut, size_t resolvedSavLen,
+                                 char *trainerNameOut, size_t trainerNameLen);
 extern bool initWifi();
 
 // LovyanGFX is available on T-Deck in both t-deck and t-deck-tft builds
@@ -191,9 +192,11 @@ void MonsterMeshModule::ensureMonsterMeshChannel()
 
 bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
 {
-    // Accept PRIVATE_APP packets on our channel
-    if (p->decoded.portnum == meshtastic_PortNum_PRIVATE_APP &&
-        p->channel == MONSTERMESH_CHANNEL) {
+    // Accept PRIVATE_APP packets on any channel — daycare beacons go out on
+    // the primary channel (so they ride alongside normal mesh traffic), and
+    // future MM packets may use MONSTERMESH_CHANNEL. handleReceived() filters
+    // by payload type, so the channel filter is now redundant.
+    if (p->decoded.portnum == meshtastic_PortNum_PRIVATE_APP) {
         return true;
     }
     return false;
@@ -205,12 +208,23 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
 {
     // Daycare beacons: PRIVATE_APP packets that exactly match the DaycareBeacon
     // wire size. Forward to the daycare manager; everything else is ignored.
-    if (mp.decoded.portnum == meshtastic_PortNum_PRIVATE_APP &&
-        mp.decoded.payload.size >= sizeof(DaycareBeacon)) {
-        const auto *beacon = reinterpret_cast<const DaycareBeacon *>(mp.decoded.payload.bytes);
-        // type=0x60 is the daycare-beacon discriminator (PokemonDaycare.cpp:433).
-        if (beacon->type == 0x60 && beacon->nodeId != nodeDB->getNodeNum()) {
-            daycare_.handleBeacon(*beacon);
+    if (mp.decoded.portnum == meshtastic_PortNum_PRIVATE_APP) {
+        LOG_INFO("[MonsterMesh] PRIVATE_APP RX: ch=%u sz=%u from=0x%08X\n",
+                 (unsigned)mp.channel, (unsigned)mp.decoded.payload.size,
+                 (unsigned)mp.from);
+        if (mp.decoded.payload.size >= sizeof(DaycareBeacon)) {
+            const auto *beacon = reinterpret_cast<const DaycareBeacon *>(mp.decoded.payload.bytes);
+            // type=0x60 is the daycare-beacon discriminator (PokemonDaycare.cpp:433).
+            if (beacon->type == 0x60 && beacon->nodeId != nodeDB->getNodeNum()) {
+                LOG_INFO("[MonsterMesh] daycare beacon RX from 0x%08X '%s/%s' party=%u\n",
+                         (unsigned)beacon->nodeId, beacon->shortName,
+                         beacon->gameName, (unsigned)beacon->partyCount);
+                daycare_.handleBeacon(*beacon);
+            } else {
+                LOG_INFO("[MonsterMesh] PRIVATE_APP not daycare beacon (type=0x%02X self=%d)\n",
+                         (unsigned)beacon->type,
+                         (int)(beacon->nodeId == nodeDB->getNodeNum()));
+            }
         }
     }
     return ProcessMessage::STOP;
@@ -285,10 +299,11 @@ void MonsterMeshModule::daycareCheckInFromStagedParty()
         levels[i]  = p.mons[i].level;
         gen1NameToAscii(p.nicknames[i], 11, nicks[i], sizeof(nicks[i]));
     }
-    const char *shortName = "MM";  // TODO: pull from owner.short_name
-    const char *gameName  = nicks[0];
+    const char *shortName = (owner.short_name[0] != '\0') ? owner.short_name : "MM";
+    const char *gameName  = (stagedTrainerName_[0] != '\0') ? stagedTrainerName_ : nicks[0];
     daycare_.checkIn(species, levels, nicks, p.count, shortName, gameName);
-    LOG_INFO("[MonsterMesh] daycare: checked in %u pokemon\n", (unsigned)p.count);
+    LOG_INFO("[MonsterMesh] daycare: checked in %u pokemon as %s/%s\n",
+             (unsigned)p.count, shortName, gameName);
 }
 
 // ── runOnce() — OSThread periodic drain of tx queue ─────────────────────────
@@ -368,6 +383,10 @@ int32_t MonsterMeshModule::runOnce()
             [](void *ctx, char *buf, size_t n) {
                 static_cast<MonsterMeshModule *>(ctx)->daycareStatusString(buf, n);
             }, this);
+        terminal_.setDaycareForceEventFn(
+            [](void *ctx) {
+                static_cast<MonsterMeshModule *>(ctx)->daycare_.forceEvent();
+            }, this);
         daycare_.setSendDm([](uint32_t dest, const char *msg, void *ctx) {
             auto *self = static_cast<MonsterMeshModule *>(ctx);
             self->sendTextDM(dest, msg);
@@ -381,6 +400,10 @@ int32_t MonsterMeshModule::runOnce()
             DaycareBeacon beacon = beaconIn;
             beacon.nodeId = nodeDB->getNodeNum();
             meshtastic_MeshPacket *p = router->allocForSending();
+            if (!p) {
+                LOG_WARN("[MonsterMesh] daycare beacon: packet alloc failed\n");
+                return;
+            }
             p->to = NODENUM_BROADCAST;
             p->channel = channels.getPrimaryIndex();
             p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
@@ -389,6 +412,9 @@ int32_t MonsterMeshModule::runOnce()
             memcpy(p->decoded.payload.bytes, &beacon, sz);
             p->decoded.payload.size = sz;
             service->sendToMesh(p);
+            LOG_INFO("[MonsterMesh] daycare beacon TX: ch=%u sz=%u party=%u name='%s/%s'\n",
+                     (unsigned)p->channel, (unsigned)sz, (unsigned)beacon.partyCount,
+                     beacon.shortName, beacon.gameName);
         }, this);
 
         // Stay in Meshtastic UI at boot. User presses Ctrl+E to open the
@@ -630,10 +656,12 @@ int32_t MonsterMeshModule::runOnce()
         Gen1Party p = {};
         bool loaded = false;
         char resolvedSav[256] = {};
+        char trainerName[8] = {};
         {
             concurrency::LockGuard g(spiLock);
             loaded = loadPartyFromSavOnSd(emu_.romPath(),
-                                          p, resolvedSav, sizeof(resolvedSav));
+                                          p, resolvedSav, sizeof(resolvedSav),
+                                          trainerName, sizeof(trainerName));
         }
         if (!loaded && emu_.isRunning()) {
             p.count = emu_.readWRAM(Gen1::wPartyCount);
@@ -646,10 +674,21 @@ int32_t MonsterMeshModule::runOnce()
         }
         if (loaded) {
             terminalStagedParty_ = p;
+            // Stash the decoded trainer name so the daycare check-in can use
+            // it instead of falling back to party[0]'s nickname.
+            strncpy(stagedTrainerName_, trainerName, sizeof(stagedTrainerName_) - 1);
+            stagedTrainerName_[sizeof(stagedTrainerName_) - 1] = '\0';
             terminalPartyStaged_ = true;  // LVGL thread will pick this up
             // First successful SAV load doubles as daycare check-in: the
             // background beacons advertise this party to the mesh.
             daycareCheckInFromStagedParty();
+            // Force an immediate beacon broadcast so paired devices see this
+            // node within seconds instead of waiting up to a full 5-min beacon
+            // interval. We're well past the PacketAPI/NodeInfo window by now
+            // (load runs no earlier than ~10s post-boot for explicit opens
+            // and ~30s for the auto-trigger below), so the boot-loop hazard
+            // documented in feedback_mm_no_boot_beacon.md does not apply.
+            if (daycare_.isActive()) daycare_.forceBeacon();
         }
         LOG_INFO("[MonsterMesh] terminal party load: loaded=%d count=%d sav='%s' rom='%s'\n",
                  (int)loaded, (int)p.count,
@@ -657,10 +696,40 @@ int32_t MonsterMeshModule::runOnce()
                  emu_.romPath()[0] ? emu_.romPath() : "(none)");
     }
 
+    // Auto-load party once at ~30s after boot, well past the PacketAPI window
+    // that previously caused boot-loop crashes. This kicks off the deferred
+    // SAV load + daycare check-in even if the user never opens the terminal,
+    // so neighbors see beacons from this node automatically.
+    if (setupDone_ && !autoPartyLoadDone_ && !terminalNeedsParty_ &&
+        !terminal_.hasParty() &&
+        !emulatorActive_ && !browserActive_ && millis() > 30000) {
+        autoPartyLoadDone_ = true;
+        terminalNeedsParty_ = true;
+        LOG_INFO("[MonsterMesh] auto party load + daycare check-in triggered\n");
+    }
+
     // Daycare tick — only run while in the Meshtastic UI. The radio is asleep
     // in emu/browser mode, so beacons would just queue up uselessly.
     if (setupDone_ && !emulatorActive_ && !browserActive_ && daycare_.isActive()) {
+        uint32_t prevEventTime = daycare_.getLastEventTime();
         daycare_.tick(millis());
+        // If a new event fired this tick, DM the message: to ourselves so the
+        // phone shows it, and to the remote trainer when the event involved
+        // them (so both sides see the same interaction).
+        if (daycare_.getLastEventTime() != prevEventTime &&
+            daycare_.getLastEventTime() != 0) {
+            const auto &evt = daycare_.getLastEvent();
+            if (evt.message[0]) {
+                sendTextDM(nodeDB->getNodeNum(), evt.message);
+                LOG_INFO("[MonsterMesh] event DM: %s\n", evt.message);
+                if (evt.targetNodeId != 0 &&
+                    evt.targetNodeId != nodeDB->getNodeNum()) {
+                    sendTextDM(evt.targetNodeId, evt.message);
+                    LOG_INFO("[MonsterMesh] event DM → peer 0x%08X\n",
+                             (unsigned)evt.targetNodeId);
+                }
+            }
+        }
     }
 
     drainTxQueue();
@@ -1057,7 +1126,9 @@ static bool findFirstSavOnSd(char *out, size_t outLen)
 // ROM. This works even when the emulator isn't currently running — gives the
 // terminal a usable party from "the last save used" rather than only when
 // emulator memory is live. If `romPath` is empty, scans SD for any .sav file.
-static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out, char *resolvedSavOut, size_t resolvedSavLen)
+static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out,
+                                 char *resolvedSavOut, size_t resolvedSavLen,
+                                 char *trainerNameOut, size_t trainerNameLen)
 {
     char savPath[256] = {};
     const char *sdRel = nullptr;
@@ -1102,6 +1173,8 @@ static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out, char *reso
     }
 
     // Gen 1 SAV is 32KB. We only need the party block.
+    static constexpr uint16_t SAV_TRAINER_NAME = 0x2598;
+    static constexpr uint8_t  SAV_TRAINER_LEN  = 7;
     static constexpr uint16_t SAV_PARTY_COUNT  = 0x2F2C;
     static constexpr uint16_t SAV_SPECIES_LIST = 0x2F2D;
     static constexpr uint16_t SAV_POKEMON_DATA = 0x2F34;
@@ -1130,6 +1203,20 @@ static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out, char *reso
             out.nicknames[i][j] = nick[j];
             if (nick[j] == SAV_TERMINATOR) break;
         }
+    }
+    if (trainerNameOut && trainerNameLen) {
+        // Decode 7-char Gen 1 trainer name at SAV+0x2598. Stops at the 0x50
+        // terminator. trainerNameLen must be >= 8 for a clean copy.
+        size_t maxOut = trainerNameLen - 1;
+        size_t w = 0;
+        for (uint8_t j = 0; j < SAV_TRAINER_LEN && w < maxOut; ++j) {
+            uint8_t c = buf[SAV_TRAINER_NAME + j];
+            if (c == SAV_TERMINATOR) break;
+            char a = gen1CharToAscii(c);
+            if (a == '\0' || a == '?') break;
+            trainerNameOut[w++] = a;
+        }
+        trainerNameOut[w] = '\0';
     }
     free(buf);
     if (resolvedSavOut && resolvedSavLen) {
@@ -1166,10 +1253,12 @@ void MonsterMeshModule::toggleTerminal()
         if (!parent) return;
         terminal_.open(parent);
         terminalActive_ = true;
-        // Defer the SAV load to runOnce on the LoRa thread. Doing SD reinit
-        // + dir scan here on the LVGL thread blocks the panel paint and the
-        // user sees the terminal not opening at all.
-        terminalNeedsParty_ = true;
+        // Only request a SAV load + party render the first time. After the
+        // initial load + check-in, leave the scrollback alone so re-entries
+        // don't reprint the party every visit.
+        if (!terminal_.hasParty()) {
+            terminalNeedsParty_ = true;
+        }
     }
 #endif
 }

@@ -31,14 +31,12 @@ static void term_input_ready_cb(lv_event_t *e)
 void MonsterMeshTerminal::open(lv_obj_t *parent)
 {
     if (panel_) {
-        // Already built — unhide, clear scrollback, refresh party, refocus.
+        // Already built — re-entry path. Preserve the scrollback so the user
+        // can read prior output. Just unhide, reset the input field, refocus.
         lv_obj_clear_flag(panel_, LV_OBJ_FLAG_HIDDEN);
         lv_textarea_set_text(input_, "");
         inbuf_[0] = '\0'; inlen_ = 0;
         open_ = true;
-        clearOutput();
-        showParty();
-        prompt();
         lv_group_focus_obj(input_);
         return;
     }
@@ -85,9 +83,13 @@ void MonsterMeshTerminal::open(lv_obj_t *parent)
     g_termInstance = this;
     lv_obj_add_event_cb(input_, term_input_ready_cb, LV_EVENT_READY, nullptr);
     lv_group_focus_obj(input_);
-    // Title is in the top bar now; the terminal output starts with the
-    // player's party (or a hint if no SAV is loaded yet).
-    showParty();
+    // First-time open per session: show the party listing if it's already
+    // loaded; otherwise just prompt and let refreshParty() append the listing
+    // when the deferred SAV load completes. Re-entries skip this entirely so
+    // the user keeps their scrollback (handled by the early-return above).
+    if (partyLoaded_) {
+        showParty();
+    }
     prompt();
 }
 
@@ -141,8 +143,10 @@ void MonsterMeshTerminal::setParty(const Gen1Party &p)
 
 void MonsterMeshTerminal::refreshParty()
 {
+    // Append the party listing to the existing scrollback rather than
+    // clearing — runOnce stages the party asynchronously after the panel is
+    // already painted, and the user wants to keep prior output visible.
     if (!output_) return;
-    clearOutput();
     showParty();
     prompt();
 }
@@ -154,13 +158,18 @@ void MonsterMeshTerminal::println(const char *s)
     lv_label_set_text(lbl, s ? s : "");
     lv_obj_set_style_text_color(lbl, lv_color_hex(Themes::lightest()), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(lbl, &lv_font_cozette_13, LV_PART_MAIN | LV_STATE_DEFAULT);
+    // Wrap long lines (e.g. daycare event messages up to ~200 chars) to the
+    // output container's width instead of overflowing horizontally.
+    lv_obj_set_width(lbl, LV_PCT(100));
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
     // Auto-scroll to bottom by scrolling to the new label.
     lv_obj_scroll_to_view(lbl, LV_ANIM_OFF);
 }
 
 void MonsterMeshTerminal::prompt()
 {
-    println("> _");
+    // No-op — the user types in the textarea at the bottom of the panel, so
+    // a "> _" label in the scrollback was just visual noise.
 }
 
 void MonsterMeshTerminal::showParty()
@@ -219,6 +228,19 @@ void MonsterMeshTerminal::executeLine(const char *line)
         if (!daycareStatusFn_) {
             println("daycare not wired.");
             return;
+        }
+        // `daycare event` forces an event cycle immediately so the user can
+        // verify the event generator without waiting the full 5-min interval.
+        const char *args = line + 7;
+        while (*args == ' ') args++;
+        if (strncmp(args, "event", 5) == 0 || strncmp(args, "force", 5) == 0) {
+            if (daycareForceFn_) {
+                daycareForceFn_(daycareForceCtx_);
+                println("daycare: forced event");
+            } else {
+                println("daycare event not wired.");
+                return;
+            }
         }
         char buf[1024] = {};
         daycareStatusFn_(daycareStatusCtx_, buf, sizeof(buf));

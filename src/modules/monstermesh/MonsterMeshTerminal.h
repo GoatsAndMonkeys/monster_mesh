@@ -51,6 +51,14 @@ class MonsterMeshTerminal {
         daycareStatusCtx_ = ctx;
     }
 
+    // Optional force-event hook for the `daycare event` sub-command. Skipped
+    // silently if not wired.
+    typedef void (*DaycareForceEventFn)(void *ctx);
+    void setDaycareForceEventFn(DaycareForceEventFn fn, void *ctx) {
+        daycareForceFn_ = fn;
+        daycareForceCtx_ = ctx;
+    }
+
     // Called by the module when the deferred SAV-load finishes on the LoRa
     // thread. Wipes the existing scrollback and reprints the party block so
     // the user sees the freshly-loaded data without having to type "party".
@@ -77,4 +85,6 @@ class MonsterMeshTerminal {
 
     DaycareStatusFn daycareStatusFn_ = nullptr;
     void           *daycareStatusCtx_ = nullptr;
+    DaycareForceEventFn daycareForceFn_ = nullptr;
+    void               *daycareForceCtx_ = nullptr;
 };
