@@ -203,8 +203,55 @@ bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
 
 ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp)
 {
-    (void)mp;
+    // Daycare beacons: PRIVATE_APP packets that exactly match the DaycareBeacon
+    // wire size. Forward to the daycare manager; everything else is ignored.
+    if (mp.decoded.portnum == meshtastic_PortNum_PRIVATE_APP &&
+        mp.decoded.payload.size >= sizeof(DaycareBeacon)) {
+        const auto *beacon = reinterpret_cast<const DaycareBeacon *>(mp.decoded.payload.bytes);
+        // type=0x60 is the daycare-beacon discriminator (PokemonDaycare.cpp:433).
+        if (beacon->type == 0x60 && beacon->nodeId != nodeDB->getNodeNum()) {
+            daycare_.handleBeacon(*beacon);
+        }
+    }
     return ProcessMessage::STOP;
+}
+
+void MonsterMeshModule::sendTextDM(uint32_t to, const char *text)
+{
+    if (!text) return;
+    meshtastic_MeshPacket *p = router->allocForSending();
+    if (!p) return;
+    p->to = to;
+    p->channel = channels.getPrimaryIndex();
+    p->decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
+    size_t len = strlen(text);
+    if (len > sizeof(p->decoded.payload.bytes)) len = sizeof(p->decoded.payload.bytes);
+    memcpy(p->decoded.payload.bytes, text, len);
+    p->decoded.payload.size = len;
+    service->sendToMesh(p);
+    LOG_INFO("[MonsterMesh] sent DM to 0x%08X: %s\n", (unsigned)to, text);
+}
+
+void MonsterMeshModule::daycareCheckInFromStagedParty()
+{
+    // Use the most recently-staged party (loaded from SAV) to check in.
+    if (!terminalPartyStaged_ && !terminal_.hasParty()) return;
+    const Gen1Party &p = terminalPartyStaged_ ? terminalStagedParty_ : terminal_.getParty();
+    if (p.count == 0 || p.count > 6) return;
+
+    // Compose simple parallel arrays for the legacy checkIn signature.
+    uint8_t species[6] = {};
+    uint8_t levels[6]  = {};
+    char    nicks[6][11] = {};
+    for (uint8_t i = 0; i < p.count; ++i) {
+        species[i] = p.species[i];
+        levels[i]  = p.mons[i].level;
+        gen1NameToAscii(p.nicknames[i], 11, nicks[i], sizeof(nicks[i]));
+    }
+    const char *shortName = "MM";  // TODO: pull from owner.short_name
+    const char *gameName  = nicks[0];
+    daycare_.checkIn(species, levels, nicks, p.count, shortName, gameName);
+    LOG_INFO("[MonsterMesh] daycare: checked in %u pokemon\n", (unsigned)p.count);
 }
 
 // ── runOnce() — OSThread periodic drain of tx queue ─────────────────────────
@@ -274,6 +321,34 @@ int32_t MonsterMeshModule::runOnce()
         } else {
             installKeyboardHook(); // re-run hook install in case LVGL indev wasn't ready yet
         }
+
+        // ── Daycare ─────────────────────────────────────────────────────
+        // Init only — DO NOT call forceBeacon() here; broadcasting during the
+        // early-boot PacketAPI/NodeInfo window caused a ~10s reset loop. The
+        // periodic beacon timer fires on its own cadence later.
+        daycare_.init();
+        daycare_.setSendDm([](uint32_t dest, const char *msg, void *ctx) {
+            auto *self = static_cast<MonsterMeshModule *>(ctx);
+            self->sendTextDM(dest, msg);
+        }, this);
+        daycare_.setBroadcast([](const char *msg, void *ctx) {
+            auto *self = static_cast<MonsterMeshModule *>(ctx);
+            self->sendTextDM(NODENUM_BROADCAST, msg);
+        }, this);
+        daycare_.setSendBeacon([](const DaycareBeacon &beaconIn, void *ctx) {
+            (void)ctx;
+            DaycareBeacon beacon = beaconIn;
+            beacon.nodeId = nodeDB->getNodeNum();
+            meshtastic_MeshPacket *p = router->allocForSending();
+            p->to = NODENUM_BROADCAST;
+            p->channel = channels.getPrimaryIndex();
+            p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
+            size_t sz = sizeof(DaycareBeacon);
+            if (sz > sizeof(p->decoded.payload.bytes)) sz = sizeof(p->decoded.payload.bytes);
+            memcpy(p->decoded.payload.bytes, &beacon, sz);
+            p->decoded.payload.size = sz;
+            service->sendToMesh(p);
+        }, this);
 
         // Stay in Meshtastic UI at boot. User presses Ctrl+E to open the
         // ROM browser on demand — that path parks radios cleanly. Auto-open
@@ -531,11 +606,20 @@ int32_t MonsterMeshModule::runOnce()
         if (loaded) {
             terminalStagedParty_ = p;
             terminalPartyStaged_ = true;  // LVGL thread will pick this up
+            // First successful SAV load doubles as daycare check-in: the
+            // background beacons advertise this party to the mesh.
+            daycareCheckInFromStagedParty();
         }
         LOG_INFO("[MonsterMesh] terminal party load: loaded=%d count=%d sav='%s' rom='%s'\n",
                  (int)loaded, (int)p.count,
                  resolvedSav[0] ? resolvedSav : "(none)",
                  emu_.romPath()[0] ? emu_.romPath() : "(none)");
+    }
+
+    // Daycare tick — only run while in the Meshtastic UI. The radio is asleep
+    // in emu/browser mode, so beacons would just queue up uselessly.
+    if (setupDone_ && !emulatorActive_ && !browserActive_ && daycare_.isActive()) {
+        daycare_.tick(millis());
     }
 
     drainTxQueue();

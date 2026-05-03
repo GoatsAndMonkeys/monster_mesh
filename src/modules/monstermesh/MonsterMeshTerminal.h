@@ -39,6 +39,7 @@ class MonsterMeshTerminal {
     // charset; we ASCII-decode them in the `party` command.
     void setParty(const Gen1Party &p);
     bool hasParty() const { return partyLoaded_; }
+    const Gen1Party &getParty() const { return party_; }
 
     // Called by the module when the deferred SAV-load finishes on the LoRa
     // thread. Wipes the existing scrollback and reprints the party block so

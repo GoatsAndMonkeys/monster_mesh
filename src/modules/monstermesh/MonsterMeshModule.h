@@ -14,6 +14,7 @@
 #include "MonsterMeshEmulator.h"
 #include "MonsterMeshFileBrowser.h"
 #include "MonsterMeshTerminal.h"
+#include "PokemonDaycare.h"
 
 // ── MonsterMeshModule ──────────────────────────────────────────────────────────
 // Meshtastic module that runs a Game Boy Pokemon emulator with LoRa-based
@@ -66,6 +67,7 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     MonsterMeshEmulator      emu_;
     MonsterMeshFileBrowser   browser_;
     MonsterMeshTerminal      terminal_;
+    PokemonDaycare           daycare_;
 
     bool emulatorActive_     = false;
     bool terminalActive_     = false;
@@ -108,6 +110,14 @@ public:
     // party has been staged by runOnce, push it into the terminal widget
     // here so all LVGL ops stay on the LVGL thread.
     void tryConsumeStagedParty();
+
+    // Send a text DM to a node (or NODENUM_BROADCAST). Used by daycare
+    // callbacks for visitor messages and broadcasts.
+    void sendTextDM(uint32_t to, const char *text);
+
+    // Run an in-game daycare check-in for the most recent party loaded from
+    // SAV. Safe to call when no ROM is loaded — silently no-ops.
+    void daycareCheckInFromStagedParty();
     const char *getSetupStatus() const { return setupStatus_; }
     // RAW mode: set joypad directly from bitmask (bypasses press/release timer)
     void setJoypadDirect(uint8_t mask) { joypadState_ = mask; kbMask_ = 0; }

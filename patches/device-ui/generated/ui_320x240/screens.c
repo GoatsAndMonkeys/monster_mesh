@@ -384,8 +384,10 @@ void create_screen_main_screen() {
                 }
                 {
                     // MapButton — repurposed as MonsterMesh terminal entry.
-                    // Original map icon kept for now (was causing touch issues
-                    // when replaced with a ">_" label child).
+                    // Show a ">_" terminal glyph in the big cozette font instead
+                    // of the map icon. The label is a child of the button so the
+                    // button itself remains the touch target (touch reliably
+                    // picks the button when the child has CLICKABLE cleared).
                     lv_obj_t *obj = lv_btn_create(parent_obj);
                     objects.map_button = obj;
                     lv_obj_set_pos(obj, 0, 0);
@@ -394,7 +396,13 @@ void create_screen_main_screen() {
                     lv_obj_clear_flag(obj, LV_OBJ_FLAG_PRESS_LOCK|LV_OBJ_FLAG_SCROLL_CHAIN_HOR|LV_OBJ_FLAG_SCROLL_CHAIN_VER);
                     add_style_main_button_style(obj);
                     lv_obj_set_style_border_width(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-                    lv_obj_set_style_bg_image_src(obj, &img_map_button_image, LV_PART_MAIN | LV_STATE_DEFAULT);
+                    {
+                        lv_obj_t *lbl = lv_label_create(obj);
+                        lv_label_set_text(lbl, ">_");
+                        lv_obj_set_style_text_font(lbl, &lv_font_cozette_26, LV_PART_MAIN | LV_STATE_DEFAULT);
+                        lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 0);
+                        lv_obj_clear_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
+                    }
                 }
                 {
                     // SettingsButton
