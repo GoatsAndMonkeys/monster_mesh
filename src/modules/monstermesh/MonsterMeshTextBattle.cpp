@@ -38,7 +38,6 @@ void MonsterMeshTextBattle::appendLog(const char *line)
     snprintf(log_[logHead_], sizeof(log_[logHead_]), "%s", line);
     logHead_ = (logHead_ + 1) % LOG_LINES;
     if (logFill_ < LOG_LINES) logFill_++;
-    scrollPending_++;
     dirty_ = true;
 }
 
@@ -352,12 +351,9 @@ void MonsterMeshTextBattle::tick(uint32_t nowMs)
 {
     if (mode_ == Mode::OFF) return;
 
-    // Reveal queued log lines slowly so the player can read.
-    if (scrollPending_ && (nowMs - scrollMs_ >= SCROLL_INTERVAL_MS)) {
-        scrollMs_ = nowMs;
-        scrollPending_--;
-        dirty_ = true;
-    }
+    // (No periodic reveal: drawLog renders the whole log buffer at once,
+    // so a per-line scroll throttle here just caused steady-state repaints
+    // that read as screen flicker.)
 
     if (mode_ == Mode::NETWORKED) {
         // Re-broadcast our pending action periodically — LoRa is lossy.
