@@ -3,7 +3,11 @@
 
 #include "MonsterMeshTerminal.h"
 #include "Gen1Species.h"
+#include "LordLogic.h"
+#include "LordGyms.h"
 #include "configuration.h"
+#include "gps/RTC.h"
+#include <time.h>
 
 #if defined(T_DECK) && !MESHTASTIC_EXCLUDE_MONSTERMESH && HAS_TFT
 
@@ -83,10 +87,24 @@ void MonsterMeshTerminal::open(lv_obj_t *parent)
     g_termInstance = this;
     lv_obj_add_event_cb(input_, term_input_ready_cb, LV_EVENT_READY, nullptr);
     lv_group_focus_obj(input_);
-    // First-time open per session: show the party listing if it's already
-    // loaded; otherwise just prompt and let refreshParty() append the listing
-    // when the deferred SAV load completes. Re-entries skip this entirely so
-    // the user keeps their scrollback (handled by the early-return above).
+
+    // Legend of Charizard — load saved badge state once per session and
+    // apply the daily-reset gate so explore-run quotas roll over at the
+    // user's local-clock 9am boundary.
+    if (!lordLoaded_) {
+        if (!lordLoad(lord_)) lordInitDefaults(lord_);
+        lordLoaded_ = true;
+    }
+    {
+        uint32_t epoch = getValidTime(RTCQualityFromNet, true);
+        if (epoch > 0) lordApplyDailyReset(lord_, epoch, /*tzOffsetHours=*/-4);
+    }
+    // First-time open per session: greet, then show the party listing if
+    // it's already loaded; otherwise just prompt and let refreshParty()
+    // append the listing when the deferred SAV load completes. Re-entries
+    // skip this entirely so the user keeps their scrollback (handled by the
+    // early-return above).
+    println("Type 'help' for main menu");
     if (partyLoaded_) {
         showParty();
     }
@@ -180,7 +198,21 @@ void MonsterMeshTerminal::showParty()
         return;
     }
     char buf[64];
-    snprintf(buf, sizeof(buf), "Party (%u):", (unsigned)party_.count);
+    // Prefix the listing with a wall-clock timestamp so the user can tell at
+    // a glance when this snapshot was taken. Falls back to seconds-since-boot
+    // if the RTC hasn't been set yet.
+    uint32_t epoch = getValidTime(RTCQualityFromNet, true);
+    if (epoch > 0) {
+        time_t tt = (time_t)epoch;
+        struct tm tm_;
+        gmtime_r(&tt, &tm_);
+        snprintf(buf, sizeof(buf), "[%02d/%02d %02d:%02d] Party (%u):",
+                 tm_.tm_mday, tm_.tm_mon + 1,
+                 tm_.tm_hour, tm_.tm_min, (unsigned)party_.count);
+    } else {
+        snprintf(buf, sizeof(buf), "[t+%um] Party (%u):",
+                 (unsigned)(millis() / 60000), (unsigned)party_.count);
+    }
     println(buf);
     for (uint8_t i = 0; i < party_.count && i < 6; i++) {
         char nick[12] = {};
@@ -201,6 +233,44 @@ void MonsterMeshTerminal::showParty()
     }
 }
 
+void MonsterMeshTerminal::onGymBattleEnded(uint8_t gymIdx,
+                                           uint8_t trainerIdx,
+                                           bool playerWon)
+{
+    if (gymIdx >= 8) return;
+    if (!playerWon) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Gym %u: defeated by %s.", (unsigned)(gymIdx + 1),
+                 lordGym(gymIdx) ? lordGym(gymIdx)->trainers[trainerIdx].name
+                                 : "trainer");
+        println(buf);
+        // Don't advance progress on loss — the user has to retry the same trainer.
+        return;
+    }
+    // Win: advance progress. trainerIdx 0..3 = grunt; 4 = leader.
+    if (trainerIdx < LORD_GYM_LEADER_INDEX) {
+        if (lord_.gymProgress[gymIdx] <= trainerIdx) {
+            lord_.gymProgress[gymIdx] = trainerIdx + 1;
+        }
+        char buf[64];
+        const LordGym *g = lordGym(gymIdx);
+        snprintf(buf, sizeof(buf), "Beat %s! Next: %s",
+                 g ? g->trainers[trainerIdx].name : "trainer",
+                 g ? g->trainers[trainerIdx + 1].name : "next");
+        println(buf);
+        lordSave(lord_);
+    } else {
+        // Leader cleared — award badge, fully persist.
+        lordOnGymCleared(lord_, gymIdx);
+        lordSave(lord_);
+        char buf[64];
+        const LordGym *g = lordGym(gymIdx);
+        snprintf(buf, sizeof(buf), "Earned the %s Badge!",
+                 g ? g->badgeName : "?");
+        println(buf);
+    }
+}
+
 void MonsterMeshTerminal::clearOutput()
 {
     if (!output_) return;
@@ -215,13 +285,23 @@ void MonsterMeshTerminal::executeLine(const char *line)
     while (*line == ' ') line++;
     if (*line == '\0') return;
     if (strncmp(line, "help", 4) == 0) {
+        const char *args = line + 4;
+        while (*args == ' ') ++args;
+        if (strncmp(args, "sys", 3) == 0) {
+            println("sys commands:");
+            println("  help        - game commands");
+            println("  version     - firmware build");
+            println("  echo <text> - print <text>");
+            println("  clear       - wipe screen");
+            return;
+        }
         println("commands:");
-        println("  help        - this list");
-        println("  version     - firmware build");
         println("  party       - show your loaded SAV party");
         println("  daycare     - daycare status + neighbors");
-        println("  echo <text> - print <text>");
-        println("  clear       - wipe screen");
+        println("  gym         - Legend of Charizard gym list");
+        println("  gym fight N - challenge gym N (1-8)");
+        println("  fight       - local CPU battle vs neighbor");
+        println("  help sys    - system commands");
         return;
     }
     if (strncmp(line, "daycare", 7) == 0) {
@@ -285,6 +365,108 @@ void MonsterMeshTerminal::executeLine(const char *line)
     }
     if (strncmp(line, "party", 5) == 0) {
         showParty();
+        return;
+    }
+    if (strncmp(line, "gym", 3) == 0) {
+        const char *args = line + 3;
+        while (*args == ' ') ++args;
+        // `gym fight [N]` — N is 1..8 (user-facing). With no number,
+        // auto-picks the lowest unlocked + uncleared gym so the user can
+        // just keep typing `gym fight` to march through the league.
+        if (strncmp(args, "fight", 5) == 0) {
+            const char *p = args + 5;
+            while (*p == ' ') ++p;
+            int n = 0;
+            while (*p >= '0' && *p <= '9') { n = n * 10 + (*p - '0'); ++p; }
+            uint8_t gymIdx;
+            if (n == 0) {
+                // Auto-pick: first gym that's unlocked and not yet cleared.
+                int auto_n = -1;
+                for (uint8_t i = 0; i < 8; ++i) {
+                    if (!lordHasBadge(lord_, i) && lordGymUnlocked(lord_, i)) {
+                        auto_n = i;
+                        break;
+                    }
+                }
+                if (auto_n < 0) {
+                    println("All 8 gyms cleared! You are the Champion.");
+                    return;
+                }
+                gymIdx = (uint8_t)auto_n;
+            } else if (n >= 1 && n <= 8) {
+                gymIdx = (uint8_t)(n - 1);
+            } else {
+                println("usage: gym fight [1-8]");
+                return;
+            }
+            if (!lordGymUnlocked(lord_, gymIdx)) {
+                println("gym is locked — clear earlier gyms first");
+                return;
+            }
+            if (lordHasBadge(lord_, gymIdx)) {
+                println("gym already cleared");
+                return;
+            }
+            if (!gymFightFn_) {
+                println("gym fight not wired");
+                return;
+            }
+            if (!partyLoaded_) {
+                println("no party loaded — load a SAV first");
+                return;
+            }
+            const LordGym *g = lordGym(gymIdx);
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Challenging %s of %s...",
+                     g ? g->leaderName : "?", g ? g->city : "?");
+            println(buf);
+            uint8_t trainerIdx = lord_.gymProgress[gymIdx];
+            if (trainerIdx > 4) trainerIdx = 4;  // clamp to leader
+            gymFightFn_(gymFightCtx_, gymIdx, trainerIdx);
+            return;
+        }
+        if (strncmp(args, "dump", 4) != 0) {
+            // Listing: 8 gym names + status. lordGymUnlocked() walks the
+            // badge bitmask: gym N requires badges 0..N-1.
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Legend of Charizard — runs %u  badges %u/8",
+                     (unsigned)lord_.exploreRunsToday,
+                     (unsigned)__builtin_popcount(lord_.badges));
+            println(buf);
+            for (uint8_t i = 0; i < 8; ++i) {
+                const LordGym *g = lordGym(i);
+                if (!g) continue;
+                const char *st = lordHasBadge(lord_, i) ? "CLEAR"
+                              : lordGymUnlocked(lord_, i) ? "open"
+                                                          : "lock";
+                snprintf(buf, sizeof(buf), "  %u %-12.12s %-9.9s [%s]",
+                         (unsigned)i + 1, g->city, g->leaderName, st);
+                println(buf);
+            }
+            return;
+        }
+        // `gym dump` — debug view of LordSave.
+        char buf[64];
+        snprintf(buf, sizeof(buf),
+                 "gym: badges=0x%02X runsToday=%u total=%u best=%u",
+                 (unsigned)lord_.badges,
+                 (unsigned)lord_.exploreRunsToday,
+                 (unsigned)lord_.totalRuns,
+                 (unsigned)lord_.bestRunWaves);
+        println(buf);
+        return;
+    }
+    if (strncmp(line, "fight", 5) == 0) {
+        if (!partyLoaded_) {
+            println("no party loaded — load a SAV first");
+            return;
+        }
+        if (!fightFn_) {
+            println("fight not wired");
+            return;
+        }
+        println("starting local battle vs CPU rival...");
+        fightFn_(fightCtx_);
         return;
     }
     char buf[64];
