@@ -45,6 +45,7 @@ static bool g_keyPeekAltSeenLow    = false;
 static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out,
                                  char *resolvedSavOut, size_t resolvedSavLen,
                                  char *trainerNameOut, size_t trainerNameLen);
+static bool patchSavOnSdWithDaycareXp(const char *romPath, PokemonDaycare &dc);
 extern bool initWifi();
 
 // LovyanGFX is available on T-Deck in both t-deck and t-deck-tft builds
@@ -400,6 +401,15 @@ int32_t MonsterMeshModule::runOnce()
             [](void *ctx) {
                 static_cast<MonsterMeshModule *>(ctx)->daycare_.forceEvent();
             }, this);
+        terminal_.setFightFn(
+            [](void *ctx) {
+                static_cast<MonsterMeshModule *>(ctx)->requestLocalTextBattle();
+            }, this);
+        terminal_.setGymFightFn(
+            [](void *ctx, uint8_t gymIdx, uint8_t trainerIdx) {
+                static_cast<MonsterMeshModule *>(ctx)
+                    ->requestGymBattle(gymIdx, trainerIdx);
+            }, this);
         daycare_.setSendDm([](uint32_t dest, const char *msg, void *ctx) {
             auto *self = static_cast<MonsterMeshModule *>(ctx);
             self->sendTextDM(dest, msg);
@@ -714,14 +724,33 @@ int32_t MonsterMeshModule::runOnce()
         LOG_INFO("[MonsterMesh] auto party load triggered (SD ready)\n");
     }
 
-    // Auto-checkOut on emulator/browser entry — pause daycare so SD I/O
-    // doesn't fight the emulator for the bus. SAV-write XP write-back is
-    // deferred to D6; passing nullptr means "stop daycare, don't patch".
+    // Auto-checkOut on emulator/browser entry — flush daycare-earned XP back
+    // to the .sav on SD (additive only, never reduces) so the next time the
+    // user plays the cart, the gains are already in the file. The patch
+    // touches only EXP / level / 5 stats per party slot + the checksum.
+    //
+    // **Safety gate**: never write the .sav if a cart is currently loaded.
+    // The emulator owns cartRam_ at that point and would overwrite our patch
+    // when it next saves on its own. Only write when no ROM has been
+    // launched this session, OR the cart has been ejected (emuInitialized_
+    // false). Otherwise, just stop daycare cleanly.
     if (pendingAutoCheckOut_) {
         pendingAutoCheckOut_ = false;
         if (daycare_.isActive()) {
-            daycare_.checkOut(nullptr);
-            LOG_INFO("[MonsterMesh] daycare auto checked-out (emulator entry)\n");
+            const char *romPath = emu_.romPath();
+            bool cartLoaded = emuInitialized_ || emu_.isRunning();
+            bool patched = false;
+            if (!cartLoaded && romPath && romPath[0]) {
+                concurrency::LockGuard g(spiLock);
+                patched = patchSavOnSdWithDaycareXp(romPath, daycare_);
+            }
+            if (!patched) {
+                // Cart loaded, no ROM path, or write failed — stop daycare
+                // cleanly without touching the SAV.
+                daycare_.checkOut(nullptr);
+            }
+            LOG_INFO("[MonsterMesh] daycare auto checked-out (cart=%d patched=%d)\n",
+                     (int)cartLoaded, (int)patched);
         }
     }
 
@@ -752,6 +781,201 @@ int32_t MonsterMeshModule::runOnce()
         daycare_.tick(millis());
     }
 
+    // ── T2: text battle ────────────────────────────────────────────────────
+    // Start: the terminal `fight` command set the request flag. Suppress the
+    // LVGL flush the same way the emulator path does, clear the screen, and
+    // hand the staged party + a CPU mirror-match to startLocal().
+    if (textBattleStartReq_ && !textBattleActive_ && setupDone_ &&
+        !emulatorActive_ && !browserActive_ && terminal_.hasParty()) {
+        textBattleStartReq_ = false;
+#if HAS_TFT
+        lv_display_t *disp = lv_display_get_default();
+        if (disp && !savedFlushCb_) {
+            savedFlushCb_ = (void *)disp->flush_cb;
+            lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
+                lv_display_flush_ready(d);
+            });
+        }
+#endif
+        if (g_deviceUiLgfx) {
+            concurrency::LockGuard g(spiLock);
+            g_deviceUiLgfx->clearClipRect();
+            g_deviceUiLgfx->fillScreen(0x0000);
+        }
+        // CPU rival: pick a real trainer we've seen on the mesh via
+        // daycare beacons. Build their Gen1Party from the beacon's species
+        // + level + nickname + moves. Daycare beacons carry pokedex numbers
+        // (post internalToDex conversion at check-in), so we reverse-map
+        // back to internal hex codes here — the battle engine's
+        // initBattlePokeFromSave will then convert internal → dex via the
+        // same table we used at SAV load, keeping both code paths
+        // consistent.
+        Gen1Party cpuParty = {};
+        char rivalTag[6] = "RIVAL";
+        char hdrText[40] = {};   // applied AFTER startLocal (which clears it)
+
+        // L3: gym battles bypass the neighbor-pick path. Build the gym
+        // trainer's party via lordBuildGymParty and tag the rival with the
+        // first 4 chars of the trainer's name (each grunt has their own).
+        if (gymBattleIdx_ < 8) {
+            const LordGym *g = lordGym(gymBattleIdx_);
+            if (g && lordBuildGymParty(gymBattleIdx_, gymTrainerIdx_, cpuParty)) {
+                const char *tn = g->trainers[gymTrainerIdx_].name;
+                if (!tn || !tn[0]) tn = g->leaderName;
+                snprintf(rivalTag, sizeof(rivalTag), "%.4s", tn);
+                LOG_INFO("[MonsterMesh] gym %u: %s — trainer %u (%s), %u pokemon\n",
+                         (unsigned)gymBattleIdx_, g->leaderName,
+                         (unsigned)gymTrainerIdx_, tn, (unsigned)cpuParty.count);
+                // Full trainer name, no truncation — header band is wide
+                // enough for "Cerulean City - Janice 3/5" etc.
+                snprintf(hdrText, sizeof(hdrText), "%s - %s %u/5",
+                         g->city, tn, (unsigned)gymTrainerIdx_ + 1);
+                activeGymBattle_ = gymBattleIdx_;
+                activeGymTrainer_ = gymTrainerIdx_;
+            } else {
+                LOG_WARN("[MonsterMesh] gym %u: build party failed, falling back\n",
+                         (unsigned)gymBattleIdx_);
+                gymBattleIdx_ = 0xFF;  // fall through to neighbor pick
+            }
+        }
+
+        const auto *peers = daycare_.getNeighbors();
+        uint8_t peerCount = daycare_.getNeighborCount();
+        if (gymBattleIdx_ >= 8 && peerCount > 0 && peers) {
+            uint8_t pick = (uint8_t)(esp_random() % peerCount);
+            const auto &n = peers[pick];
+            uint8_t party = n.partyCount > 6 ? 6 : n.partyCount;
+            cpuParty.count = party;
+            for (uint8_t i = 0; i < party; ++i) {
+                uint8_t dex = n.party[i].species;
+                uint8_t internal = (dex < 152) ? dexToInternal[dex] : 0;
+                cpuParty.species[i] = internal;
+                cpuParty.mons[i].species = internal;
+                cpuParty.mons[i].level   = n.party[i].level;
+                cpuParty.mons[i].boxLevel = n.party[i].level;
+                memcpy(cpuParty.mons[i].moves, n.party[i].moves, 4);
+                // Encode level→exp roughly so the engine's stat math (which
+                // re-reads exp) starts at the right level baseline.
+                uint32_t exp = expForLevel(dex, n.party[i].level);
+                cpuParty.mons[i].exp[0] = (exp >> 16) & 0xFF;
+                cpuParty.mons[i].exp[1] = (exp >> 8)  & 0xFF;
+                cpuParty.mons[i].exp[2] =  exp        & 0xFF;
+                // Average DVs (8 across the board) — daycare beacons don't
+                // carry DVs, and a fair fight against an unknown party is
+                // best served by a vanilla baseline.
+                cpuParty.mons[i].dvs[0] = 0x88;
+                cpuParty.mons[i].dvs[1] = 0x88;
+                // Copy nickname (already ASCII in the beacon).
+                for (uint8_t j = 0; j < 10 && n.party[i].nickname[j]; ++j) {
+                    cpuParty.nicknames[i][j] = (uint8_t)n.party[i].nickname[j];
+                }
+            }
+            // Trainer tag: Meshtastic short name (4 chars) of the partner.
+            snprintf(rivalTag, sizeof(rivalTag), "%.4s", n.shortName);
+            LOG_INFO("[MonsterMesh] text battle: rival = %s (%u pokemon)\n",
+                     rivalTag, (unsigned)party);
+        } else if (gymBattleIdx_ >= 8) {
+            // No neighbors AND no gym requested — fall back to a "wild
+            // trainer" picked at random from the LoC roster. Better than a
+            // mirror match: gives a real opponent with their own party so
+            // the user can practice solo.
+            uint8_t gIdx = (uint8_t)(esp_random() % 8);
+            uint8_t tIdx = (uint8_t)(esp_random() % 5);
+            const LordGym *g = lordGym(gIdx);
+            if (g && lordBuildGymParty(gIdx, tIdx, cpuParty)) {
+                snprintf(rivalTag, sizeof(rivalTag), "%.4s", g->leaderName);
+                LOG_INFO("[MonsterMesh] text battle: wild trainer %u/%u (%s)\n",
+                         gIdx, tIdx, g->leaderName);
+            } else {
+                cpuParty = terminal_.getParty();
+                LOG_INFO("[MonsterMesh] text battle: fallback mirror\n");
+            }
+        }
+        // After this point the gym slot is consumed — reset so the next
+        // `fight` defaults to neighbor-pick again.
+        gymBattleIdx_ = 0xFF;
+        const char *ourTag = (owner.short_name[0] != '\0') ? owner.short_name : "ME";
+        textBattle_.startLocal(terminal_.getParty(), cpuParty, ourTag, rivalTag);
+        if (hdrText[0]) textBattle_.setHeader(hdrText);
+        textBattleActive_ = true;
+    }
+
+    // Tick + render while active.
+    if (textBattleActive_ && setupDone_) {
+        textBattle_.tick(millis());
+        if (textBattle_.dirty() && g_deviceUiLgfx) {
+            concurrency::LockGuard g(spiLock);
+            textBattle_.render(g_deviceUiLgfx);
+            textBattle_.clearDirty();
+        }
+        // Battle ended — gym gauntlets chain straight into the next
+        // trainer without healing the player. End cleanup only fires when
+        // we either (a) lost, or (b) cleared the leader.
+        if (!textBattle_.isActive()) {
+            bool gauntletContinue = false;
+            if (activeGymBattle_ < 8) {
+                bool won = (textBattle_.engineResult() ==
+                            Gen1BattleEngine::Result::P1_WIN);
+                if (won && activeGymTrainer_ < 4) {
+                    // Build the next trainer's party and stay in-battle.
+                    Gen1Party nextParty = {};
+                    uint8_t nextIdx = activeGymTrainer_ + 1;
+                    if (lordBuildGymParty(activeGymBattle_, nextIdx, nextParty)) {
+                        const LordGym *g = lordGym(activeGymBattle_);
+                        const char *tn = g ? g->trainers[nextIdx].name : "NEXT";
+                        char tag[6];
+                        snprintf(tag, sizeof(tag), "%.4s", tn);
+                        textBattle_.nextOpponent(nextParty, tag);
+                        char hdr[40];
+                        snprintf(hdr, sizeof(hdr), "%s - %s %u/5",
+                                 g ? g->city : "Gym", tn,
+                                 (unsigned)nextIdx + 1);
+                        textBattle_.setHeader(hdr);
+                        activeGymTrainer_ = nextIdx;
+                        gauntletContinue = true;
+                        LOG_INFO("[MonsterMesh] gym %u: chain to trainer %u (%s)\n",
+                                 (unsigned)activeGymBattle_, (unsigned)nextIdx, tn);
+                    }
+                }
+                if (!gauntletContinue) {
+                    // Either lost, or cleared the leader. Final outcome.
+                    terminal_.onGymBattleEnded(activeGymBattle_,
+                                               activeGymTrainer_, won);
+                    activeGymBattle_  = 0xFF;
+                }
+            }
+            if (gauntletContinue) {
+                // Battle continues with the next trainer — keep dirty
+                // flag so the next render shows the new opponent.
+            } else {
+                textBattleActive_ = false;
+#if HAS_TFT
+                // Wipe the lgfx-rendered battle frame so the terminal panel
+                // doesn't have to "fight through" the leftover pixels when
+                // LVGL repaints. Without this the user can sit on the
+                // press-any-key screen indefinitely while LVGL only redraws
+                // dirty regions over the static battle bitmap.
+                if (g_deviceUiLgfx) {
+                    concurrency::LockGuard g(spiLock);
+                    g_deviceUiLgfx->fillScreen(0x0000);
+                }
+                lv_display_t *disp = lv_display_get_default();
+                if (disp && savedFlushCb_) {
+                    lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
+                    savedFlushCb_ = nullptr;
+                    lv_obj_invalidate(lv_screen_active());
+                    // Force an immediate repaint cycle. Without this LVGL
+                    // can sit on its 30-50ms refresh timer before the
+                    // terminal paints over the cleared battle screen, and
+                    // the user thinks the press-any-key state is stuck.
+                    lv_refr_now(disp);
+                }
+#endif
+                LOG_INFO("[MonsterMesh] text battle: ended\n");
+            }
+        }
+    }
+
     // Drain any newly-fired daycare event, regardless of whether it was
     // generated by tick() or by triggerArrivalEvent() in handleReceived.
     // Running here keeps all DM TX on the LoRa thread, never the router or
@@ -766,13 +990,68 @@ int32_t MonsterMeshModule::runOnce()
                 LOG_INFO("[MonsterMesh] event DM: %s\n", evt.message);
                 if (evt.targetNodeId != 0 &&
                     evt.targetNodeId != nodeDB->getNodeNum()) {
-                    // The partner sees the event from THEIR perspective —
-                    // "your <pokemon>" on their side, "<our-tag>'s <pokemon>"
-                    // for ours. Falls back to local message when the event
-                    // generator didn't fill remoteMessage (non-arrival events).
-                    const char *partnerMsg = evt.remoteMessage[0]
-                                             ? evt.remoteMessage
-                                             : evt.message;
+                    // POV swap: arrival events already supply remoteMessage.
+                    // For periodic events the engine only fills evt.message
+                    // (in the local trainer's POV — "Your X met THEIR-Y").
+                    // We do a lightweight runtime rewrite so the partner
+                    // reads it from THEIR POV.
+                    const char *ourTag = (owner.short_name[0] != '\0')
+                                          ? owner.short_name : "ME";
+                    const char *theirTag = "";
+                    {
+                        const auto *peers = daycare_.getNeighbors();
+                        uint8_t pc = daycare_.getNeighborCount();
+                        for (uint8_t i = 0; i < pc; ++i) {
+                            if (peers[i].nodeId == evt.targetNodeId) {
+                                theirTag = peers[i].shortName;
+                                break;
+                            }
+                        }
+                    }
+                    char swapped[200] = {};
+                    const char *partnerMsg;
+                    if (evt.remoteMessage[0]) {
+                        partnerMsg = evt.remoteMessage;
+                    } else {
+                        // Walk the source string emitting characters; substitute
+                        // "Your " → "<ourTag>'s " and "<theirTag>-" or
+                        // "<theirTag>'s " → "your ".
+                        size_t o = 0;
+                        size_t tlen = theirTag[0] ? strlen(theirTag) : 0;
+                        for (const char *p = evt.message;
+                             *p && o < sizeof(swapped) - 1; ) {
+                            if (strncmp(p, "Your ", 5) == 0) {
+                                int w = snprintf(swapped + o,
+                                                 sizeof(swapped) - o,
+                                                 "%s's ", ourTag);
+                                if (w > 0) o += (size_t)w;
+                                p += 5;
+                                continue;
+                            }
+                            if (tlen > 0 && strncmp(p, theirTag, tlen) == 0) {
+                                if (p[tlen] == '-') {
+                                    int w = snprintf(swapped + o,
+                                                     sizeof(swapped) - o,
+                                                     "your ");
+                                    if (w > 0) o += (size_t)w;
+                                    p += tlen + 1;
+                                    continue;
+                                }
+                                if (p[tlen] == '\'' && p[tlen + 1] == 's' &&
+                                    p[tlen + 2] == ' ') {
+                                    int w = snprintf(swapped + o,
+                                                     sizeof(swapped) - o,
+                                                     "your ");
+                                    if (w > 0) o += (size_t)w;
+                                    p += tlen + 3;
+                                    continue;
+                                }
+                            }
+                            swapped[o++] = *p++;
+                        }
+                        swapped[o] = '\0';
+                        partnerMsg = swapped[0] ? swapped : evt.message;
+                    }
                     sendTextDM(evt.targetNodeId, partnerMsg);
                     LOG_INFO("[MonsterMesh] event DM → peer 0x%08X: %s\n",
                              (unsigned)evt.targetNodeId, partnerMsg);
@@ -864,9 +1143,15 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
 {
     data->state = LV_INDEV_STATE_RELEASED;
 
-    // Keep device-ui backlight alive while emulator or browser is active.
+    // Keep device-ui backlight alive while emulator, browser, or text battle
+    // is active. The text-battle screen renders via lgfx (not LVGL), so the
+    // device-ui inactivity monitor doesn't see those frames as activity —
+    // we have to poke it explicitly here so playing a fight doesn't blank
+    // the screen mid-turn.
     bool keepAlive = (monsterMeshModule &&
-                      (monsterMeshModule->isEmulatorActive() || monsterMeshModule->isBrowserActive()));
+                      (monsterMeshModule->isEmulatorActive() ||
+                       monsterMeshModule->isBrowserActive() ||
+                       monsterMeshModule->isTextBattleActive()));
     if (keepAlive) {
         lv_display_trigger_activity(NULL);
     }
@@ -1061,7 +1346,8 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
 
     // ── When emulator or browser is active, route keys to game instead of LVGL
     if (monsterMeshModule && (monsterMeshModule->isEmulatorActive() ||
-                              monsterMeshModule->isBrowserActive())) {
+                              monsterMeshModule->isBrowserActive() ||
+                              monsterMeshModule->isTextBattleActive())) {
         monsterMeshModule->handleKeyFromLVGL(key);
         return; // consume — don't pass to LVGL
     }
@@ -1128,6 +1414,85 @@ void MonsterMeshModule::ejectROM()
     browserActive_ = true;       // show browser
     browserNeedsScan_ = true;    // re-scan SD for ROM list
     setJoypadDirect(0);
+}
+
+// ── D6 — write daycare-earned XP back to the SAV on SD ─────────────────────
+// Reads the .sav next to `romPath`, hands it to PokemonDaycare::checkOut()
+// for additive XP patching (the patcher only ever increases EXP — it reads
+// the live SRAM value and adds the daycare delta on top, then recalcs level
+// + 5 stat fields and fixes the checksum byte). Writes the patched 32KB
+// back. If anything fails along the way, the original .sav is untouched.
+//
+// Returns true if the SAV was both read and re-written successfully. Even
+// then the patcher may have been a no-op (no XP gained). False ⇒ skipped.
+static bool patchSavOnSdWithDaycareXp(const char *romPath, PokemonDaycare &dc)
+{
+    if (!romPath || !romPath[0]) return false;
+
+    // Convert "/sd/foo.gb" → "/foo.sav" the same way the loader does.
+    char savPath[256] = {};
+    strncpy(savPath, romPath, sizeof(savPath) - 1);
+    char *dot = strrchr(savPath, '.');
+    if (!dot) return false;
+    if (sizeof(savPath) - (dot - savPath) < 5) return false;
+    strcpy(dot, ".sav");
+    const char *sdRel = savPath;
+    if (strncmp(sdRel, "/sd", 3) == 0) sdRel += 3;
+
+    SD.end();
+    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+    if (!SD.begin(SDCARD_CS, SPI)) {
+        LOG_WARN("[MonsterMesh] D6 SAV write: SD.begin failed\n");
+        return false;
+    }
+
+    // Standard Gen 1 SAV is 32KB.
+    constexpr size_t SAV_SIZE = 32 * 1024;
+    uint8_t *sram = (uint8_t *)heap_caps_malloc(SAV_SIZE, MALLOC_CAP_8BIT);
+    if (!sram) {
+        LOG_WARN("[MonsterMesh] D6 SAV write: heap alloc %u failed\n",
+                 (unsigned)SAV_SIZE);
+        return false;
+    }
+
+    File f = SD.open(sdRel, FILE_READ);
+    if (!f) {
+        LOG_WARN("[MonsterMesh] D6 SAV write: SD.open('%s') for read failed\n", sdRel);
+        free(sram);
+        return false;
+    }
+    int n = f.read(sram, SAV_SIZE);
+    f.close();
+    if (n < (int)SAV_SIZE) {
+        LOG_WARN("[MonsterMesh] D6 SAV write: short read (%d/%u)\n",
+                 n, (unsigned)SAV_SIZE);
+        free(sram);
+        return false;
+    }
+
+    // checkOut() patches in-place (additive only) and zeroes totalXpGained
+    // so the next checkout doesn't double-count. Only the EXP / level / 5
+    // stat fields per party slot + the checksum byte are touched.
+    dc.checkOut(sram);
+
+    // Truncate-on-write so we don't leave stale bytes if the file shrunk.
+    File w = SD.open(sdRel, FILE_WRITE);
+    if (!w) {
+        LOG_WARN("[MonsterMesh] D6 SAV write: SD.open('%s') for write failed\n", sdRel);
+        free(sram);
+        return false;
+    }
+    size_t written = w.write(sram, SAV_SIZE);
+    w.close();
+    free(sram);
+    if (written != SAV_SIZE) {
+        LOG_WARN("[MonsterMesh] D6 SAV write: short write (%u/%u)\n",
+                 (unsigned)written, (unsigned)SAV_SIZE);
+        return false;
+    }
+    LOG_INFO("[MonsterMesh] D6 SAV write: patched '%s' (%u bytes)\n",
+             sdRel, (unsigned)written);
+    return true;
 }
 
 // Scan SD root for any .sav file and copy its SD-relative path into `out`.
@@ -1517,6 +1882,15 @@ void MonsterMeshModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *stat
 
 void MonsterMeshModule::handleKeyPress(uint8_t ascii)
 {
+    // Text battle steals all keys while it's foreground. ESC (0x1B) ends the
+    // battle and returns to the terminal scrollback that was preserved in the
+    // background.
+    if (textBattleActive_) {
+        textBattle_.handleKey(ascii);
+        powerFSM.trigger(EVENT_INPUT);
+        return;
+    }
+
     // Terminal: route ASCII keys to it ONLY when terminal is the foreground
     // (i.e. emulator and browser are both inactive). When the user ALT's into
     // ROM browser or emulator, terminalActive_ stays true so the terminal
