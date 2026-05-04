@@ -472,6 +472,19 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
 
     if (keyAccept) {
         const auto &mon = engine_.party(0).mons[engine_.party(0).active];
+        // Out of PP across the whole moveset → Gen 1 Struggle (id sentinel
+        // 0xFE on the wire). Without this, K-accept silently no-oped and the
+        // battle looked frozen after a long gauntlet drained every move.
+        bool anyPp = false;
+        for (uint8_t i = 0; i < 4; ++i) {
+            if (mon.moves[i] != 0 && mon.pp[i] > 0) { anyPp = true; break; }
+        }
+        if (!anyPp) {
+            engine_.submitAction(0, 0 /*USE_MOVE*/, 0xFE /*STRUGGLE*/);
+            if (mode_ == Mode::NETWORKED) sendAction(0, 0xFE);
+            phase_ = Phase::WAIT_REMOTE;
+            return;
+        }
         if (mon.moves[cursor_] == 0 || mon.pp[cursor_] == 0) return;
         engine_.submitAction(0, 0 /*USE_MOVE*/, cursor_);
         if (mode_ == Mode::NETWORKED) sendAction(0, cursor_);
@@ -564,9 +577,16 @@ void MonsterMeshTextBattle::drawMoveMenu(lgfx::LGFX_Device *g)
     }
 
     // Footer: K=accept, S=switch, F=flee, L=cancel — all on one row.
+    // When every move is at 0 PP we fall back to Struggle on K, so swap the
+    // hint so the user isn't confused by an empty PP column.
+    bool anyPp = false;
+    for (uint8_t i = 0; i < 4; ++i) {
+        if (mon.moves[i] != 0 && mon.pp[i] > 0) { anyPp = true; break; }
+    }
     g->setCursor(8, y + 2 * rowH + 4);
     g->setTextColor(DIM, BG);
-    g->print("K=ok L=back P=mons F=flee");
+    if (anyPp) g->print("K=ok L=back P=mons F=flee");
+    else       g->print("Out of PP - K=Struggle  P=mons F=flee");
 }
 
 void MonsterMeshTextBattle::drawSwitchMenu(lgfx::LGFX_Device *g)
