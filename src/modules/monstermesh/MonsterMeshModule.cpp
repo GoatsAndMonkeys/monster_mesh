@@ -219,7 +219,15 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 LOG_INFO("[MonsterMesh] daycare beacon RX from 0x%08X '%s/%s' party=%u\n",
                          (unsigned)beacon->nodeId, beacon->shortName,
                          beacon->gameName, (unsigned)beacon->partyCount);
+                uint8_t prevCount = daycare_.getNeighborCount();
                 daycare_.handleBeacon(*beacon);
+                // New trainer arrived — fire an arrival event. The event is
+                // safe (state mutation only, no TX). Its DM is dispatched in
+                // runOnce via the lastDmedEventTime_ watermark; we never send
+                // from this router-context handler.
+                if (daycare_.getNeighborCount() > prevCount) {
+                    daycare_.triggerArrivalEvent(*beacon);
+                }
             } else {
                 LOG_INFO("[MonsterMesh] PRIVATE_APP not daycare beacon (type=0x%02X self=%d)\n",
                          (unsigned)beacon->type,
@@ -295,7 +303,12 @@ void MonsterMeshModule::daycareCheckInFromStagedParty()
     uint8_t levels[6]  = {};
     char    nicks[6][11] = {};
     for (uint8_t i = 0; i < p.count; ++i) {
-        species[i] = p.species[i];
+        // Gen 1 SAV stores species as the internal hex code (0x01-0xBE), NOT
+        // the pokedex number. Daycare expects dex numbers — convert via the
+        // pret/pokered table in DaycareSavPatcher.h. Without this the wrong
+        // species name surfaces in event DMs (e.g. Mew shown as Spearow).
+        uint8_t internal = p.species[i];
+        species[i] = internalToDex[internal];
         levels[i]  = p.mons[i].level;
         gen1NameToAscii(p.nicknames[i], 11, nicks[i], sizeof(nicks[i]));
     }
@@ -470,7 +483,7 @@ int32_t MonsterMeshModule::runOnce()
                 bool altNow = (b[0] & 0x10) != 0;
                 static bool altSeenLow = false;  // require a clean low baseline before firing
                 if (!altNow) altSeenLow = true;
-                if (altNow && !altWas && altSeenLow && (now - g_lastAltFireMs > 2000)) {
+                if (altNow && !altWas && altSeenLow && (now - g_lastAltFireMs > 1000)) {
                     g_lastAltFireMs = now;
                     LOG_INFO("[MonsterMesh] ALT pressed (runOnce poll) → toggle\n");
                     handleKeyPress(0x05);
@@ -680,15 +693,9 @@ int32_t MonsterMeshModule::runOnce()
             stagedTrainerName_[sizeof(stagedTrainerName_) - 1] = '\0';
             terminalPartyStaged_ = true;  // LVGL thread will pick this up
             // First successful SAV load doubles as daycare check-in: the
-            // background beacons advertise this party to the mesh.
+            // background beacons advertise this party to the mesh. The very
+            // first beacon TX is deferred to the runOnce 30s gate above.
             daycareCheckInFromStagedParty();
-            // Force an immediate beacon broadcast so paired devices see this
-            // node within seconds instead of waiting up to a full 5-min beacon
-            // interval. We're well past the PacketAPI/NodeInfo window by now
-            // (load runs no earlier than ~10s post-boot for explicit opens
-            // and ~30s for the auto-trigger below), so the boot-loop hazard
-            // documented in feedback_mm_no_boot_beacon.md does not apply.
-            if (daycare_.isActive()) daycare_.forceBeacon();
         }
         LOG_INFO("[MonsterMesh] terminal party load: loaded=%d count=%d sav='%s' rom='%s'\n",
                  (int)loaded, (int)p.count,
@@ -696,37 +703,79 @@ int32_t MonsterMeshModule::runOnce()
                  emu_.romPath()[0] ? emu_.romPath() : "(none)");
     }
 
-    // Auto-load party once at ~30s after boot, well past the PacketAPI window
-    // that previously caused boot-loop crashes. This kicks off the deferred
-    // SAV load + daycare check-in even if the user never opens the terminal,
-    // so neighbors see beacons from this node automatically.
+    // Auto-load the party as soon as SD is mounted. SAV reading is just an
+    // SD read — no LoRa traffic — so it's safe before the PacketAPI/NodeInfo
+    // window settles. The first beacon TX is deferred separately below.
     if (setupDone_ && !autoPartyLoadDone_ && !terminalNeedsParty_ &&
         !terminal_.hasParty() &&
-        !emulatorActive_ && !browserActive_ && millis() > 30000) {
+        !emulatorActive_ && !browserActive_) {
         autoPartyLoadDone_ = true;
         terminalNeedsParty_ = true;
-        LOG_INFO("[MonsterMesh] auto party load + daycare check-in triggered\n");
+        LOG_INFO("[MonsterMesh] auto party load triggered (SD ready)\n");
+    }
+
+    // Auto-checkOut on emulator/browser entry — pause daycare so SD I/O
+    // doesn't fight the emulator for the bus. SAV-write XP write-back is
+    // deferred to D6; passing nullptr means "stop daycare, don't patch".
+    if (pendingAutoCheckOut_) {
+        pendingAutoCheckOut_ = false;
+        if (daycare_.isActive()) {
+            daycare_.checkOut(nullptr);
+            LOG_INFO("[MonsterMesh] daycare auto checked-out (emulator entry)\n");
+        }
+    }
+
+    // Auto-checkIn on emulator/browser exit — reload SAV and re-checkin so
+    // beacons reflect any XP/level changes earned during the play session.
+    if (pendingAutoCheckin_ && setupDone_ && !emulatorActive_ && !browserActive_) {
+        pendingAutoCheckin_ = false;
+        if (!daycare_.isActive()) {
+            terminalNeedsParty_ = true;  // forces fresh SAV read + checkIn
+            LOG_INFO("[MonsterMesh] daycare auto check-in queued (emulator exit)\n");
+        }
+    }
+
+    // First beacon broadcast — deferred to ~30s post-boot so the LoRa TX
+    // doesn't race the PacketAPI/NodeInfo init window
+    // (feedback_mm_no_boot_beacon). After this, the daycare's periodic
+    // BEACON_INTERVAL_MS timer takes over (every 15 min).
+    if (setupDone_ && !firstBeaconDone_ && daycare_.isActive() &&
+        !emulatorActive_ && !browserActive_ && millis() > 30000) {
+        firstBeaconDone_ = true;
+        daycare_.forceBeacon();
+        LOG_INFO("[MonsterMesh] first daycare beacon fired (30s gate)\n");
     }
 
     // Daycare tick — only run while in the Meshtastic UI. The radio is asleep
     // in emu/browser mode, so beacons would just queue up uselessly.
     if (setupDone_ && !emulatorActive_ && !browserActive_ && daycare_.isActive()) {
-        uint32_t prevEventTime = daycare_.getLastEventTime();
         daycare_.tick(millis());
-        // If a new event fired this tick, DM the message: to ourselves so the
-        // phone shows it, and to the remote trainer when the event involved
-        // them (so both sides see the same interaction).
-        if (daycare_.getLastEventTime() != prevEventTime &&
-            daycare_.getLastEventTime() != 0) {
+    }
+
+    // Drain any newly-fired daycare event, regardless of whether it was
+    // generated by tick() or by triggerArrivalEvent() in handleReceived.
+    // Running here keeps all DM TX on the LoRa thread, never the router or
+    // LVGL thread.
+    if (setupDone_ && !emulatorActive_ && !browserActive_) {
+        uint32_t evtTime = daycare_.getLastEventTime();
+        if (evtTime != 0 && evtTime != lastDmedEventTime_) {
+            lastDmedEventTime_ = evtTime;
             const auto &evt = daycare_.getLastEvent();
             if (evt.message[0]) {
                 sendTextDM(nodeDB->getNodeNum(), evt.message);
                 LOG_INFO("[MonsterMesh] event DM: %s\n", evt.message);
                 if (evt.targetNodeId != 0 &&
                     evt.targetNodeId != nodeDB->getNodeNum()) {
-                    sendTextDM(evt.targetNodeId, evt.message);
-                    LOG_INFO("[MonsterMesh] event DM → peer 0x%08X\n",
-                             (unsigned)evt.targetNodeId);
+                    // The partner sees the event from THEIR perspective —
+                    // "your <pokemon>" on their side, "<our-tag>'s <pokemon>"
+                    // for ours. Falls back to local message when the event
+                    // generator didn't fill remoteMessage (non-arrival events).
+                    const char *partnerMsg = evt.remoteMessage[0]
+                                             ? evt.remoteMessage
+                                             : evt.message;
+                    sendTextDM(evt.targetNodeId, partnerMsg);
+                    LOG_INFO("[MonsterMesh] event DM → peer 0x%08X: %s\n",
+                             (unsigned)evt.targetNodeId, partnerMsg);
                 }
             }
         }
@@ -852,7 +901,7 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
         if (!altPressed) g_keyPeekAltSeenLow = true;
         if (altPressed && !g_keyPeekAltWasPressed && g_keyPeekAltSeenLow) {
             uint32_t now = millis();
-            if (now - g_lastAltFireMs > 2000) {
+            if (now - g_lastAltFireMs > 1000) {
                 g_lastAltFireMs = now;
                 g_micLastToggleMs = now;
                 g_keyPeekAltWasPressed = true;
@@ -1874,6 +1923,10 @@ void MonsterMeshModule::enterEmulatorMode()
     }
 
     LOG_INFO("MonsterMesh: entering emulator mode — suspending Meshtastic\n");
+    // Daycare yields the SD bus to the emulator. Defer the actual checkOut()
+    // call to runOnce on the LoRa thread — SD/SPI work on the LVGL thread
+    // would race with the LGFX flush we just suppressed.
+    pendingAutoCheckOut_ = true;
     // Snappy path: gate flags + radio sleep ONLY (~few ms). WiFi deinit (~50ms+)
     // is deferred to runOnce on the LoRa thread so the user sees the browser
     // come up instantly after pressing ALT.
@@ -1917,6 +1970,10 @@ void MonsterMeshModule::exitEmulatorMode()
     wifiSuppressed = false;
     needReconnect = true;
     radioNeedsRx_ = true;
+    // Re-arm daycare. runOnce will reload the party from the (possibly
+    // updated) SAV and call checkIn → forceBeacon, picking up any XP/level
+    // changes the user earned in-game during this session.
+    pendingAutoCheckin_ = true;
 }
 
 #endif // T_DECK && !MESHTASTIC_EXCLUDE_MONSTERMESH

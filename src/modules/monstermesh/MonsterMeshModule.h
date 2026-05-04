@@ -153,11 +153,29 @@ private:
     // Decoded Gen 1 trainer name from the most recent SAV load. 7 chars + NUL.
     char stagedTrainerName_[8] = {};
 
-    // One-shot: at ~30s into runOnce (well past the PacketAPI/NodeInfo window
-    // that previously caused boot-time TX loops) we auto-trigger the party
-    // load so daycare check-in and the first beacon fire without the user
-    // having to open the terminal.
+    // One-shot: party-load auto-trigger has fired. We trigger as early as
+    // possible (right after SD mount completes) since reading the SAV is just
+    // an SD read, not a LoRa op.
     bool autoPartyLoadDone_ = false;
+
+    // One-shot: the first daycare beacon broadcast has fired. We defer this
+    // past ~30s into boot so the beacon TX doesn't race the PacketAPI /
+    // NodeInfo init window that previously caused a boot loop
+    // (feedback_mm_no_boot_beacon). Periodic beacons take over from there.
+    bool firstBeaconDone_ = false;
+
+    // Last daycare event time we DM'd. When the daycare's lastEventTime moves
+    // past this, runOnce DMs the new event. Covers both periodic events
+    // (generated in tick()) and arrival events (generated from
+    // handleReceived when a new neighbor's beacon arrives).
+    uint32_t lastDmedEventTime_ = 0;
+
+    // Auto check-in/out flags set by enter/exitEmulatorMode (LVGL thread) and
+    // drained in runOnce on the LoRa thread. Keeps SD I/O off the LVGL thread.
+    // checkOut: stop daycare while emulator/browser owns the SD bus.
+    // checkin:  reload party from the (possibly updated) SAV and re-checkin.
+    volatile bool pendingAutoCheckOut_ = false;
+    volatile bool pendingAutoCheckin_  = false;
 
     // True when the user has scrolled up to the virtual [Eject Cart] row at
     // the top of the browser (only visible when emuInitialized_ is true).

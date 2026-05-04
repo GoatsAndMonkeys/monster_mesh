@@ -11,7 +11,7 @@
 // ── Timing constants ────────────────────────────────────────────────────────
 
 static constexpr uint32_t EVENT_INTERVAL_MS     = 300000;    // 5 min (testing)
-static constexpr uint32_t BEACON_INTERVAL_MS    = 300000;    // 5 min (testing)
+static constexpr uint32_t BEACON_INTERVAL_MS    = 900000;    // 15 min — light on the airwaves
 static constexpr uint32_t NEIGHBOR_TIMEOUT_MS   = 7200000;   // 2 hours = neighbor gone (generous for LoRa)
 static constexpr uint32_t DECAY_INTERVAL_MS     = 86400000;  // 1 day
 static constexpr uint32_t SAVE_INTERVAL_MS      = 300000;    // 5 min autosave
@@ -452,7 +452,8 @@ bool PokemonDaycare::triggerArrivalEvent(const DaycareBeacon &newcomer) {
 
     DaycareEvent evt = {};
     DaycareEventGen::generateArrivalEvent(
-        evt, state_.pokemon, state_.partyCount, newcomer, state_);
+        evt, state_.pokemon, state_.partyCount, newcomer, state_,
+        shortName_, gameName_);
 
     // Apply XP
     if (evt.xp > 0 && evt.targetSpeciesIdx < state_.partyCount) {

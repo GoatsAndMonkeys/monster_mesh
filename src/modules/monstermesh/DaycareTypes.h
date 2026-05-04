@@ -63,7 +63,8 @@ enum DaycareEventRarity : uint8_t {
 // ── Generated event ──────────────────────────────────────────────────────────
 
 struct DaycareEvent {
-    char message[200];          // assembled message text
+    char message[200];          // assembled message text (local-trainer perspective)
+    char remoteMessage[200];    // partner-trainer perspective (empty = use message)
     uint16_t xp;                // 0 if flavor-only
     uint8_t  targetSpeciesIdx;  // which of the 6 party pokemon gets XP (0-5)
     uint32_t targetNodeId;      // remote node to DM (0 = solo event, local only)
