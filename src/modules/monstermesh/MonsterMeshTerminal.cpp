@@ -349,20 +349,7 @@ void MonsterMeshTerminal::onGymBattleEnded(uint8_t gymIdx,
         }
         println(buf);
     }
-    // Credit XP to the player's party. Trainer fights award 75 * sum of
-    // defeated pokemon levels; the runtime NG+ scaler in lordScaleLevel
-    // bumps roster levels with the tier, so XP scales naturally.
-    const LordGym *g = lordGym(gymIdx);
-    if (g && trainerIdx < LORD_GYM_TRAINERS) {
-        uint32_t totalXp = 0;
-        const LordGymTrainer &t = g->trainers[trainerIdx];
-        for (uint8_t i = 0; i < t.count && i < 6; ++i) {
-            uint8_t lvl = lordScaleLevel(t.party[i].level,
-                                         lord_.ngPlusTier, false);
-            totalXp += (uint32_t)lvl * 75u;
-        }
-        creditBattleXp(totalXp);
-    }
+    // XP is credited per-faint by the engine + module pump, not here.
     refreshParty();
 }
 
@@ -764,13 +751,9 @@ void MonsterMeshTerminal::onExploreBattleEnded(uint8_t routeIdx,
     } else {
         println("Wiped out. Returning to base.");
     }
-    if (playerWon) {
-        // Wild encounters award 50 * level XP — half of trainer payout
-        // since wild mons are weaker (stat-wise + no leader-stack bonus).
-        creditBattleXp((uint32_t)lvl * 50u);
-        refreshParty();
-    }
+    if (playerWon) refreshParty();
     lordSave(lord_);
+    (void)lvl;
 }
 
 void MonsterMeshTerminal::onE4BattleEnded(uint8_t memberIdx, bool playerWon)
@@ -794,16 +777,7 @@ void MonsterMeshTerminal::onE4BattleEnded(uint8_t memberIdx, bool playerWon)
                  m ? m->name : "?",
                  lordE4Member(memberIdx + 1) ? lordE4Member(memberIdx + 1)->name : "Champion");
         println(buf);
-        // E4 trainers pay 100 * level — slightly above gyms.
-        if (m && m->roster) {
-            uint32_t totalXp = 0;
-            for (uint8_t i = 0; i < m->roster_count && i < 6; ++i) {
-                uint8_t lvl = lordScaleLevel(m->roster[i].level,
-                                             lord_.ngPlusTier, true);
-                totalXp += (uint32_t)lvl * 100u;
-            }
-            creditBattleXp(totalXp);
-        }
+        // XP credited per-faint during the gauntlet — just refresh the panel.
         refreshParty();
         lordSave(lord_);
         return;
@@ -841,18 +815,9 @@ void MonsterMeshTerminal::onE4BattleEnded(uint8_t memberIdx, bool playerWon)
         println("Champion defeated again. (NG+5 cap reached.)");
     }
     println("Gym league reset — challenge them all again at the new tier.");
-    // Champion fight XP — biggest payout in the game (150 * level).
-    if (m && m->roster) {
-        uint32_t totalXp = 0;
-        for (uint8_t i = 0; i < m->roster_count && i < 6; ++i) {
-            uint8_t lvl = lordScaleLevel(m->roster[i].level,
-                                         prevTier, true);
-            totalXp += (uint32_t)lvl * 150u;
-        }
-        creditBattleXp(totalXp);
-    }
     refreshParty();
     lordSave(lord_);
+    (void)prevTier;
 }
 
 #endif // T_DECK && !MESHTASTIC_EXCLUDE_MONSTERMESH && HAS_TFT

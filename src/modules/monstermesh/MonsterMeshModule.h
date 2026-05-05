@@ -227,6 +227,14 @@ private:
     bool          stagedEndWon_   = false;
     volatile bool pendingBattleEndedCb_ = false;
 
+    // Per-faint XP drain. textBattle accumulates pendingXp_ across each
+    // turn (one drop per defeated opponent); runOnce drains it on every
+    // tick into stagedXp_, and tryConsumeStagedParty (LVGL thread) flushes
+    // that into terminal_.creditBattleXp. Keeps SAV writes off the LoRa
+    // thread.
+    volatile bool pendingXpAwardCb_ = false;
+    uint32_t      stagedXp_         = 0;
+
     // Decoded Gen 1 trainer name from the most recent SAV load. 7 chars + NUL.
     char stagedTrainerName_[8] = {};
 

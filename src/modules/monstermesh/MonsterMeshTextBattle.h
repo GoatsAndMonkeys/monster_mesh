@@ -112,6 +112,43 @@ private:
     uint32_t lastSendMs_     = 0;
     uint8_t  fleeAttempts_   = 0;
 
+    // ── Per-faint XP tracking ────────────────────────────────────────────
+    // participantMask_ marks player slots that have been active during the
+    // current opponent's turn on the field. When that opponent faints, XP
+    // is split among the participants (mirrors Gen 1 EXP-share semantics
+    // without an Exp.All item). lastEnemyHp_ snapshots side-1 HPs at the
+    // top of resolveTurn so the wrapper can detect transitions to 0 after
+    // executeTurn.
+    uint8_t  participantMask_ = 0x01;
+    uint8_t  lastPlayerActive_ = 0;
+    uint8_t  lastEnemyActive_  = 0;
+    uint16_t lastEnemyHp_[6]   = {};
+    bool     isTrainerBattle_  = true;
+    uint32_t pendingXp_        = 0;
+    uint8_t  pendingXpDrops_   = 0;  // number of opponents fainted
+
+    // Per-slot in-battle XP for level-up gating. Each slot's counter
+    // accumulates XP from defeated opponents; when it crosses the
+    // (l+1)^3 - l^3 threshold the BattlePoke's level bumps and stats
+    // scale up linearly, adding the HP delta to current HP as a
+    // temporary heal. Resets to 0 at startLocal/startNetworked.
+    uint32_t slotXpAccum_[6] = {};
+
+    // Apply a +1 level bump to engine_.party(0).mons[slot]: scale
+    // maxHp/atk/def/spd/spc linearly with newLevel/oldLevel, add the
+    // maxHp delta to current hp (heal-on-level), bump level.
+    void inBattleLevelUp(uint8_t slot);
+public:
+    // Drained each module tick — the LVGL thread credits this to the
+    // player's party via terminal_.creditBattleXp on the next indev tick.
+    uint32_t consumePendingXp() {
+        uint32_t v = pendingXp_;
+        pendingXp_ = 0;
+        pendingXpDrops_ = 0;
+        return v;
+    }
+private:
+
     // Scrolling text log — circular buffer.
     char    log_[LOG_LINES][LOG_WIDTH + 1] = {};
     uint8_t logHead_ = 0;        // next write slot

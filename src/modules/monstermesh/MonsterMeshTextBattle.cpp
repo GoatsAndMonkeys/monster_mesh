@@ -104,6 +104,17 @@ void MonsterMeshTextBattle::startLocal(const Gen1Party &myParty,
     cursor_       = 0; switchCursor_ = 0;
     fleeAttempts_ = 0;
     logFill_ = logHead_ = 0; scrollPending_ = 0;
+    // Start with the lead pokemon as the only participant; trainer-battle
+    // multiplier matches Gen 1 (1.5× wild) since LOCAL_ROGUELIKE is always
+    // a trainer/gym/E4 fight or a single wild explore — wild routes flip
+    // this off below.
+    participantMask_  = 0x01;
+    lastPlayerActive_ = 0;
+    lastEnemyActive_  = 0;
+    isTrainerBattle_  = true;
+    pendingXp_        = 0;
+    pendingXpDrops_   = 0;
+    for (uint8_t i = 0; i < 6; ++i) slotXpAccum_[i] = 0;
 
     uint32_t rngSeed = (uint32_t)(millis() ^ esp_random());
     engine_.start(myParty, cpuParty, rngSeed);
@@ -314,8 +325,73 @@ bool MonsterMeshTextBattle::handlePacket(uint32_t fromId,
 
 void MonsterMeshTextBattle::resolveTurn()
 {
+    // Snapshot opponent HPs so we can credit per-faint XP after executeTurn.
+    {
+        const auto &p1 = engine_.party(1);
+        for (uint8_t i = 0; i < 6; ++i) {
+            lastEnemyHp_[i] = (i < p1.count) ? p1.mons[i].hp : 0;
+        }
+    }
+
     engine_.executeTurn(engineLogCb, this);
     handleFaints();
+
+    // Per-faint XP: any side-1 mon that went from HP > 0 → 0 in this turn
+    // counts as a defeat. Distribute (level × multiplier) XP among players
+    // that participated against the current enemy. Trainer battles pay 5x
+    // level per defeated mon, wild encounters 3x.
+    uint8_t mult = isTrainerBattle_ ? 5 : 3;
+    const auto &p1 = engine_.party(1);
+    for (uint8_t i = 0; i < p1.count && i < 6; ++i) {
+        if (lastEnemyHp_[i] > 0 && p1.mons[i].hp == 0) {
+            uint8_t pcount = (uint8_t)__builtin_popcount(participantMask_);
+            if (pcount == 0) pcount = 1;
+            uint32_t lvl = p1.mons[i].level ? p1.mons[i].level : 1;
+            uint32_t xpThisFaint = (lvl * mult * 100u) / pcount;
+            // *100 keeps integer math meaningful when split many ways.
+            // creditBattleXp on the player side scales the curve, so the
+            // numbers feel right at low levels (~level^2 ish per faint).
+            pendingXp_ += xpThisFaint;
+            pendingXpDrops_++;
+            char line[40];
+            snprintf(line, sizeof(line), "Earned %u XP!",
+                     (unsigned)xpThisFaint);
+            appendLog(line);
+            // Feed each participant's in-battle XP counter and bump
+            // levels while the threshold (l+1)^3 - l^3 keeps fitting.
+            const auto &p0 = engine_.party(0);
+            for (uint8_t s = 0; s < p0.count && s < 6; ++s) {
+                if (!(participantMask_ & (1u << s))) continue;
+                if (p0.mons[s].hp == 0) continue;   // fainted, no XP
+                slotXpAccum_[s] += xpThisFaint;
+                while (true) {
+                    uint8_t curLvl = engine_.party(0).mons[s].level;
+                    if (curLvl >= 100) break;
+                    uint32_t threshold =
+                        3u * (uint32_t)curLvl * curLvl +
+                        3u * (uint32_t)curLvl + 1u;
+                    if (slotXpAccum_[s] < threshold) break;
+                    slotXpAccum_[s] -= threshold;
+                    inBattleLevelUp(s);
+                }
+            }
+            // New enemy will switch in via autoReplace; reset participant
+            // mask to just whichever player slot is currently active so the
+            // next defeat only shares with mons that were actually present
+            // for that fight.
+            participantMask_ = (uint8_t)(1u << engine_.party(0).active);
+            lastEnemyActive_ = engine_.party(1).active;
+        }
+    }
+
+    // Player-active changes (switch or auto-replace) accumulate into the
+    // participant mask for the current enemy's life span.
+    uint8_t curPlayerActive = engine_.party(0).active;
+    if (curPlayerActive != lastPlayerActive_) {
+        participantMask_ |= (uint8_t)(1u << curPlayerActive);
+        lastPlayerActive_ = curPlayerActive;
+    }
+
     if (engine_.result() != Gen1BattleEngine::Result::ONGOING) {
         switch (engine_.result()) {
             case Gen1BattleEngine::Result::P1_WIN: appendLog("You won!");      break;
@@ -334,6 +410,41 @@ void MonsterMeshTextBattle::resolveTurn()
     phase_ = Phase::WAIT_ACTION;
     // Keep cursor_ on whatever move the user picked last turn — Gen 1 UX:
     // tapping K/A repeatedly spams the same move.
+}
+
+void MonsterMeshTextBattle::inBattleLevelUp(uint8_t slot)
+{
+    auto &p  = engine_.party(0);
+    if (slot >= p.count || slot >= 6) return;
+    auto &m  = p.mons[slot];
+    uint8_t oldLvl = m.level;
+    if (oldLvl >= 100) return;
+    uint8_t newLvl = (uint8_t)(oldLvl + 1);
+
+    // Linear stat scale — not strictly Gen 1 accurate but avoids replumbing
+    // base stats + DVs through the engine. The proper recompute happens
+    // when the engine reloads from save next battle. Current hp rises by
+    // the same amount maxHp does so the user feels the level-up heal.
+    auto scale = [&](uint16_t v) -> uint16_t {
+        if (oldLvl == 0) return v;
+        uint32_t r = (uint32_t)v * newLvl / oldLvl;
+        return r > 0xFFFF ? 0xFFFF : (uint16_t)r;
+    };
+    uint16_t newMaxHp = scale(m.maxHp);
+    uint16_t deltaHp  = (newMaxHp > m.maxHp) ? (uint16_t)(newMaxHp - m.maxHp) : 0;
+    m.maxHp = newMaxHp;
+    if (m.hp + deltaHp > m.maxHp) m.hp = m.maxHp;
+    else                          m.hp = (uint16_t)(m.hp + deltaHp);
+    m.atk = scale(m.atk);
+    m.def = scale(m.def);
+    m.spd = scale(m.spd);
+    m.spc = scale(m.spc);
+    m.level = newLvl;
+
+    char line[40];
+    snprintf(line, sizeof(line), "%.10s grew to L%u!",
+             m.nickname[0] ? m.nickname : "?", (unsigned)newLvl);
+    appendLog(line);
 }
 
 void MonsterMeshTextBattle::handleFaints()
