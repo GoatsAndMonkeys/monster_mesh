@@ -48,6 +48,7 @@ static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out,
                                  char *resolvedSavOut, size_t resolvedSavLen,
                                  char *trainerNameOut, size_t trainerNameLen);
 static bool patchSavOnSdWithDaycareXp(const char *romPath, PokemonDaycare &dc);
+static bool writePartyToSavOnSd(const char *savPath, const Gen1Party &party);
 extern bool initWifi();
 
 // LovyanGFX is available on T-Deck in both t-deck and t-deck-tft builds
@@ -683,6 +684,29 @@ int32_t MonsterMeshModule::runOnce()
         emu_.save();
     }
 
+    // Battle-XP write-back to /<rom>.sav. Gated on:
+    //   - !emulatorActive_  (no emu owning the SD bus / WRAM mirror)
+    //   - !emu_.isRunning() (no cart actually loaded — even if the user is
+    //     in browser/terminal, a running emu still has WRAM authority)
+    //   - terminal has a party  (something to write)
+    //   - we know the SAV path
+    // Drops the pending flag silently if any gate fails so the next battle
+    // re-arms it; the SAV stays unchanged in that case.
+    if (pendingSavWriteBack_) {
+        pendingSavWriteBack_ = false;
+        if (!emulatorActive_ && !browserActive_ &&
+            !emu_.isRunning() && terminal_.hasParty() &&
+            loadedSavPath_[0]) {
+            const Gen1Party &p = terminal_.getParty();
+            concurrency::LockGuard g(spiLock);
+            (void)writePartyToSavOnSd(loadedSavPath_, p);
+        } else {
+            LOG_INFO("[MonsterMesh] sav writeback: skipped (emu=%d br=%d run=%d hasParty=%d)\n",
+                     (int)emulatorActive_, (int)browserActive_,
+                     (int)emu_.isRunning(), (int)terminal_.hasParty());
+        }
+    }
+
     // Deferred terminal party load — runs on the LoRa thread so the LVGL
     // thread can paint the terminal panel immediately without waiting on
     // SD reinit + directory scan.
@@ -709,6 +733,10 @@ int32_t MonsterMeshModule::runOnce()
         }
         if (loaded) {
             terminalStagedParty_ = p;
+            // Remember where the SAV came from so battle XP can be written
+            // back after a fight (gated on !emulatorActive_ in runOnce).
+            strncpy(loadedSavPath_, resolvedSav, sizeof(loadedSavPath_) - 1);
+            loadedSavPath_[sizeof(loadedSavPath_) - 1] = '\0';
             // Stash the decoded trainer name so the daycare check-in can use
             // it instead of falling back to party[0]'s nickname.
             strncpy(stagedTrainerName_, trainerName, sizeof(stagedTrainerName_) - 1);
@@ -1072,6 +1100,12 @@ int32_t MonsterMeshModule::runOnce()
                 // here corrupted LVGL state and left the terminal textarea
                 // unable to receive keypresses after a battle ended.
                 pendingBattleEndCleanup_ = true;
+                // Schedule SAV write-back of the (possibly XP-leveled)
+                // party. The drain in this same runOnce loop checks that
+                // the emulator isn't running and no cart is loaded so we
+                // never trample emu state. Win or lose — XP earned this
+                // fight is permanent.
+                if (loadedSavPath_[0]) pendingSavWriteBack_ = true;
 #endif
                 LOG_INFO("[MonsterMesh] text battle: ended\n");
             }
@@ -1739,6 +1773,77 @@ static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out,
         strncpy(resolvedSavOut, sdRel, resolvedSavLen - 1);
         resolvedSavOut[resolvedSavLen - 1] = '\0';
     }
+    return true;
+}
+
+// Write the player's party block back to the on-SD .sav file at the same
+// offsets loadPartyFromSavOnSd reads from. Only the party region is touched
+// (0x2F2C..0x30E3 inclusive, plus a fresh checksum at 0x3523) — trainer
+// name, badges, items, and everything else stays untouched. Returns true
+// on success. Caller must hold spiLock.
+static bool writePartyToSavOnSd(const char *savPath, const Gen1Party &party)
+{
+    if (!savPath || !savPath[0]) return false;
+
+    SD.end();
+    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+    if (!SD.begin(SDCARD_CS, SPI)) return false;
+
+    // SAV mirror block layout (gen 1, party half):
+    static constexpr uint16_t SAV_PARTY_COUNT  = 0x2F2C;
+    static constexpr uint16_t SAV_SPECIES_LIST = 0x2F2D;
+    static constexpr uint16_t SAV_POKEMON_DATA = 0x2F34;
+    static constexpr uint16_t SAV_OT_NAMES     = 0x303C;  // 6 × 11 bytes
+    static constexpr uint16_t SAV_NICKNAMES    = 0x307E;  // 6 × 11 bytes
+    static constexpr uint16_t SAV_NAME_BLOCK_END = 0x30E4;
+    static constexpr uint16_t SAV_CHECKSUM_OFFSET = 0x3523;
+    static constexpr uint16_t SAV_CHECKSUM_START  = 0x2598;
+    static constexpr uint16_t SAV_CHECKSUM_END    = 0x3522;
+    static constexpr uint8_t  SAV_NAME_SIZE    = 11;
+    static constexpr size_t   SAV_FILE_SIZE    = 32 * 1024;  // 32 KB
+
+    File f = SD.open(savPath, FILE_READ);
+    if (!f) { LOG_WARN("[MonsterMesh] sav writeback: open '%s' (read) failed\n", savPath); return false; }
+
+    uint8_t *buf = (uint8_t *)heap_caps_malloc(SAV_FILE_SIZE, MALLOC_CAP_8BIT);
+    if (!buf) { f.close(); return false; }
+    f.seek(0);
+    int n = f.read(buf, SAV_FILE_SIZE);
+    f.close();
+    if (n < (int)SAV_FILE_SIZE) {
+        LOG_WARN("[MonsterMesh] sav writeback: short read %d\n", n);
+        free(buf); return false;
+    }
+
+    // Patch the party block in-place.
+    uint8_t count = party.count > 6 ? 6 : party.count;
+    buf[SAV_PARTY_COUNT] = count;
+    memcpy(&buf[SAV_SPECIES_LIST], party.species, 7);
+    memcpy(&buf[SAV_POKEMON_DATA], (const uint8_t *)party.mons, (size_t)count * 44);
+    for (uint8_t i = 0; i < count; ++i) {
+        memcpy(&buf[SAV_OT_NAMES   + i * SAV_NAME_SIZE],
+               party.otNames[i],   SAV_NAME_SIZE);
+        memcpy(&buf[SAV_NICKNAMES + i * SAV_NAME_SIZE],
+               party.nicknames[i], SAV_NAME_SIZE);
+    }
+    (void)SAV_NAME_BLOCK_END;
+
+    // Recompute the SAV checksum.
+    uint8_t sum = 0;
+    for (uint32_t i = SAV_CHECKSUM_START; i <= SAV_CHECKSUM_END; ++i) sum += buf[i];
+    buf[SAV_CHECKSUM_OFFSET] = (uint8_t)~sum;
+
+    File w = SD.open(savPath, FILE_WRITE);
+    if (!w) { LOG_WARN("[MonsterMesh] sav writeback: open '%s' (write) failed\n", savPath); free(buf); return false; }
+    w.seek(0);
+    size_t wrote = w.write(buf, SAV_FILE_SIZE);
+    w.close();
+    free(buf);
+    if (wrote != SAV_FILE_SIZE) {
+        LOG_WARN("[MonsterMesh] sav writeback: short write %u\n", (unsigned)wrote);
+        return false;
+    }
+    LOG_INFO("[MonsterMesh] sav writeback: wrote party + checksum to '%s'\n", savPath);
     return true;
 }
 

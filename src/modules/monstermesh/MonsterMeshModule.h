@@ -235,6 +235,13 @@ private:
     volatile bool pendingXpAwardCb_ = false;
     uint32_t      stagedXp_         = 0;
 
+    // Battle XP write-back to /<rom>.sav on the SD card. Captured at SAV
+    // load, the path lets us write back AFTER a battle ends without
+    // re-scanning the SD card. Gated on !emulatorActive_ + no cart loaded
+    // so we never trample emu state mid-game.
+    char          loadedSavPath_[256] = {};
+    volatile bool pendingSavWriteBack_ = false;
+
     // Decoded Gen 1 trainer name from the most recent SAV load. 7 chars + NUL.
     char stagedTrainerName_[8] = {};
 
