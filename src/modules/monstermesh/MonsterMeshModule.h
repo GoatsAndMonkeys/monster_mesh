@@ -87,6 +87,11 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     uint8_t exploreRouteIdx_  = 0xFF;
     uint8_t activeExploreRoute_ = 0xFF;
     uint8_t activeExploreLevel_ = 0;
+    // E4 gauntlet bookkeeping. e4MemberIdx_ is the requested start (0..4),
+    // activeE4Member_ tracks the current trainer during the chain. 0xFF =
+    // not an E4 battle.
+    uint8_t e4MemberIdx_      = 0xFF;
+    uint8_t activeE4Member_   = 0xFF;
 
     bool emulatorActive_     = false;
     bool terminalActive_     = false;
@@ -162,6 +167,14 @@ public:
     void requestExplore(uint8_t routeIdx) {
         textBattleStartReq_ = true;
         exploreRouteIdx_    = routeIdx;
+    }
+
+    // Indigo Plateau: 5-trainer gauntlet (4 Elite Four + Champion).
+    // memberIdx 0..4. The module's end-of-battle dispatch chains members
+    // until 4 falls or the player wipes. Resumes from `e4MemberIdx_`.
+    void requestE4Battle(uint8_t memberIdx) {
+        textBattleStartReq_ = true;
+        e4MemberIdx_        = memberIdx;
     }
 
     // Fill `buf` with a multi-line daycare status report (newline-separated).

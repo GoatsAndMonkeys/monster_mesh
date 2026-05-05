@@ -19,6 +19,7 @@
 #include "PokemonData.h"
 #include "Gen1Species.h"
 #include "LordRoutes.h"
+#include "LordE4.h"
 #include "RadioLibInterface.h"
 #if HAS_TFT
 #include "graphics/view/TFT/Themes.h"
@@ -415,6 +416,11 @@ int32_t MonsterMeshModule::runOnce()
             [](void *ctx, uint8_t routeIdx) {
                 static_cast<MonsterMeshModule *>(ctx)
                     ->requestExplore(routeIdx);
+            }, this);
+        terminal_.setE4FightFn(
+            [](void *ctx, uint8_t memberIdx) {
+                static_cast<MonsterMeshModule *>(ctx)
+                    ->requestE4Battle(memberIdx);
             }, this);
         daycare_.setSendDm([](uint32_t dest, const char *msg, void *ctx) {
             auto *self = static_cast<MonsterMeshModule *>(ctx);
@@ -820,9 +826,27 @@ int32_t MonsterMeshModule::runOnce()
         char rivalTag[6] = "RIVAL";
         char hdrText[40] = {};   // applied AFTER startLocal (which clears it)
 
+        // E4: Indigo Plateau gauntlet (4 Elite Four + Champion). Build the
+        // requested member's party. Chain to next member is handled in the
+        // post-battle dispatch below.
+        if (e4MemberIdx_ < 5) {
+            if (lordBuildE4Party(e4MemberIdx_, cpuParty)) {
+                const LordE4Member *m = lordE4Member(e4MemberIdx_);
+                const char *tn = m ? m->name : "?";
+                snprintf(rivalTag, sizeof(rivalTag), "%.4s", tn);
+                snprintf(hdrText, sizeof(hdrText), "Indigo Plateau - %s %u/5",
+                         tn, (unsigned)e4MemberIdx_ + 1);
+                activeE4Member_ = e4MemberIdx_;
+                LOG_INFO("[MonsterMesh] e4 %u (%s): %u pokemon\n",
+                         (unsigned)e4MemberIdx_, tn, (unsigned)cpuParty.count);
+            } else {
+                LOG_WARN("[MonsterMesh] e4: bad member %u\n", (unsigned)e4MemberIdx_);
+                e4MemberIdx_ = 0xFF;
+            }
+        }
         // L4: explore battles bypass everything else — wild encounter from
         // the route pool keyed by gym progress. Single mon, no chain.
-        if (exploreRouteIdx_ < 8) {
+        if (e4MemberIdx_ >= 5 && exploreRouteIdx_ < 8) {
             if (lordPickWildEncounter(exploreRouteIdx_, cpuParty) &&
                 cpuParty.count > 0) {
                 snprintf(rivalTag, sizeof(rivalTag), "WILD");
@@ -843,7 +867,7 @@ int32_t MonsterMeshModule::runOnce()
         // L3: gym battles bypass the neighbor-pick path. Build the gym
         // trainer's party via lordBuildGymParty and tag the rival with the
         // first 4 chars of the trainer's name (each grunt has their own).
-        if (exploreRouteIdx_ >= 8 && gymBattleIdx_ < 8) {
+        if (e4MemberIdx_ >= 5 && exploreRouteIdx_ >= 8 && gymBattleIdx_ < 8) {
             const LordGym *g = lordGym(gymBattleIdx_);
             if (g && lordBuildGymParty(gymBattleIdx_, gymTrainerIdx_, cpuParty)) {
                 const char *tn = g->trainers[gymTrainerIdx_].name;
@@ -867,7 +891,7 @@ int32_t MonsterMeshModule::runOnce()
 
         const auto *peers = daycare_.getNeighbors();
         uint8_t peerCount = daycare_.getNeighborCount();
-        if (exploreRouteIdx_ >= 8 && gymBattleIdx_ >= 8 && peerCount > 0 && peers) {
+        if (e4MemberIdx_ >= 5 && exploreRouteIdx_ >= 8 && gymBattleIdx_ >= 8 && peerCount > 0 && peers) {
             uint8_t pick = (uint8_t)(esp_random() % peerCount);
             const auto &n = peers[pick];
             uint8_t party = n.partyCount > 6 ? 6 : n.partyCount;
@@ -900,7 +924,7 @@ int32_t MonsterMeshModule::runOnce()
             snprintf(rivalTag, sizeof(rivalTag), "%.4s", n.shortName);
             LOG_INFO("[MonsterMesh] text battle: rival = %s (%u pokemon)\n",
                      rivalTag, (unsigned)party);
-        } else if (exploreRouteIdx_ >= 8 && gymBattleIdx_ >= 8) {
+        } else if (e4MemberIdx_ >= 5 && exploreRouteIdx_ >= 8 && gymBattleIdx_ >= 8) {
             // No neighbors AND no gym requested — fall back to a "wild
             // trainer" picked at random from the LoC roster. Better than a
             // mirror match: gives a real opponent with their own party so
@@ -917,10 +941,11 @@ int32_t MonsterMeshModule::runOnce()
                 LOG_INFO("[MonsterMesh] text battle: fallback mirror\n");
             }
         }
-        // After this point the gym + explore slots are consumed — reset so
-        // the next `fight` defaults to neighbor-pick again.
+        // After this point the gym + explore + e4 slots are consumed —
+        // reset so the next `fight` defaults to neighbor-pick again.
         gymBattleIdx_ = 0xFF;
         exploreRouteIdx_ = 0xFF;
+        e4MemberIdx_ = 0xFF;
         const char *ourTag = (owner.short_name[0] != '\0') ? owner.short_name : "ME";
         textBattle_.startLocal(terminal_.getParty(), cpuParty, ourTag, rivalTag);
         if (hdrText[0]) textBattle_.setHeader(hdrText);
@@ -978,6 +1003,34 @@ int32_t MonsterMeshModule::runOnce()
                                                activeExploreLevel_);
                 activeExploreRoute_ = 0xFF;
                 activeExploreLevel_ = 0;
+            } else if (activeE4Member_ < 5) {
+                // Indigo Plateau: chain to next member on win, like the gym
+                // gauntlet. Final win/loss bubbles to terminal.onE4BattleEnded.
+                bool won = (textBattle_.engineResult() ==
+                            Gen1BattleEngine::Result::P1_WIN);
+                if (won && activeE4Member_ < 4) {
+                    Gen1Party nextParty = {};
+                    uint8_t nextIdx = activeE4Member_ + 1;
+                    if (lordBuildE4Party(nextIdx, nextParty)) {
+                        const LordE4Member *m = lordE4Member(nextIdx);
+                        char tag[6];
+                        snprintf(tag, sizeof(tag), "%.4s",
+                                 m ? m->name : "NEXT");
+                        textBattle_.nextOpponent(nextParty, tag);
+                        char hdr[40];
+                        snprintf(hdr, sizeof(hdr), "Indigo Plateau - %s %u/5",
+                                 m ? m->name : "?", (unsigned)nextIdx + 1);
+                        textBattle_.setHeader(hdr);
+                        activeE4Member_ = nextIdx;
+                        gauntletContinue = true;
+                        LOG_INFO("[MonsterMesh] e4: chain to %u (%s)\n",
+                                 (unsigned)nextIdx, m ? m->name : "?");
+                    }
+                }
+                if (!gauntletContinue) {
+                    terminal_.onE4BattleEnded(activeE4Member_, won);
+                    activeE4Member_ = 0xFF;
+                }
             }
             if (gauntletContinue) {
                 // Battle continues with the next trainer — keep dirty

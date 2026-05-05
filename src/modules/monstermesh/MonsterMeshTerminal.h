@@ -88,6 +88,18 @@ class MonsterMeshTerminal {
     // can update LordRunStats + persist + print a flavor line.
     void onExploreBattleEnded(uint8_t routeIdx, bool playerWon, uint8_t lvl);
 
+    // Hook for `loc e4 fight` — module runs a 5-trainer Indigo Plateau
+    // gauntlet (4 Elite Four + Champion). Member 0..4 (4 = Champion).
+    typedef void (*E4FightFn)(void *ctx, uint8_t memberIdx);
+    void setE4FightFn(E4FightFn fn, void *ctx) {
+        e4FightFn_ = fn;
+        e4FightCtx_ = ctx;
+    }
+
+    // Called by the module when the E4 gauntlet ends. On full clear sets
+    // leagueCleared=1 in LordSave (NG+ unlock gate).
+    void onE4BattleEnded(uint8_t memberIdx, bool playerWon);
+
     // Called by the module when a gym battle ends — terminal owns LordSave
     // so it advances gymProgress / awards the badge / persists.
     void onGymBattleEnded(uint8_t gymIdx, uint8_t trainerIdx, bool playerWon);
@@ -136,4 +148,6 @@ class MonsterMeshTerminal {
     void               *gymFightCtx_   = nullptr;
     ExploreFn           exploreFn_     = nullptr;
     void               *exploreCtx_    = nullptr;
+    E4FightFn           e4FightFn_     = nullptr;
+    void               *e4FightCtx_    = nullptr;
 };

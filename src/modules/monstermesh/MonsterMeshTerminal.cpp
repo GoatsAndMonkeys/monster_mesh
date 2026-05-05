@@ -6,6 +6,7 @@
 #include "LordLogic.h"
 #include "LordGyms.h"
 #include "LordRoutes.h"
+#include "LordE4.h"
 #include "configuration.h"
 #include "gps/RTC.h"
 #include <time.h>
@@ -328,6 +329,7 @@ void MonsterMeshTerminal::executeLine(const char *line)
         println("  gym fight N - challenge gym N (1-8)");
         println("  fight       - local CPU battle vs neighbor");
         println("  explore     - wild encounter on the route between gyms");
+        println("  e4          - challenge the Elite Four (8 badges)");
         println("  help sys    - system commands");
         return;
     }
@@ -505,6 +507,41 @@ void MonsterMeshTerminal::executeLine(const char *line)
         fightFn_(fightCtx_);
         return;
     }
+    if (strncmp(line, "e4", 2) == 0) {
+        // `e4` — Indigo Plateau gauntlet (4 Elite Four + Champion). Gated
+        // on all 8 badges. Resumes from lord_.e4Progress; clear progress
+        // back to 0 once leagueCleared is set so a second run starts fresh.
+        if (lord_.badges != 0xFF) {
+            char buf[80];
+            uint8_t got = (uint8_t)__builtin_popcount(lord_.badges);
+            snprintf(buf, sizeof(buf),
+                     "Need all 8 badges to challenge the Elite Four (you have %u/8).",
+                     (unsigned)got);
+            println(buf);
+            return;
+        }
+        if (!partyLoaded_) {
+            println("no party loaded — load a SAV first");
+            return;
+        }
+        if (!e4FightFn_) {
+            println("e4 not wired");
+            return;
+        }
+        if (lord_.leagueCleared && lord_.e4Progress >= 5) {
+            lord_.e4Progress = 0;   // fresh challenge each run after first clear
+        }
+        uint8_t startIdx = lord_.e4Progress;
+        if (startIdx > 4) startIdx = 4;
+        const LordE4Member *m = lordE4Member(startIdx);
+        char buf[80];
+        snprintf(buf, sizeof(buf), "Indigo Plateau — %s %s (%s)...",
+                 m ? m->title : "?", m ? m->name : "?",
+                 m ? m->typeFlavor : "?");
+        println(buf);
+        e4FightFn_(e4FightCtx_, startIdx);
+        return;
+    }
     if (strncmp(line, "explore", 7) == 0) {
         // `explore` — wild encounter on the route appropriate to the player's
         // current badge count. Route 0 = Viridian Forest (pre-Brock), route 7
@@ -553,6 +590,43 @@ void MonsterMeshTerminal::onExploreBattleEnded(uint8_t routeIdx,
         println(buf);
     } else {
         println("Wiped out. Returning to base.");
+    }
+    lordSave(lord_);
+}
+
+void MonsterMeshTerminal::onE4BattleEnded(uint8_t memberIdx, bool playerWon)
+{
+    const LordE4Member *m = lordE4Member(memberIdx);
+    if (!playerWon) {
+        char buf[80];
+        snprintf(buf, sizeof(buf), "%s %s defeated you. Run again.",
+                 m ? m->title : "?", m ? m->name : "?");
+        println(buf);
+        // Don't bump progress on loss — retry the same member.
+        lordSave(lord_);
+        return;
+    }
+    if (memberIdx < 4) {
+        // Beat one of the Elite Four. Module's gauntlet chain advances to
+        // the next member without healing the player.
+        if (lord_.e4Progress <= memberIdx) lord_.e4Progress = memberIdx + 1;
+        char buf[80];
+        snprintf(buf, sizeof(buf), "Beat %s! Next: %s.",
+                 m ? m->name : "?",
+                 lordE4Member(memberIdx + 1) ? lordE4Member(memberIdx + 1)->name : "Champion");
+        println(buf);
+        lordSave(lord_);
+        return;
+    }
+    // Beat the Champion — league cleared. Set the NG+ unlock gate.
+    lord_.e4Progress     = 5;
+    bool firstClear      = !lord_.leagueCleared;
+    lord_.leagueCleared  = 1;
+    if (firstClear) {
+        println("YOU ARE THE CHAMPION! NG+ unlocked.");
+        lordAppendNews(lord_, LORD_NEWS_BADGE, 8 /* sentinel: champion */, 0);
+    } else {
+        println("Champion defeated again.");
     }
     lordSave(lord_);
 }
