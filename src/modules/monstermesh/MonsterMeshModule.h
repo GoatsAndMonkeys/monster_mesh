@@ -242,6 +242,20 @@ private:
     char          loadedSavPath_[256] = {};
     volatile bool pendingSavWriteBack_ = false;
 
+    // T4: networked PvP challenge protocol. handleReceived parses MMT: DMs
+    // and stages state here; runOnce drains it on the LoRa thread, never
+    // sending TX from the router context. Per-feedback memory:
+    // feedback_mm_defer_tx_from_router.md.
+    volatile bool pendingMmtChallengeRx_ = false;   // got MMT:ON from peer
+    volatile bool pendingMmtAcceptRx_    = false;   // got MMT:Y from peer
+    uint32_t      mmtPeerNode_           = 0;       // who challenged us / who we challenged
+    char          mmtPeerShort_[12]      = {};      // their short_name copy
+    uint32_t      mmtRngSeedRx_          = 0;       // seed received in MMT:Y
+    // Outgoing challenge state — set by terminal `mmt @<node>` command
+    // and drained by runOnce so the actual TX leaves the router context.
+    volatile bool pendingMmtOnTx_   = false;
+    uint32_t      mmtOnTxTarget_    = 0;
+
     // Decoded Gen 1 trainer name from the most recent SAV load. 7 chars + NUL.
     char stagedTrainerName_[8] = {};
 

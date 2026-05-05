@@ -680,6 +680,33 @@ void MonsterMeshTerminal::executeLine(const char *line)
         return;
     }
     // Indigo Plateau is reached via `gym fight 9`, no standalone command.
+    if (strncmp(line, "mmt ", 4) == 0) {
+        // T4 wire-format ping: `mmt @<hex node id>` sends an MMT:ON DM
+        // to the peer. Hex parser is a stand-in — the eventual command
+        // will accept short_names and resolve via NodeDB.
+        const char *p = line + 4;
+        while (*p == ' ' || *p == '@') ++p;
+        uint32_t target = 0;
+        if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) p += 2;
+        for (uint8_t k = 0; k < 8 && *p; ++k, ++p) {
+            target <<= 4;
+            char c = *p;
+            if      (c >= '0' && c <= '9') target |= (uint8_t)(c - '0');
+            else if (c >= 'a' && c <= 'f') target |= (uint8_t)(c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F') target |= (uint8_t)(c - 'A' + 10);
+            else { target = 0; break; }
+        }
+        if (target == 0) {
+            println("usage: mmt @<8-hex-node-id>");
+            return;
+        }
+        if (!mmtFn_) { println("mmt not wired"); return; }
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Challenging 0x%08X...", (unsigned)target);
+        println(buf);
+        mmtFn_(mmtCtx_, target);
+        return;
+    }
     if (strncmp(line, "explore", 7) == 0) {
         // `explore` — wild encounter on the route appropriate to the player's
         // current badge count. Route 0 = Viridian Forest (pre-Brock), route 7

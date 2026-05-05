@@ -88,6 +88,15 @@ class MonsterMeshTerminal {
     // can update LordRunStats + persist + print a flavor line.
     void onExploreBattleEnded(uint8_t routeIdx, bool playerWon, uint8_t lvl);
 
+    // T4: hook for `mmt @<short>` — module sends an MMT:ON challenge DM
+    // to the resolved peer. Receiver-side prompt + battle start land in a
+    // later build; this command just kicks off the wire ping.
+    typedef void (*MmtChallengeFn)(void *ctx, uint32_t peerNode);
+    void setMmtChallengeFn(MmtChallengeFn fn, void *ctx) {
+        mmtFn_ = fn;
+        mmtCtx_ = ctx;
+    }
+
     // Hook for `loc e4 fight` — module runs a 5-trainer Indigo Plateau
     // gauntlet (4 Elite Four + Champion). Member 0..4 (4 = Champion).
     typedef void (*E4FightFn)(void *ctx, uint8_t memberIdx);
@@ -161,4 +170,6 @@ class MonsterMeshTerminal {
     void               *exploreCtx_    = nullptr;
     E4FightFn           e4FightFn_     = nullptr;
     void               *e4FightCtx_    = nullptr;
+    MmtChallengeFn      mmtFn_         = nullptr;
+    void               *mmtCtx_        = nullptr;
 };
