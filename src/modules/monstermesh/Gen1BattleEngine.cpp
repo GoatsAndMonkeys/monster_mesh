@@ -105,7 +105,12 @@ void Gen1BattleEngine::initBattlePokeFromSave(BattlePoke &dst,
     uint8_t hpDV  = ((atkDV & 1) << 3) | ((defDV & 1) << 2) |
                     ((spdDV & 1) << 1) | (spcDV & 1);
 
-    const Gen1BaseStats &b = GEN1_BASE_STATS[src.species < 152 ? src.species : 0];
+    // GEN1_BASE_STATS is dex-indexed. src.species is the SAV's internal hex
+    // code (0x01-0xBE), not the dex number — looking up b[src.species]
+    // directly returns a different pokemon's base stats. Mewtwo (internal
+    // 0x83) was being read as Lapras (dex 131), giving HP 301 instead of
+    // ~265. Use dst.species (already converted to dex on line above).
+    const Gen1BaseStats &b = GEN1_BASE_STATS[dst.species < 152 ? dst.species : 0];
     dst.type1 = b.type1; dst.type2 = b.type2;
 
     uint16_t hpExp  = be16(src.hpExp);
