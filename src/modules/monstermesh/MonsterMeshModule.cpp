@@ -203,17 +203,6 @@ bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
     if (p->decoded.portnum == meshtastic_PortNum_PRIVATE_APP) {
         return true;
     }
-    // T4: TEXT_MESSAGE_APP DMs that start with "MMT:" are PvP challenge
-    // protocol traffic. Accept only when addressed to us (no broadcast).
-    if (p->decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
-        nodeDB && p->to == nodeDB->getNodeNum() && !isBroadcast(p->to)) {
-        const auto *bytes = p->decoded.payload.bytes;
-        size_t      n     = p->decoded.payload.size;
-        if (n >= 4 && bytes[0] == 'M' && bytes[1] == 'M' &&
-            bytes[2] == 'T' && bytes[3] == ':') {
-            return true;
-        }
-    }
     return false;
 }
 
@@ -250,53 +239,9 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             }
         }
     }
-    // T4: parse MMT: DMs from peers. Defer all TX to runOnce per
-    // feedback_mm_defer_tx_from_router.md — sending from this router
-    // context wedges the unicast queue.
-    if (mp.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
-        nodeDB && mp.to == nodeDB->getNodeNum()) {
-        const char *txt = (const char *)mp.decoded.payload.bytes;
-        size_t      len = mp.decoded.payload.size;
-        if (len >= 4 && memcmp(txt, "MMT:", 4) == 0) {
-            // Copy the peer's short_name from the NodeDB at parse time so
-            // the prompt looks like "MMRD challenges you" rather than a
-            // raw node id.
-            const meshtastic_NodeInfoLite *peer = nodeDB->getMeshNode(mp.from);
-            const char *peerShort = (peer && peer->user.short_name[0])
-                                      ? peer->user.short_name : "PEER";
-            strncpy(mmtPeerShort_, peerShort, sizeof(mmtPeerShort_) - 1);
-            mmtPeerShort_[sizeof(mmtPeerShort_) - 1] = '\0';
-            mmtPeerNode_ = mp.from;
-            // MMT:ON  — challenge offer
-            // MMT:Y:<seedHex>  — accept (initiator parses seed)
-            // MMT:N   — reject
-            if (len >= 6 && memcmp(txt + 4, "ON", 2) == 0) {
-                pendingMmtChallengeRx_ = true;
-                LOG_INFO("[MonsterMesh] MMT:ON from 0x%08X (%s)\n",
-                         (unsigned)mp.from, peerShort);
-            } else if (len >= 5 && txt[4] == 'Y') {
-                // Parse 8-hex seed after "MMT:Y:".
-                uint32_t seed = 0;
-                if (len >= 6 + 8 && txt[5] == ':') {
-                    for (uint8_t k = 0; k < 8; ++k) {
-                        char c = txt[6 + k];
-                        seed <<= 4;
-                        if (c >= '0' && c <= '9')      seed |= (uint8_t)(c - '0');
-                        else if (c >= 'a' && c <= 'f') seed |= (uint8_t)(c - 'a' + 10);
-                        else if (c >= 'A' && c <= 'F') seed |= (uint8_t)(c - 'A' + 10);
-                    }
-                }
-                mmtRngSeedRx_     = seed;
-                pendingMmtAcceptRx_ = true;
-                LOG_INFO("[MonsterMesh] MMT:Y from 0x%08X seed=0x%08X\n",
-                         (unsigned)mp.from, (unsigned)seed);
-            } else if (len >= 5 && txt[4] == 'N') {
-                LOG_INFO("[MonsterMesh] MMT:N from 0x%08X — rejected\n",
-                         (unsigned)mp.from);
-            }
-            return ProcessMessage::STOP;
-        }
-    }
+    // Challenge DMs flow through Meshtastic's normal text path — the user
+    // reads them in their phone app and replies as a regular DM. No
+    // module-side parsing for now; battle-start integration lands later.
     return ProcessMessage::STOP;
 }
 
@@ -794,32 +739,21 @@ int32_t MonsterMeshModule::runOnce()
     // T4: drain pending MMT TX. handleReceived stages a flag; runOnce
     // sends the actual DM here so we never call router->allocForSending
     // from the router context (per feedback_mm_defer_tx_from_router.md).
+    // The body is human-readable so the recipient sees a normal DM in
+    // their Meshtastic app — the "MMT:ON" prefix is just our parser key.
     if (pendingMmtOnTx_) {
         pendingMmtOnTx_ = false;
         if (mmtOnTxTarget_) {
-            sendTextDM(mmtOnTxTarget_, "MMT:ON");
-            LOG_INFO("[MonsterMesh] MMT:ON → 0x%08X\n",
+            // Plain Meshtastic DM — recipient sees this in their phone app
+            // chat. No internal MMT: state machine; the receiver just
+            // reads + replies normally. Battle-start trigger lands later.
+            sendTextDM(mmtOnTxTarget_,
+                       "Want to battle in MonsterMesh? Reply with anything to confirm.");
+            LOG_INFO("[MonsterMesh] mmt challenge DM → 0x%08X\n",
                      (unsigned)mmtOnTxTarget_);
         }
     }
-    // Stage incoming-challenge prompt to the terminal. Printing must happen
-    // on the LVGL thread, so we relay through the staged-end channel.
-    if (pendingMmtChallengeRx_) {
-        pendingMmtChallengeRx_ = false;
-        char buf[80];
-        snprintf(buf, sizeof(buf),
-                 "[mmt] challenge from %s. (Battle wiring TBD.)",
-                 mmtPeerShort_);
-        LOG_INFO("[MonsterMesh] %s\n", buf);
-        // For now we just log — accept/reject + battle start lands in a
-        // follow-up build alongside the textBattle.startNetworkedAsReceiver
-        // wiring. Keeps this build a pure wire-format validation.
-    }
-    if (pendingMmtAcceptRx_) {
-        pendingMmtAcceptRx_ = false;
-        LOG_INFO("[MonsterMesh] peer accepted, seed=0x%08X (battle wiring TBD)\n",
-                 (unsigned)mmtRngSeedRx_);
-    }
+    // (mmt receive: simplified to plain Meshtastic DM — phone handles it.)
 
     if (pendingSavWriteBack_) {
         pendingSavWriteBack_ = false;
