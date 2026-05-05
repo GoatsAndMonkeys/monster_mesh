@@ -397,11 +397,15 @@ void MonsterMeshTextBattle::resolveTurn()
     }
 
     // Player-active changes (switch or auto-replace) accumulate into the
-    // participant mask for the current enemy's life span.
+    // participant mask for the current enemy's life span. The move cursor
+    // also snaps back to slot 0 — keeping the last-pick "spam K" UX is
+    // nice for the same pokemon but pointless after a faint, where slot 0
+    // is the natural starting position for the new mon.
     uint8_t curPlayerActive = engine_.party(0).active;
     if (curPlayerActive != lastPlayerActive_) {
         participantMask_ |= (uint8_t)(1u << curPlayerActive);
         lastPlayerActive_ = curPlayerActive;
+        cursor_ = 0;
     }
 
     if (engine_.result() != Gen1BattleEngine::Result::ONGOING) {
