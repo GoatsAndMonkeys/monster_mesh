@@ -3,6 +3,7 @@
 
 #include "MonsterMeshTextBattle.h"
 #include "showdown_gen1_moves.h"
+#include "showdown_gen1_basestats.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -336,21 +337,28 @@ void MonsterMeshTextBattle::resolveTurn()
     engine_.executeTurn(engineLogCb, this);
     handleFaints();
 
-    // Per-faint XP: any side-1 mon that went from HP > 0 → 0 in this turn
-    // counts as a defeat. Distribute (level × multiplier) XP among players
-    // that participated against the current enemy. Trainer battles pay 5x
-    // level per defeated mon, wild encounters 3x.
-    uint8_t mult = isTrainerBattle_ ? 5 : 3;
+    // Per-faint XP using the Gen 1 formula:
+    //     xp = (baseYield * level * a) / (7 * participants)
+    //   where a = 1.5 for trainer, 1.0 for wild. We approximate baseYield
+    //   from the sum of the species' base stats / 4 (real Gen 1 yields run
+    //   ~30-220 — this maps closely; e.g. Geodude(270/4=67) ≈ real 73,
+    //   Mewtwo(590/4=148) ≈ real 220). Doing trainer's 1.5 as ×3/×2 keeps
+    //   integer math.
     const auto &p1 = engine_.party(1);
     for (uint8_t i = 0; i < p1.count && i < 6; ++i) {
         if (lastEnemyHp_[i] > 0 && p1.mons[i].hp == 0) {
             uint8_t pcount = (uint8_t)__builtin_popcount(participantMask_);
             if (pcount == 0) pcount = 1;
             uint32_t lvl = p1.mons[i].level ? p1.mons[i].level : 1;
-            uint32_t xpThisFaint = (lvl * mult * 100u) / pcount;
-            // *100 keeps integer math meaningful when split many ways.
-            // creditBattleXp on the player side scales the curve, so the
-            // numbers feel right at low levels (~level^2 ish per faint).
+            uint8_t  dex = p1.mons[i].species;
+            const Gen1BaseStats &b =
+                GEN1_BASE_STATS[dex < 152 ? dex : 0];
+            uint32_t baseYield = (uint32_t)(b.hp + b.atk + b.def + b.spd + b.spc) / 4;
+            if (baseYield < 30) baseYield = 30;     // floor for early-route mons
+            uint32_t numerMult = isTrainerBattle_ ? 3u : 2u;  // 1.5 vs 1.0
+            uint32_t xpThisFaint =
+                (baseYield * lvl * numerMult) / (uint32_t)(14u * pcount);
+            if (xpThisFaint == 0) xpThisFaint = 1;
             pendingXp_ += xpThisFaint;
             pendingXpDrops_++;
             char line[40];
