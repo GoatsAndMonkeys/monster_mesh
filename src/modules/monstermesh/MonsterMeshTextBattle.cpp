@@ -404,7 +404,15 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
         return;
     }
 
-    if (c == 'f' || c == 'F') {
+    // Flee confirmation: K confirms (run the actual flee logic from below),
+    // anything else cancels back to the move menu. F was easy to hit by
+    // accident next to WASD, so a confirm gate keeps gauntlets recoverable.
+    if (phase_ == Phase::WAIT_FLEE) {
+        bool yes = (c == 'k' || c == 'K' || c == '\n' || c == '\r' || c == ' ');
+        if (!yes) {
+            phase_ = Phase::WAIT_ACTION;
+            return;
+        }
         if (mode_ == Mode::NETWORKED) {
             sendForfeit(); engine_.forfeit(0, engineLogCb, this); phase_ = Phase::FINISHED;
         } else {
@@ -416,6 +424,15 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
             if (escaped) { appendLog("Got away safely!"); phase_ = Phase::FINISHED; }
             else { appendLog("Can't escape!"); engine_.submitAction(0, 2 /*FLEE_FAIL*/, 0); phase_ = Phase::WAIT_REMOTE; }
         }
+        return;
+    }
+
+    if (c == 'f' || c == 'F') {
+        // F is right next to WASD, easy to hit by accident — bounce into a
+        // confirm phase instead of fleeing immediately. K confirms, L/F
+        // cancels back to the previous menu.
+        phase_ = Phase::WAIT_FLEE;
+        dirty_ = true;
         return;
     }
 
@@ -534,10 +551,18 @@ void MonsterMeshTextBattle::drawHpPanel(lgfx::LGFX_Device *g, uint8_t side, int 
 {
     const auto &p = engine_.party(side);
     const auto &m = p.mons[p.active];
-    char hdr[48];
-    snprintf(hdr, sizeof(hdr), "%s  L%u  %u/%u",
+    // Count alive vs total — a "X/N" suffix shows how much of the team is
+    // still standing. Mostly useful for opponent gauntlets so the player
+    // can see whether they're on Brock's last mon.
+    uint8_t alive = 0;
+    for (uint8_t i = 0; i < p.count && i < 6; ++i) {
+        if (p.mons[i].hp > 0) alive++;
+    }
+    char hdr[56];
+    snprintf(hdr, sizeof(hdr), "%s  L%u  %u/%u  [%u/%u]",
              m.nickname[0] ? m.nickname : "?",
-             (unsigned)m.level, (unsigned)m.hp, (unsigned)m.maxHp);
+             (unsigned)m.level, (unsigned)m.hp, (unsigned)m.maxHp,
+             (unsigned)alive, (unsigned)p.count);
     g->setTextColor(FG, BG);
     g->setCursor(8, y);
     g->print(hdr);
@@ -679,6 +704,21 @@ void MonsterMeshTextBattle::render(lgfx::LGFX_Device *g)
     drawHpPanel(g, 0, 124);    // my HP just above the move menu
     if (phase_ == Phase::WAIT_SWITCH)      drawSwitchMenu(g);
     else if (phase_ == Phase::WAIT_ACTION) drawMoveMenu(g);
+    else if (phase_ == Phase::WAIT_FLEE) {
+        // Flee-confirm overlay: a centered box at the bottom band asking
+        // for K to confirm or anything else to cancel. Drawn over the
+        // move menu's slot so the previous selection stays visible above.
+        int by = SCREEN_H - 60;
+        int bh = 56;
+        g->fillRect(8, by, SCREEN_W - 16, bh, DARK);
+        g->drawRect(8, by, SCREEN_W - 16, bh, ACC);
+        g->setTextColor(FG, DARK);
+        g->setCursor(20, by + 8);
+        g->print("Flee?");
+        g->setTextColor(DIM, DARK);
+        g->setCursor(20, by + 28);
+        g->print("K=yes  L/F=no");
+    }
     else if (phase_ == Phase::WAIT_REMOTE) {
         g->setTextColor(FG, BG);
         g->setCursor(8, SCREEN_H - 24);
