@@ -454,16 +454,31 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
 
     if (phase_ != Phase::WAIT_ACTION) return;
 
-    // Move-pick keys: 1/W, 2/E, 3/R, 4/S — the QWERTY letters that match
-    // the T-Deck's hardware number-shifted keys, so the user can pick a
-    // move with one hand. Pressing one HIGHLIGHTS the move; the turn
-    // doesn't submit until the user presses K (Nintendo A) to accept.
+    // Move-pick navigation matches the switch menu's WASD pattern:
+    // 2×2 grid (slots 0/1 top, 2/3 bottom). W/S move between rows
+    // (±2 with wrap), A/D between columns (±1 with wrap). 1-4 still
+    // jump directly. The user accepts with K (Nintendo A).
+    auto wrap4 = [](int v) { return (uint8_t)((v % 4 + 4) % 4); };
     int slot = -1;
-    if      (c >= '1' && c <= '4')   slot = c - '1';
-    else if (c == 'w' || c == 'W')   slot = 0;
-    else if (c == 'e' || c == 'E')   slot = 1;
-    else if (c == 'r' || c == 'R')   slot = 2;
-    else if (c == 's' || c == 'S')   slot = 3;
+    if (c >= '1' && c <= '4') {
+        slot = c - '1';
+    } else if (c == 'w' || c == 'W' || c == 0xB5 /* up */) {
+        cursor_ = wrap4((int)cursor_ - 2);
+        dirty_ = true;
+        return;
+    } else if (c == 's' || c == 'S' || c == 0xB6 /* down */) {
+        cursor_ = wrap4((int)cursor_ + 2);
+        dirty_ = true;
+        return;
+    } else if (c == 'a' || c == 'A') {
+        cursor_ = wrap4((int)cursor_ - 1);
+        dirty_ = true;
+        return;
+    } else if (c == 'd' || c == 'D') {
+        cursor_ = wrap4((int)cursor_ + 1);
+        dirty_ = true;
+        return;
+    }
 
     if (slot >= 0) {
         cursor_ = (uint8_t)slot;
@@ -566,9 +581,9 @@ void MonsterMeshTextBattle::drawMoveMenu(lgfx::LGFX_Device *g)
         uint16_t fg = !usable ? DIM : (selected ? FG : DIM);
         uint16_t bg = selected ? DARK : BG;
 
-        // "1.W TACKLE   35/35" — the slot label includes both the number and
-        // the QWERTY-letter shortcut so the user can see both bindings.
-        static const char *kLabel[4] = { "1/W", "2/E", "3/R", "4/S" };
+        // 2x2 grid layout: WASD steers the cursor, K accepts. The number
+        // labels remain as a quick-jump fallback.
+        static const char *kLabel[4] = { "1.", "2.", "3.", "4." };
         g->setTextColor(fg, bg);
         g->setCursor(cx, cy);
         if (mv) g->printf("%s %-9.9s %u/%u",
@@ -585,8 +600,8 @@ void MonsterMeshTextBattle::drawMoveMenu(lgfx::LGFX_Device *g)
     }
     g->setCursor(8, y + 2 * rowH + 4);
     g->setTextColor(DIM, BG);
-    if (anyPp) g->print("K=ok L=back P=mons F=flee");
-    else       g->print("Out of PP - K=Struggle  P=mons F=flee");
+    if (anyPp) g->print("WASD=move  K=ok  P=mons  F=flee");
+    else       g->print("Out of PP — K=Struggle  P=mons  F=flee");
 }
 
 void MonsterMeshTextBattle::drawSwitchMenu(lgfx::LGFX_Device *g)

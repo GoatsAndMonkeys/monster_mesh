@@ -208,6 +208,13 @@ private:
     Gen1Party terminalStagedParty_ = {};
     volatile bool terminalPartyStaged_ = false;
 
+    // Battle-end LVGL cleanup: set true from the LoRa-thread runOnce when
+    // a battle wraps up. tryConsumeStagedParty (LVGL thread) drains it and
+    // does the lv_obj_invalidate / lv_refr_now / refocus work. Keeps all
+    // LVGL widget ops on the LVGL thread; the lgfx fillScreen is safe from
+    // any thread because spiLock guards it.
+    volatile bool pendingBattleEndCleanup_ = false;
+
     // Decoded Gen 1 trainer name from the most recent SAV load. 7 chars + NUL.
     char stagedTrainerName_[8] = {};
 

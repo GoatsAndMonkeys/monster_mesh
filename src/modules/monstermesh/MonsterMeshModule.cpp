@@ -1038,38 +1038,19 @@ int32_t MonsterMeshModule::runOnce()
             } else {
                 textBattleActive_ = false;
 #if HAS_TFT
-                // Restore LVGL flushing FIRST so subsequent invalidations
-                // actually paint to the screen.
-                lv_display_t *disp = lv_display_get_default();
-                if (disp && savedFlushCb_) {
-                    lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
-                    savedFlushCb_ = nullptr;
-                }
-                // Then wipe the lgfx-rendered battle frame so the terminal
-                // doesn't have to fight through the press-any-key pixels.
-                // clearClipRect mirrors the battle-start path — without it
-                // the fillScreen could be clipped to whatever sub-region
-                // the last drawSwitchMenu/drawMoveMenu narrowed it to.
+                // Wipe the lgfx-rendered battle frame so the terminal doesn't
+                // have to fight through press-any-key pixels. lgfx ops are
+                // SPI-locked and safe from this (LoRa) thread.
                 if (g_deviceUiLgfx) {
                     concurrency::LockGuard g(spiLock);
                     g_deviceUiLgfx->clearClipRect();
                     g_deviceUiLgfx->fillScreen(0x0000);
                 }
-                // Two refreshes: invalidate everything, force a paint, then
-                // invalidate + paint again. A single lv_refr_now after the
-                // flush_cb restore was racing the LVGL incremental redraw
-                // and leaving lgfx text at the bottom of the screen visible.
-                if (disp) {
-                    lv_obj_invalidate(lv_screen_active());
-                    lv_refr_now(disp);
-                    lv_obj_invalidate(lv_screen_active());
-                    lv_refr_now(disp);
-                }
-                // Hand keyboard focus back to the terminal's input field so
-                // the user can type immediately after the battle screen
-                // dismisses — without this the textarea looks active but
-                // keypresses don't appear.
-                if (terminalActive_) terminal_.refocus();
+                // Defer LVGL widget ops (flush_cb restore, invalidate,
+                // refr_now, refocus) to the LVGL thread — calling them from
+                // here corrupted LVGL state and left the terminal textarea
+                // unable to receive keypresses after a battle ended.
+                pendingBattleEndCleanup_ = true;
 #endif
                 LOG_INFO("[MonsterMesh] text battle: ended\n");
             }
@@ -1742,6 +1723,26 @@ static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out,
 
 void MonsterMeshModule::tryConsumeStagedParty()
 {
+    // Battle-end LVGL cleanup deferred from the LoRa thread. Run BEFORE
+    // the staged-party check so the terminal is fully repainted before we
+    // mutate widgets again.
+    if (pendingBattleEndCleanup_) {
+        pendingBattleEndCleanup_ = false;
+#if HAS_TFT
+        lv_display_t *disp = lv_display_get_default();
+        if (disp && savedFlushCb_) {
+            lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
+            savedFlushCb_ = nullptr;
+        }
+        if (disp) {
+            lv_obj_invalidate(lv_screen_active());
+            lv_refr_now(disp);
+            lv_obj_invalidate(lv_screen_active());
+            lv_refr_now(disp);
+        }
+        if (terminalActive_) terminal_.refocus();
+#endif
+    }
     if (!terminalPartyStaged_) return;
     if (!terminalActive_) {
         // Terminal isn't visible — drop the staged party rather than mutating

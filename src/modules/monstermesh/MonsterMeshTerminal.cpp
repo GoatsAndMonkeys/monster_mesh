@@ -522,13 +522,13 @@ void MonsterMeshTerminal::executeLine(const char *line)
                 const char *st = lordHasBadge(lord_, i) ? "CLEAR"
                               : lordGymUnlocked(lord_, i) ? "open"
                                                           : "lock";
-                snprintf(buf, sizeof(buf), "  %u %-12.12s %-9.9s [%s]",
+                snprintf(buf, sizeof(buf), "  %u %-12.12s %-10.10s [%s]",
                          (unsigned)i + 1, g->city, g->leaderName, st);
                 println(buf);
             }
             const char *e4st = lord_.leagueCleared ? "CLEAR"
                              : (lord_.badges == 0xFF) ? "open" : "lock";
-            snprintf(buf, sizeof(buf), "  9 %-12.12s %-9.9s [%s]",
+            snprintf(buf, sizeof(buf), "  9 %-12.12s %-10.10s [%s]",
                      "Indigo Plat.", "Elite Four", e4st);
             println(buf);
             return;
