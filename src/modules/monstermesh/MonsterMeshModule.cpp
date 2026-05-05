@@ -18,7 +18,6 @@
 #include "MonsterMeshAudio.h"
 #include "PokemonData.h"
 #include "Gen1Species.h"
-#include "LordRoutes.h"
 #include "RadioLibInterface.h"
 #if HAS_TFT
 #include "graphics/view/TFT/Themes.h"

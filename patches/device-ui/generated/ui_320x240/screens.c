@@ -3976,7 +3976,7 @@ void create_screen_main_screen() {
                     objects.settings_theme_dropdown = obj;
                     lv_obj_set_pos(obj, 0, 0);
                     lv_obj_set_size(obj, 150, 30);
-                    lv_dropdown_set_options(obj, _("GBC\nDMG\nPocket\nP. Red\nP. Blue\nDark\nLight"));
+                    lv_dropdown_set_options(obj, _("Dark\nLight\nDMG\nGBC\nPocket\nP. Red\nP. Blue"));
                     add_style_drop_down_style(obj);
                     lv_obj_set_style_align(obj, LV_ALIGN_TOP_MID, LV_PART_MAIN | LV_STATE_DEFAULT);
                     lv_obj_set_style_border_color(obj, lv_color_hex(0xffe0e0e0), LV_PART_MAIN | LV_STATE_DEFAULT);

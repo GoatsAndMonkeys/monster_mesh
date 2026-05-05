@@ -17,6 +17,7 @@
 #include "PokemonDaycare.h"
 #include "MonsterMeshTextBattle.h"
 #include "LordGyms.h"
+#include "LordRoutes.h"
 
 // ── MonsterMeshModule ──────────────────────────────────────────────────────────
 // Meshtastic module that runs a Game Boy Pokemon emulator with LoRa-based

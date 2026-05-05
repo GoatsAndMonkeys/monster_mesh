@@ -4,17 +4,16 @@
 class Themes
 {
   public:
-    // 7 themes. GBC is slot 0 / default. Game Boy greens come first, then
-    // the two Pokemon cartridge palettes, with the upstream Dark/Light at
-    // the end. Reordering matches the dropdown order in screens.c.
+    // 7 themes. Slots 0/1 are upstream Dark/Light. The 3 Game Boy greens
+    // and the two Pokemon cartridge palettes are appended.
     enum Theme {
-        eGbcGreen    = 0,
-        eDmgGreen    = 1,
-        ePocketGreen = 2,
-        ePokemonRed  = 3,
-        ePokemonBlue = 4,
-        eDark        = 5,
-        eLight       = 6,
+        eDark = 0,
+        eLight = 1,
+        eDmgGreen = 2,
+        eGbcGreen = 3,
+        ePocketGreen = 4,
+        ePokemonRed = 5,
+        ePokemonBlue = 6,
     };
 
     static void initStyles(void);
