@@ -268,13 +268,23 @@ void MonsterMeshTerminal::onGymBattleEnded(uint8_t gymIdx,
         println(buf);
         lordSave(lord_);
     } else {
-        // Leader cleared — award badge, fully persist.
+        // Leader cleared — award badge, record the NG+ tier this clear
+        // happened at, and persist. gymTierCleared lets the gym listing
+        // distinguish "beaten at the current tier" from "beaten at a lower
+        // tier and still owed at this NG+".
         lordOnGymCleared(lord_, gymIdx);
+        if (gymIdx < 8) lord_.gymTierCleared[gymIdx] = lord_.ngPlusTier;
         lordSave(lord_);
         char buf[64];
         const LordGym *g = lordGym(gymIdx);
-        snprintf(buf, sizeof(buf), "Earned the %s Badge!",
-                 g ? g->badgeName : "?");
+        if (lord_.ngPlusTier > 0) {
+            snprintf(buf, sizeof(buf),
+                     "Cleared %s at NG+%u.",
+                     g ? g->leaderName : "?", (unsigned)lord_.ngPlusTier);
+        } else {
+            snprintf(buf, sizeof(buf), "Earned the %s Badge!",
+                     g ? g->badgeName : "?");
+        }
         println(buf);
     }
 }
@@ -416,20 +426,23 @@ void MonsterMeshTerminal::executeLine(const char *line)
             uint8_t gymIdx;
             bool isE4;
             if (n == 0) {
-                // Auto-pick: first uncleared gym; once all 8 are cleared,
-                // jump to the Indigo Plateau (gym 9) until leagueCleared.
+                // Auto-pick: first gym not yet cleared at the current NG+
+                // tier. Linear unlock: gym 0 first, then 1, etc. Once all
+                // 8 are cleared at this tier, jump to the Indigo Plateau.
                 int auto_n = -1;
                 for (uint8_t i = 0; i < 8; ++i) {
-                    if (!lordHasBadge(lord_, i) && lordGymUnlocked(lord_, i)) {
+                    bool clearedAtTier = lordHasBadge(lord_, i) &&
+                                         lord_.gymTierCleared[i] >= lord_.ngPlusTier;
+                    if (!clearedAtTier && lordGymUnlocked(lord_, i)) {
                         auto_n = i;
                         break;
                     }
                 }
-                if (auto_n < 0 && !lord_.leagueCleared && lord_.badges == 0xFF) {
+                if (auto_n < 0 && lord_.badges == 0xFF && lord_.e4Progress < 5) {
                     auto_n = 8;   // Indigo Plateau
                 }
                 if (auto_n < 0) {
-                    println("All gyms + the Elite Four cleared. You are the Champion.");
+                    println("All gyms + the Elite Four cleared at this tier.");
                     return;
                 }
                 gymIdx = (uint8_t)auto_n;
@@ -478,14 +491,21 @@ void MonsterMeshTerminal::executeLine(const char *line)
                 return;
             }
             if (lordHasBadge(lord_, gymIdx)) {
-                pendingRematchGym_ = (int8_t)gymIdx;
-                const LordGym *g = lordGym(gymIdx);
-                char buf[80];
-                snprintf(buf, sizeof(buf),
-                         "%s already cleared. Rematch? (y/n)",
-                         g ? g->leaderName : "Gym");
-                println(buf);
-                return;
+                // NG+ revisit: gym already cleared at lower tier than
+                // ngPlusTier — fight directly, no rematch prompt.
+                if (lord_.gymTierCleared[gymIdx] < lord_.ngPlusTier) {
+                    // Reset trainer progress for a clean gauntlet.
+                    lord_.gymProgress[gymIdx] = 0;
+                } else {
+                    pendingRematchGym_ = (int8_t)gymIdx;
+                    const LordGym *g = lordGym(gymIdx);
+                    char buf[80];
+                    snprintf(buf, sizeof(buf),
+                             "%s already cleared. Rematch? (y/n)",
+                             g ? g->leaderName : "Gym");
+                    println(buf);
+                    return;
+                }
             }
             if (!gymFightFn_) { println("gym fight not wired"); return; }
             const LordGym *g = lordGym(gymIdx);
@@ -516,21 +536,61 @@ void MonsterMeshTerminal::executeLine(const char *line)
                          (unsigned)__builtin_popcount(lord_.badges));
             }
             println(buf);
+            char st[8];
             for (uint8_t i = 0; i < 8; ++i) {
                 const LordGym *g = lordGym(i);
                 if (!g) continue;
-                const char *st = lordHasBadge(lord_, i) ? "CLEAR"
-                              : lordGymUnlocked(lord_, i) ? "open"
-                                                          : "lock";
+                bool hadBadge = lordHasBadge(lord_, i);
+                bool atTier   = (lord_.gymTierCleared[i] >= lord_.ngPlusTier);
+                if (hadBadge && atTier) {
+                    snprintf(st, sizeof(st), "CLEAR");
+                } else if (hadBadge && !atTier) {
+                    // Beaten at a lower tier; player needs to revisit at
+                    // current NG+. Marker shows the tier required.
+                    snprintf(st, sizeof(st), "NG+%u",
+                             (unsigned)lord_.ngPlusTier);
+                } else if (lordGymUnlocked(lord_, i)) {
+                    snprintf(st, sizeof(st), "open");
+                } else {
+                    snprintf(st, sizeof(st), "lock");
+                }
                 snprintf(buf, sizeof(buf), "  %u %-12.12s %-10.10s [%s]",
                          (unsigned)i + 1, g->city, g->leaderName, st);
                 println(buf);
             }
-            const char *e4st = lord_.leagueCleared ? "CLEAR"
+            // Indigo Plateau row uses the current-cycle e4Progress, not the
+            // one-shot leagueCleared flag — after a Champion clear we reset
+            // gyms + e4Progress for NG+, so the row should flip back to
+            // "lock" until the player re-earns all 8 badges.
+            const char *e4st = (lord_.e4Progress >= 5) ? "CLEAR"
                              : (lord_.badges == 0xFF) ? "open" : "lock";
             snprintf(buf, sizeof(buf), "  9 %-12.12s %-10.10s [%s]",
                      "Indigo Plat.", "Elite Four", e4st);
             println(buf);
+            return;
+        }
+        // `gym dev all8` — debug helper: grant all 8 badges with leader
+        // progress already at 5 each, no E4 progress, NG+ tier zero. Lets
+        // the user jump straight to the Indigo Plateau to test transitions
+        // without grinding through every gym from scratch.
+        if (strncmp(args, "dev all8", 8) == 0) {
+            lord_.badges        = 0xFF;
+            lord_.e4Progress    = 0;
+            lord_.leagueCleared = 0;
+            lord_.ngPlusTier    = 0;
+            for (uint8_t i = 0; i < 8; ++i) lord_.gymProgress[i] = 5;
+            lordSetCurrentNgPlusTier(0);
+            lordSave(lord_);
+            println("dev: 8 badges granted, E4 reset, NG+0.");
+            return;
+        }
+        // `gym dev clear` — debug helper: wipe LoC state back to a fresh
+        // start. Useful for re-testing the early game.
+        if (strncmp(args, "dev clear", 9) == 0) {
+            lordInitDefaults(lord_);
+            lordSetCurrentNgPlusTier(0);
+            lordSave(lord_);
+            println("dev: LoC state wiped.");
             return;
         }
         // `gym dump` — debug view of LordSave.
@@ -634,10 +694,10 @@ void MonsterMeshTerminal::onE4BattleEnded(uint8_t memberIdx, bool playerWon)
         lordSave(lord_);
         return;
     }
-    // Beat the Champion — league cleared. Bump NG+ tier on each clear
-    // (cap at 5). First clear flips leagueCleared so the gym listing
-    // shows the Indigo Plateau row as CLEAR.
-    lord_.e4Progress     = 5;
+    // Beat the Champion — league cleared. Bump NG+ tier (cap 5), then
+    // reset the league for the next cycle: badges + per-gym progress +
+    // E4 progress all zeroed. leagueCleared stays at 1 (one-shot ever)
+    // so the player can ALWAYS re-enter NG+ from the gym list.
     bool firstClear      = !lord_.leagueCleared;
     lord_.leagueCleared  = 1;
     uint8_t prevTier     = lord_.ngPlusTier;
@@ -645,6 +705,13 @@ void MonsterMeshTerminal::onE4BattleEnded(uint8_t memberIdx, bool playerWon)
         lord_.ngPlusTier++;
         lordSetCurrentNgPlusTier(lord_.ngPlusTier);
     }
+    // Reset gym trainer progress + E4 progress so each gym restarts at
+    // trainer 0 next NG+ run. Badges stay set: gymTierCleared[] tracks
+    // which gyms are owed at the new tier instead of clearing the badge
+    // bitmap. ngPlusTier=5 still resets so the run is repeatable.
+    lord_.e4Progress = 0;
+    for (uint8_t i = 0; i < 8; ++i) lord_.gymProgress[i] = 0;
+
     char buf[80];
     if (firstClear) {
         snprintf(buf, sizeof(buf),
@@ -660,6 +727,7 @@ void MonsterMeshTerminal::onE4BattleEnded(uint8_t memberIdx, bool playerWon)
     } else {
         println("Champion defeated again. (NG+5 cap reached.)");
     }
+    println("Gym league reset — challenge them all again at the new tier.");
     lordSave(lord_);
 }
 

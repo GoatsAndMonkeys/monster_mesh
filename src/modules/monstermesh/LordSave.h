@@ -62,11 +62,17 @@ struct LordSave {
     // Indigo Plateau / NG+ extension. Carved from the original reserved
     // block at fixed offsets so older saves load with these fields = 0.
     uint8_t  e4Progress;                    // 0..5 (4 = Champion next, 5 = league cleared)
-    uint8_t  leagueCleared;                 // 0/1 — gate for NG+ unlock
+    uint8_t  leagueCleared;                 // 0/1 — gate for NG+ unlock (one-shot)
     uint8_t  ngPlusTier;                    // 0 = base game, 1..5 = NG+ tier
     uint8_t  _pad4;
 
-    uint8_t  reserved[124];                 // forward-compat (PvP, weather)
+    // Highest NG+ tier each gym was cleared at. 0 = beaten in base game.
+    // 1+ = beaten at NG+N. The gym listing shows "[NG+T]" for any gym
+    // where gymTierCleared[i] < ngPlusTier — those are the league-revisit
+    // fights still owed at the current tier.
+    uint8_t  gymTierCleared[8];
+
+    uint8_t  reserved[116];                 // forward-compat (PvP, weather)
 };
 #pragma pack(pop)
 
