@@ -180,52 +180,30 @@ static uint8_t levelFromExpMediumFast(uint32_t exp)
     return (uint8_t)lvl;
 }
 
-void MonsterMeshTerminal::creditBattleXp(uint32_t totalXp)
+void MonsterMeshTerminal::creditBattleXpPerSlot(const uint32_t xp[6])
 {
-    if (!partyLoaded_ || party_.count == 0 || totalXp == 0) return;
-    // Count survivors (hp > 0).
-    uint8_t alive = 0;
-    for (uint8_t i = 0; i < party_.count && i < 6; ++i) {
-        uint16_t hp = ((uint16_t)party_.mons[i].hp[0] << 8) | party_.mons[i].hp[1];
-        if (hp > 0) alive++;
-    }
-    if (alive == 0) return;
-    uint32_t share = totalXp / alive;
-    if (share == 0) share = 1;
-    bool anyLevel = false;
+    if (!partyLoaded_ || party_.count == 0) return;
     char buf[80];
     for (uint8_t i = 0; i < party_.count && i < 6; ++i) {
-        uint16_t hp = ((uint16_t)party_.mons[i].hp[0] << 8) | party_.mons[i].hp[1];
-        if (hp == 0) continue;
-        // Read 3-byte big-endian exp, add share, clamp to ~1M (level 100^3).
+        uint32_t add = xp[i];
+        if (add == 0) continue;
         Gen1Pokemon &p = party_.mons[i];
         uint32_t exp = ((uint32_t)p.exp[0] << 16) |
                        ((uint32_t)p.exp[1] << 8)  |
                        (uint32_t)p.exp[2];
-        uint32_t newExp = exp + share;
+        uint32_t newExp = exp + add;
         if (newExp > 1000000u) newExp = 1000000u;
         p.exp[0] = (newExp >> 16) & 0xFF;
         p.exp[1] = (newExp >> 8)  & 0xFF;
         p.exp[2] =  newExp        & 0xFF;
         uint8_t newLevel = levelFromExpMediumFast(newExp);
         if (newLevel > p.level) {
-            anyLevel = true;
             snprintf(buf, sizeof(buf), "%.10s grew to level %u!",
                      (const char *)party_.nicknames[i], (unsigned)newLevel);
             println(buf);
             p.level    = newLevel;
             p.boxLevel = newLevel;
         }
-    }
-    snprintf(buf, sizeof(buf),
-             "+%u XP (split %u ways).",
-             (unsigned)totalXp, (unsigned)alive);
-    println(buf);
-    if (anyLevel) {
-        // Stat recomputation on level-up isn't done here — the engine
-        // re-derives stats from base+DV+exp+level on each battle start,
-        // so the next fight reflects the new level. SAV write-back is
-        // future work.
     }
 }
 

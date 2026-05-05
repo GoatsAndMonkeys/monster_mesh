@@ -113,9 +113,11 @@ void MonsterMeshTextBattle::startLocal(const Gen1Party &myParty,
     lastPlayerActive_ = 0;
     lastEnemyActive_  = 0;
     isTrainerBattle_  = true;
-    pendingXp_        = 0;
     pendingXpDrops_   = 0;
-    for (uint8_t i = 0; i < 6; ++i) slotXpAccum_[i] = 0;
+    for (uint8_t i = 0; i < 6; ++i) {
+        pendingXpPerSlot_[i] = 0;
+        slotXpAccum_[i]      = 0;
+    }
 
     uint32_t rngSeed = (uint32_t)(millis() ^ esp_random());
     engine_.start(myParty, cpuParty, rngSeed);
@@ -359,19 +361,21 @@ void MonsterMeshTextBattle::resolveTurn()
             uint32_t xpThisFaint =
                 (baseYield * lvl * numerMult) / (uint32_t)(14u * pcount);
             if (xpThisFaint == 0) xpThisFaint = 1;
-            pendingXp_ += xpThisFaint;
             pendingXpDrops_++;
             char line[40];
-            snprintf(line, sizeof(line), "Earned %u XP!",
+            snprintf(line, sizeof(line), "Each earned %u XP!",
                      (unsigned)xpThisFaint);
             appendLog(line);
-            // Feed each participant's in-battle XP counter and bump
-            // levels while the threshold (l+1)^3 - l^3 keeps fitting.
+            // Per-participant credit: each participant slot's pending XP
+            // gets the full xpThisFaint (already pre-divided by participant
+            // count). Drains per-slot via consumePendingXp so the saved
+            // party doesn't get re-split across all 6 mons.
             const auto &p0 = engine_.party(0);
             for (uint8_t s = 0; s < p0.count && s < 6; ++s) {
                 if (!(participantMask_ & (1u << s))) continue;
                 if (p0.mons[s].hp == 0) continue;   // fainted, no XP
-                slotXpAccum_[s] += xpThisFaint;
+                pendingXpPerSlot_[s] += xpThisFaint;
+                slotXpAccum_[s]      += xpThisFaint;
                 while (true) {
                     uint8_t curLvl = engine_.party(0).mons[s].level;
                     if (curLvl >= 100) break;

@@ -124,8 +124,14 @@ private:
     uint8_t  lastEnemyActive_  = 0;
     uint16_t lastEnemyHp_[6]   = {};
     bool     isTrainerBattle_  = true;
-    uint32_t pendingXp_        = 0;
     uint8_t  pendingXpDrops_   = 0;  // number of opponents fainted
+
+    // Per-slot pending XP (drained by the module each runOnce tick into
+    // creditBattleXpPerSlot, which writes exp directly to the saved
+    // party member at that slot — no further splitting). Real Gen 1
+    // semantics: only participants get XP, and they get the full per-
+    // participant share calculated at faint time.
+    uint32_t pendingXpPerSlot_[6] = {};
 
     // Per-slot in-battle XP for level-up gating. Each slot's counter
     // accumulates XP from defeated opponents; when it crosses the
@@ -139,13 +145,19 @@ private:
     // maxHp delta to current hp (heal-on-level), bump level.
     void inBattleLevelUp(uint8_t slot);
 public:
-    // Drained each module tick — the LVGL thread credits this to the
-    // player's party via terminal_.creditBattleXp on the next indev tick.
-    uint32_t consumePendingXp() {
-        uint32_t v = pendingXp_;
-        pendingXp_ = 0;
+    // Drained each module tick. `out` is filled with per-slot XP earned
+    // since the last drain; the LVGL thread credits each slot directly
+    // to the saved party (no further splitting). Returns true if any
+    // slot had a non-zero balance.
+    bool consumePendingXp(uint32_t out[6]) {
+        bool any = false;
+        for (uint8_t i = 0; i < 6; ++i) {
+            out[i] = pendingXpPerSlot_[i];
+            if (out[i]) any = true;
+            pendingXpPerSlot_[i] = 0;
+        }
         pendingXpDrops_ = 0;
-        return v;
+        return any;
     }
 private:
 

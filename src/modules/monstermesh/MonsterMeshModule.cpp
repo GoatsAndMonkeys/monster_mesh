@@ -989,11 +989,11 @@ int32_t MonsterMeshModule::runOnce()
             textBattle_.clearDirty();
         }
         // Drain per-faint XP that the engine accumulated this turn. The
-        // LVGL thread (tryConsumeStagedParty) credits it to the saved
-        // party, where exp + level updates persist across the battle.
-        uint32_t xp = textBattle_.consumePendingXp();
-        if (xp > 0) {
-            stagedXp_ += xp;
+        // LVGL thread (tryConsumeStagedParty) credits each slot directly
+        // to the saved party — no further splitting.
+        uint32_t xp[6] = {};
+        if (textBattle_.consumePendingXp(xp)) {
+            for (uint8_t i = 0; i < 6; ++i) stagedXp_[i] += xp[i];
             pendingXpAwardCb_ = true;
         }
         // Battle ended — gym gauntlets chain straight into the next
@@ -1874,9 +1874,14 @@ void MonsterMeshModule::tryConsumeStagedParty()
     // callback so XP from the killing blow lands before the news entry.
     if (pendingXpAwardCb_) {
         pendingXpAwardCb_ = false;
-        uint32_t xp = stagedXp_;
-        stagedXp_ = 0;
-        if (xp > 0) terminal_.creditBattleXp(xp);
+        uint32_t xp[6];
+        bool any = false;
+        for (uint8_t i = 0; i < 6; ++i) {
+            xp[i] = stagedXp_[i];
+            if (xp[i]) any = true;
+            stagedXp_[i] = 0;
+        }
+        if (any) terminal_.creditBattleXpPerSlot(xp);
     }
     // Battle-result callback (terminal_.on*BattleEnded) — runs after the
     // LVGL cleanup so the panel is repainted before we add news lines.
