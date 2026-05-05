@@ -386,7 +386,7 @@ void MonsterMeshTerminal::executeLine(const char *line)
         println("  gym         - Legend of Charizard gym list");
         println("  gym fight N - challenge gym N (1-8)");
         println("  fight       - local CPU battle vs neighbor");
-        println("  explore     - wild encounter on the route between gyms");
+        println("  explore     - Wild encounters nearby");
         println("  help sys    - system commands");
         return;
     }
