@@ -482,9 +482,30 @@ int32_t MonsterMeshModule::runOnce()
                     ->requestE4Battle(memberIdx);
             }, this);
         terminal_.setMmtChallengeFn(
-            [](void *ctx, uint32_t peerNode) {
+            [](void *ctx, const char *peerShort) {
                 auto *self = static_cast<MonsterMeshModule *>(ctx);
-                self->mmtOnTxTarget_  = peerNode;
+                if (!nodeDB || !peerShort || !peerShort[0]) return;
+                // Case-insensitive short_name match against every NodeDB
+                // entry. First hit wins; if no match the runOnce drain
+                // sees target=0 and silently skips.
+                size_t total = nodeDB->getNumMeshNodes();
+                uint32_t resolved = 0;
+                for (size_t i = 0; i < total; ++i) {
+                    const meshtastic_NodeInfoLite *n =
+                        nodeDB->getMeshNodeByIndex(i);
+                    if (!n || !n->has_user) continue;
+                    if (n->num == nodeDB->getNodeNum()) continue; // skip self
+                    if (strcasecmp(n->user.short_name, peerShort) == 0) {
+                        resolved = n->num;
+                        break;
+                    }
+                }
+                if (resolved == 0) {
+                    LOG_WARN("[MonsterMesh] mmt: no node with short_name '%s'\n",
+                             peerShort);
+                    return;
+                }
+                self->mmtOnTxTarget_  = resolved;
                 self->pendingMmtOnTx_ = true;
             }, this);
         daycare_.setSendDm([](uint32_t dest, const char *msg, void *ctx) {
