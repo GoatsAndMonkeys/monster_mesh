@@ -6,6 +6,7 @@
 
 #include "Gen1BattleEngine.h"
 #include "DaycareSavPatcher.h"      // dexToInternal[]
+#include "LordLogic.h"              // lordScaleLevel + tier accessor
 #include "showdown_gen1_moves.h"
 
 #include <string.h>
@@ -87,16 +88,20 @@ const LordE4Member *lordE4Member(uint8_t idx)
 static void writeMonToParty(Gen1Party &out, uint8_t slot,
                             const LordGymMon &src, const char *nick)
 {
+    // NG+: E4 / Champion scales 10 levels above the tier's gym level.
+    uint8_t lvl = lordScaleLevel(src.level, lordCurrentNgPlusTier(),
+                                 /*isE4=*/true);
+
     Gen1BattleEngine::BattlePoke tmp;
-    Gen1BattleEngine::initBattlePokeFromBase(tmp, src.species, src.level, src.moves);
+    Gen1BattleEngine::initBattlePokeFromBase(tmp, src.species, lvl, src.moves);
 
     uint8_t internal = (src.species < 152) ? dexToInternal[src.species] : 0;
 
     Gen1Pokemon &p = out.mons[slot];
     memset(&p, 0, sizeof(p));
     p.species  = internal;
-    p.boxLevel = src.level;
-    p.level    = src.level;
+    p.boxLevel = lvl;
+    p.level    = lvl;
     auto setBe16 = [](uint8_t *dst, uint16_t v) {
         dst[0] = (uint8_t)(v >> 8); dst[1] = (uint8_t)v;
     };

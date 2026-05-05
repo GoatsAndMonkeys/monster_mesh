@@ -6,6 +6,7 @@
 #include "Gen1BattleEngine.h"
 #include "PokemonData.h"
 #include "DaycareSavPatcher.h"      // dexToInternal[] — SAV uses internal hex
+#include "LordLogic.h"              // lordScaleLevel + tier accessor
 #include "showdown_gen1_moves.h"
 
 #include <string.h>
@@ -345,16 +346,20 @@ static void writeMonToParty(Gen1Party &out, uint8_t slot,
     // conventions: pass dex to initBattlePokeFromBase, but store internal
     // in the Gen1Pokemon so engine.replaceOpponent matches MonsterMesh's
     // neighbor-built parties.
+    // NG+: scale to the tier's gym-leader level (uniform across all 8 gyms).
+    uint8_t lvl = lordScaleLevel(src.level, lordCurrentNgPlusTier(),
+                                 /*isE4=*/false);
+
     Gen1BattleEngine::BattlePoke tmp;
-    Gen1BattleEngine::initBattlePokeFromBase(tmp, src.species, src.level, src.moves);
+    Gen1BattleEngine::initBattlePokeFromBase(tmp, src.species, lvl, src.moves);
 
     uint8_t internal = (src.species < 152) ? dexToInternal[src.species] : 0;
 
     Gen1Pokemon &p = out.mons[slot];
     memset(&p, 0, sizeof(p));
     p.species  = internal;
-    p.boxLevel = src.level;
-    p.level    = src.level;
+    p.boxLevel = lvl;
+    p.level    = lvl;
     setBe16(p.maxHp, tmp.maxHp);
     setBe16(p.hp,    tmp.hp);
     setBe16(p.atk,   tmp.atk);
