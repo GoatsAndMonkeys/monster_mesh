@@ -124,6 +124,11 @@ class MonsterMeshTerminal {
     // tapping the textarea — the battle's lgfx render path stole focus.
     void refocus();
 
+    // Append a single line to the terminal output. Public alias for the
+    // internal println, used by the module to surface async status (mmt
+    // resolve results, etc.) without leaking the LVGL widget access.
+    void printLine(const char *s);
+
     // Credit per-slot battle XP: xp[i] goes directly to party_.mons[i]
     // (no internal splitting). Levels bump via the medium-fast curve
     // (exp = level^3); a "X grew to L" line prints per level-up.

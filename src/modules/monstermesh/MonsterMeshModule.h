@@ -177,6 +177,11 @@ public:
         e4MemberIdx_        = memberIdx;
     }
 
+    // T4: resolve `peerShort` to a node num via NodeDB, print result to
+    // the terminal panel, and arm a deferred MMT:ON DM. Public so the
+    // terminal-fn lambda can call it (terminal_ is private otherwise).
+    void challengePeerByShortName(const char *peerShort);
+
     // Fill `buf` with a multi-line daycare status report (newline-separated).
     // Used by the terminal `daycare` command.
     void daycareStatusString(char *buf, size_t bufLen);

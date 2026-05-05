@@ -167,6 +167,11 @@ void MonsterMeshTerminal::refocus()
     if (input_) lv_group_focus_obj(input_);
 }
 
+void MonsterMeshTerminal::printLine(const char *s)
+{
+    println(s);
+}
+
 // Cube-root for exp → level using medium-fast curve (level^3 = exp).
 // Picks the largest level whose level^3 fits within `exp`. Returns 1..100.
 static uint8_t levelFromExpMediumFast(uint32_t exp)

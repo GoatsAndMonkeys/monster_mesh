@@ -300,6 +300,42 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
     return ProcessMessage::STOP;
 }
 
+void MonsterMeshModule::challengePeerByShortName(const char *peerShort)
+{
+    if (!nodeDB || !peerShort || !peerShort[0]) {
+        terminal_.printLine("mmt: empty target");
+        return;
+    }
+    size_t total = nodeDB->getNumMeshNodes();
+    uint32_t resolved = 0;
+    char matchedShort[12] = {};
+    for (size_t i = 0; i < total; ++i) {
+        const meshtastic_NodeInfoLite *n = nodeDB->getMeshNodeByIndex(i);
+        if (!n || !n->has_user) continue;
+        if (n->num == nodeDB->getNodeNum()) continue;     // skip self
+        if (strcasecmp(n->user.short_name, peerShort) == 0) {
+            resolved = n->num;
+            strncpy(matchedShort, n->user.short_name, sizeof(matchedShort) - 1);
+            break;
+        }
+    }
+    char buf[80];
+    if (resolved == 0) {
+        snprintf(buf, sizeof(buf),
+                 "mmt: no node '%s' in NodeDB. Try after they NodeInfo.",
+                 peerShort);
+        terminal_.printLine(buf);
+        LOG_WARN("[MonsterMesh] %s\n", buf);
+        return;
+    }
+    snprintf(buf, sizeof(buf), "mmt: %s = 0x%08X — sending MMT:ON",
+             matchedShort, (unsigned)resolved);
+    terminal_.printLine(buf);
+    LOG_INFO("[MonsterMesh] %s\n", buf);
+    mmtOnTxTarget_  = resolved;
+    pendingMmtOnTx_ = true;
+}
+
 void MonsterMeshModule::sendTextDM(uint32_t to, const char *text)
 {
     if (!text) return;
@@ -483,30 +519,8 @@ int32_t MonsterMeshModule::runOnce()
             }, this);
         terminal_.setMmtChallengeFn(
             [](void *ctx, const char *peerShort) {
-                auto *self = static_cast<MonsterMeshModule *>(ctx);
-                if (!nodeDB || !peerShort || !peerShort[0]) return;
-                // Case-insensitive short_name match against every NodeDB
-                // entry. First hit wins; if no match the runOnce drain
-                // sees target=0 and silently skips.
-                size_t total = nodeDB->getNumMeshNodes();
-                uint32_t resolved = 0;
-                for (size_t i = 0; i < total; ++i) {
-                    const meshtastic_NodeInfoLite *n =
-                        nodeDB->getMeshNodeByIndex(i);
-                    if (!n || !n->has_user) continue;
-                    if (n->num == nodeDB->getNodeNum()) continue; // skip self
-                    if (strcasecmp(n->user.short_name, peerShort) == 0) {
-                        resolved = n->num;
-                        break;
-                    }
-                }
-                if (resolved == 0) {
-                    LOG_WARN("[MonsterMesh] mmt: no node with short_name '%s'\n",
-                             peerShort);
-                    return;
-                }
-                self->mmtOnTxTarget_  = resolved;
-                self->pendingMmtOnTx_ = true;
+                static_cast<MonsterMeshModule *>(ctx)
+                    ->challengePeerByShortName(peerShort);
             }, this);
         daycare_.setSendDm([](uint32_t dest, const char *msg, void *ctx) {
             auto *self = static_cast<MonsterMeshModule *>(ctx);
