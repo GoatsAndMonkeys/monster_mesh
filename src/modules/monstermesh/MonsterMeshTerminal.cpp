@@ -162,6 +162,11 @@ void MonsterMeshTerminal::setParty(const Gen1Party &p)
     partyLoaded_ = (p.count > 0 && p.count <= 6);
 }
 
+void MonsterMeshTerminal::refocus()
+{
+    if (input_) lv_group_focus_obj(input_);
+}
+
 void MonsterMeshTerminal::refreshParty()
 {
     // Append the party listing to the existing scrollback rather than

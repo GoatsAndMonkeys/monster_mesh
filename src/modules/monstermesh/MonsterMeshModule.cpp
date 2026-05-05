@@ -1065,6 +1065,11 @@ int32_t MonsterMeshModule::runOnce()
                     lv_obj_invalidate(lv_screen_active());
                     lv_refr_now(disp);
                 }
+                // Hand keyboard focus back to the terminal's input field so
+                // the user can type immediately after the battle screen
+                // dismisses — without this the textarea looks active but
+                // keypresses don't appear.
+                if (terminalActive_) terminal_.refocus();
 #endif
                 LOG_INFO("[MonsterMesh] text battle: ended\n");
             }

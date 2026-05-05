@@ -109,6 +109,11 @@ class MonsterMeshTerminal {
     // the user sees the freshly-loaded data without having to type "party".
     void refreshParty();
 
+    // Re-grab keyboard focus on the input textarea. Called by the module
+    // after a battle ends so the user can keep typing without manually
+    // tapping the textarea — the battle's lgfx render path stole focus.
+    void refocus();
+
   private:
     void println(const char *s);
     void prompt();
