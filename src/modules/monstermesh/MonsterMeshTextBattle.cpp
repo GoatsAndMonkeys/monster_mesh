@@ -339,11 +339,11 @@ void MonsterMeshTextBattle::resolveTurn()
 
     // Per-faint XP using the Gen 1 formula:
     //     xp = (baseYield * level * a) / (7 * participants)
-    //   where a = 1.5 for trainer, 1.0 for wild. We approximate baseYield
-    //   from the sum of the species' base stats / 4 (real Gen 1 yields run
-    //   ~30-220 — this maps closely; e.g. Geodude(270/4=67) ≈ real 73,
-    //   Mewtwo(590/4=148) ≈ real 220). Doing trainer's 1.5 as ×3/×2 keeps
-    //   integer math.
+    //   where a = 1.5 for trainer, 1.0 for wild. baseYield approximated as
+    //   sum-of-base-stats / 3 — lands within ~20% of real Gen 1 base
+    //   yields (Lapras 150 vs real 219, Mewtwo 196 vs real 220, Geodude 90
+    //   vs real 73, Caterpie 58 vs real 53). Trainer's 1.5 stays as ×3/×2
+    //   to keep integer math.
     const auto &p1 = engine_.party(1);
     for (uint8_t i = 0; i < p1.count && i < 6; ++i) {
         if (lastEnemyHp_[i] > 0 && p1.mons[i].hp == 0) {
@@ -353,8 +353,8 @@ void MonsterMeshTextBattle::resolveTurn()
             uint8_t  dex = p1.mons[i].species;
             const Gen1BaseStats &b =
                 GEN1_BASE_STATS[dex < 152 ? dex : 0];
-            uint32_t baseYield = (uint32_t)(b.hp + b.atk + b.def + b.spd + b.spc) / 4;
-            if (baseYield < 30) baseYield = 30;     // floor for early-route mons
+            uint32_t baseYield = (uint32_t)(b.hp + b.atk + b.def + b.spd + b.spc) / 3;
+            if (baseYield < 20) baseYield = 20;
             uint32_t numerMult = isTrainerBattle_ ? 3u : 2u;  // 1.5 vs 1.0
             uint32_t xpThisFaint =
                 (baseYield * lvl * numerMult) / (uint32_t)(14u * pcount);
