@@ -215,6 +215,18 @@ private:
     // any thread because spiLock guards it.
     volatile bool pendingBattleEndCleanup_ = false;
 
+    // Battle-result callback deferral. The runOnce dispatch fills these
+    // and sets pendingBattleEndedCb_ instead of calling terminal_.onXxxEnded
+    // directly — those callbacks lv_label_create() into the terminal output,
+    // which is not safe from the LoRa thread. tryConsumeStagedParty drains
+    // it on the LVGL thread.
+    enum class StagedEndKind : uint8_t { NONE, GYM, EXPLORE, E4 };
+    StagedEndKind stagedEndKind_ = StagedEndKind::NONE;
+    uint8_t       stagedEndA_     = 0;   // gymIdx / routeIdx / memberIdx
+    uint8_t       stagedEndB_     = 0;   // trainerIdx / encounter level
+    bool          stagedEndWon_   = false;
+    volatile bool pendingBattleEndedCb_ = false;
+
     // Decoded Gen 1 trainer name from the most recent SAV load. 7 chars + NUL.
     char stagedTrainerName_[8] = {};
 

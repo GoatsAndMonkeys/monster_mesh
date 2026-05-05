@@ -990,17 +990,26 @@ int32_t MonsterMeshModule::runOnce()
                     }
                 }
                 if (!gauntletContinue) {
-                    // Either lost, or cleared the leader. Final outcome.
-                    terminal_.onGymBattleEnded(activeGymBattle_,
-                                               activeGymTrainer_, won);
+                    // Either lost, or cleared the leader. Stage the
+                    // callback for the LVGL thread to deliver — the
+                    // terminal callbacks lv_label_create into the output
+                    // which isn't safe from the LoRa thread.
+                    stagedEndKind_ = StagedEndKind::GYM;
+                    stagedEndA_    = activeGymBattle_;
+                    stagedEndB_    = activeGymTrainer_;
+                    stagedEndWon_  = won;
+                    pendingBattleEndedCb_ = true;
                     activeGymBattle_  = 0xFF;
                 }
             } else if (activeExploreRoute_ < 8) {
                 // L4 wild battle just ended — single-encounter (no chain).
                 bool won = (textBattle_.engineResult() ==
                             Gen1BattleEngine::Result::P1_WIN);
-                terminal_.onExploreBattleEnded(activeExploreRoute_, won,
-                                               activeExploreLevel_);
+                stagedEndKind_ = StagedEndKind::EXPLORE;
+                stagedEndA_    = activeExploreRoute_;
+                stagedEndB_    = activeExploreLevel_;
+                stagedEndWon_  = won;
+                pendingBattleEndedCb_ = true;
                 activeExploreRoute_ = 0xFF;
                 activeExploreLevel_ = 0;
             } else if (activeE4Member_ < 5) {
@@ -1028,7 +1037,11 @@ int32_t MonsterMeshModule::runOnce()
                     }
                 }
                 if (!gauntletContinue) {
-                    terminal_.onE4BattleEnded(activeE4Member_, won);
+                    stagedEndKind_ = StagedEndKind::E4;
+                    stagedEndA_    = activeE4Member_;
+                    stagedEndB_    = 0;
+                    stagedEndWon_  = won;
+                    pendingBattleEndedCb_ = true;
                     activeE4Member_ = 0xFF;
                 }
             }
@@ -1743,6 +1756,24 @@ void MonsterMeshModule::tryConsumeStagedParty()
         if (terminalActive_) terminal_.refocus();
 #endif
     }
+    // Battle-result callback (terminal_.on*BattleEnded) — runs after the
+    // LVGL cleanup so the panel is repainted before we add news lines.
+    if (pendingBattleEndedCb_) {
+        pendingBattleEndedCb_ = false;
+        switch (stagedEndKind_) {
+            case StagedEndKind::GYM:
+                terminal_.onGymBattleEnded(stagedEndA_, stagedEndB_, stagedEndWon_);
+                break;
+            case StagedEndKind::EXPLORE:
+                terminal_.onExploreBattleEnded(stagedEndA_, stagedEndWon_, stagedEndB_);
+                break;
+            case StagedEndKind::E4:
+                terminal_.onE4BattleEnded(stagedEndA_, stagedEndWon_);
+                break;
+            default: break;
+        }
+        stagedEndKind_ = StagedEndKind::NONE;
+    }
     if (!terminalPartyStaged_) return;
     if (!terminalActive_) {
         // Terminal isn't visible — drop the staged party rather than mutating
@@ -1989,6 +2020,16 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
     if (textBattleActive_) {
         textBattle_.handleKey(ascii);
         powerFSM.trigger(EVENT_INPUT);
+        return;
+    }
+
+    // Drop keys (except ALT, which is the universal escape into the ROM
+    // browser) while the LVGL battle-end cleanup is still pending. The
+    // cleanup runs on the LVGL thread via tryConsumeStagedParty; until it
+    // drains, the terminal panel's flush_cb is still the no-op installed at
+    // battle start, so any lv_textarea_set_text we'd do here paints into a
+    // black hole. ALT escapes regardless so the user is never stuck.
+    if (pendingBattleEndCleanup_ && ascii != 0x05 /*ALT*/) {
         return;
     }
 
