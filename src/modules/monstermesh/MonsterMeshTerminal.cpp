@@ -569,16 +569,20 @@ void MonsterMeshTerminal::executeLine(const char *line)
             println(buf);
             return;
         }
-        // `gym dev all8` — debug helper: grant all 8 badges with leader
-        // progress already at 5 each, no E4 progress, NG+ tier zero. Lets
-        // the user jump straight to the Indigo Plateau to test transitions
-        // without grinding through every gym from scratch.
+        // `gym dev all8` — debug helper. Drops the player to "first-time
+        // ready-for-Elite-Four" state: 8 badges all earned at base-game
+        // (tier 0), E4 untouched, NG+ tier 0, leagueCleared cleared. Lets
+        // the user jump straight to the Indigo Plateau to test the
+        // base-game → NG+1 transition without grinding eight gyms.
         if (strncmp(args, "dev all8", 8) == 0) {
             lord_.badges        = 0xFF;
             lord_.e4Progress    = 0;
             lord_.leagueCleared = 0;
             lord_.ngPlusTier    = 0;
-            for (uint8_t i = 0; i < 8; ++i) lord_.gymProgress[i] = 5;
+            for (uint8_t i = 0; i < 8; ++i) {
+                lord_.gymProgress[i]    = 5;   // leader cleared
+                lord_.gymTierCleared[i] = 0;   // beaten at base-game tier
+            }
             lordSetCurrentNgPlusTier(0);
             lordSave(lord_);
             println("dev: 8 badges granted, E4 reset, NG+0.");
