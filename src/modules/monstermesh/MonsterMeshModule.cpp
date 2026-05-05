@@ -410,6 +410,11 @@ int32_t MonsterMeshModule::runOnce()
                 static_cast<MonsterMeshModule *>(ctx)
                     ->requestGymBattle(gymIdx, trainerIdx);
             }, this);
+        terminal_.setExploreFn(
+            [](void *ctx, uint8_t routeIdx) {
+                static_cast<MonsterMeshModule *>(ctx)
+                    ->requestExplore(routeIdx);
+            }, this);
         daycare_.setSendDm([](uint32_t dest, const char *msg, void *ctx) {
             auto *self = static_cast<MonsterMeshModule *>(ctx);
             self->sendTextDM(dest, msg);
@@ -814,10 +819,30 @@ int32_t MonsterMeshModule::runOnce()
         char rivalTag[6] = "RIVAL";
         char hdrText[40] = {};   // applied AFTER startLocal (which clears it)
 
+        // L4: explore battles bypass everything else — wild encounter from
+        // the route pool keyed by gym progress. Single mon, no chain.
+        if (exploreRouteIdx_ < 8) {
+            if (lordPickWildEncounter(exploreRouteIdx_, cpuParty) &&
+                cpuParty.count > 0) {
+                snprintf(rivalTag, sizeof(rivalTag), "WILD");
+                const LordRoute *r = lordRoute(exploreRouteIdx_);
+                snprintf(hdrText, sizeof(hdrText), "%s — wild encounter",
+                         r ? r->name : "Route");
+                activeExploreRoute_ = exploreRouteIdx_;
+                activeExploreLevel_ = cpuParty.mons[0].level;
+                LOG_INFO("[MonsterMesh] explore route %u: %s lv%u\n",
+                         (unsigned)exploreRouteIdx_,
+                         r ? r->name : "?", (unsigned)activeExploreLevel_);
+            } else {
+                LOG_WARN("[MonsterMesh] explore: bad route %u\n",
+                         (unsigned)exploreRouteIdx_);
+                exploreRouteIdx_ = 0xFF;
+            }
+        }
         // L3: gym battles bypass the neighbor-pick path. Build the gym
         // trainer's party via lordBuildGymParty and tag the rival with the
         // first 4 chars of the trainer's name (each grunt has their own).
-        if (gymBattleIdx_ < 8) {
+        if (exploreRouteIdx_ >= 8 && gymBattleIdx_ < 8) {
             const LordGym *g = lordGym(gymBattleIdx_);
             if (g && lordBuildGymParty(gymBattleIdx_, gymTrainerIdx_, cpuParty)) {
                 const char *tn = g->trainers[gymTrainerIdx_].name;
@@ -841,7 +866,7 @@ int32_t MonsterMeshModule::runOnce()
 
         const auto *peers = daycare_.getNeighbors();
         uint8_t peerCount = daycare_.getNeighborCount();
-        if (gymBattleIdx_ >= 8 && peerCount > 0 && peers) {
+        if (exploreRouteIdx_ >= 8 && gymBattleIdx_ >= 8 && peerCount > 0 && peers) {
             uint8_t pick = (uint8_t)(esp_random() % peerCount);
             const auto &n = peers[pick];
             uint8_t party = n.partyCount > 6 ? 6 : n.partyCount;
@@ -874,7 +899,7 @@ int32_t MonsterMeshModule::runOnce()
             snprintf(rivalTag, sizeof(rivalTag), "%.4s", n.shortName);
             LOG_INFO("[MonsterMesh] text battle: rival = %s (%u pokemon)\n",
                      rivalTag, (unsigned)party);
-        } else if (gymBattleIdx_ >= 8) {
+        } else if (exploreRouteIdx_ >= 8 && gymBattleIdx_ >= 8) {
             // No neighbors AND no gym requested — fall back to a "wild
             // trainer" picked at random from the LoC roster. Better than a
             // mirror match: gives a real opponent with their own party so
@@ -891,9 +916,10 @@ int32_t MonsterMeshModule::runOnce()
                 LOG_INFO("[MonsterMesh] text battle: fallback mirror\n");
             }
         }
-        // After this point the gym slot is consumed — reset so the next
-        // `fight` defaults to neighbor-pick again.
+        // After this point the gym + explore slots are consumed — reset so
+        // the next `fight` defaults to neighbor-pick again.
         gymBattleIdx_ = 0xFF;
+        exploreRouteIdx_ = 0xFF;
         const char *ourTag = (owner.short_name[0] != '\0') ? owner.short_name : "ME";
         textBattle_.startLocal(terminal_.getParty(), cpuParty, ourTag, rivalTag);
         if (hdrText[0]) textBattle_.setHeader(hdrText);
@@ -943,6 +969,14 @@ int32_t MonsterMeshModule::runOnce()
                                                activeGymTrainer_, won);
                     activeGymBattle_  = 0xFF;
                 }
+            } else if (activeExploreRoute_ < 8) {
+                // L4 wild battle just ended — single-encounter (no chain).
+                bool won = (textBattle_.engineResult() ==
+                            Gen1BattleEngine::Result::P1_WIN);
+                terminal_.onExploreBattleEnded(activeExploreRoute_, won,
+                                               activeExploreLevel_);
+                activeExploreRoute_ = 0xFF;
+                activeExploreLevel_ = 0;
             }
             if (gauntletContinue) {
                 // Battle continues with the next trainer — keep dirty

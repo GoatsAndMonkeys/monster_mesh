@@ -15,6 +15,9 @@
 #include "MonsterMeshFileBrowser.h"
 #include "MonsterMeshTerminal.h"
 #include "PokemonDaycare.h"
+#include "MonsterMeshTextBattle.h"
+#include "LordGyms.h"
+#include "LordRoutes.h"
 
 // ── MonsterMeshModule ──────────────────────────────────────────────────────────
 // Meshtastic module that runs a Game Boy Pokemon emulator with LoRa-based
@@ -68,6 +71,23 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     MonsterMeshFileBrowser   browser_;
     MonsterMeshTerminal      terminal_;
     PokemonDaycare           daycare_;
+    MonsterMeshTextBattle    textBattle_{transport_};
+
+    bool textBattleActive_   = false;
+    bool textBattleStartReq_ = false;  // LVGL→runOnce flag to start a local fight
+    // 0xFF = mirror match / neighbor pick. 0..7 = LoC gym battle.
+    uint8_t gymBattleIdx_    = 0xFF;
+    uint8_t gymTrainerIdx_   = 0;
+    // Captured at battle start so the end-of-battle dispatcher knows
+    // which gym/trainer to advance even after gymBattleIdx_ resets.
+    uint8_t activeGymBattle_  = 0xFF;
+    uint8_t activeGymTrainer_ = 0;
+    // 0xFF = not an explore battle. 0..7 = LordRoutes index. Set by
+    // requestExplore(); read at start (build wild party) + end (callback
+    // to terminal_.onExploreBattleEnded).
+    uint8_t exploreRouteIdx_  = 0xFF;
+    uint8_t activeExploreRoute_ = 0xFF;
+    uint8_t activeExploreLevel_ = 0;
 
     bool emulatorActive_     = false;
     bool terminalActive_     = false;
@@ -118,6 +138,32 @@ public:
     // Run an in-game daycare check-in for the most recent party loaded from
     // SAV. Safe to call when no ROM is loaded — silently no-ops.
     void daycareCheckInFromStagedParty();
+
+    // T2: ask runOnce to begin a local CPU battle on the LoRa thread. The
+    // LVGL thread sets the flag from the terminal `fight` command; runOnce
+    // suppresses LVGL flush, clears the screen, builds a CPU rival party,
+    // and calls textBattle_.startLocal().
+    void requestLocalTextBattle() { textBattleStartReq_ = true; }
+    bool isTextBattleActive() const { return textBattleActive_; }
+
+    // L3: request a gym battle. gymIdx 0..7, trainerIdx 0..4 (4 = leader).
+    // Sets the same kick-off flags as a local battle but flagged as a gym
+    // fight so runOnce builds the gym party from LordGyms.h instead of a
+    // daycare neighbor.
+    void requestGymBattle(uint8_t gymIdx, uint8_t trainerIdx) {
+        textBattleStartReq_ = true;
+        gymBattleIdx_       = gymIdx;
+        gymTrainerIdx_      = trainerIdx;
+    }
+
+    // L4: request a wild explore battle on `routeIdx` (0..7). Module's
+    // runOnce builds the wild party from LordRoutes.cpp and starts a local
+    // text battle. Tracked separately from gym/regular fights so the
+    // battle-end path can call back into terminal_.onExploreBattleEnded.
+    void requestExplore(uint8_t routeIdx) {
+        textBattleStartReq_ = true;
+        exploreRouteIdx_    = routeIdx;
+    }
 
     // Fill `buf` with a multi-line daycare status report (newline-separated).
     // Used by the terminal `daycare` command.

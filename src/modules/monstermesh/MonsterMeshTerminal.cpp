@@ -5,6 +5,7 @@
 #include "Gen1Species.h"
 #include "LordLogic.h"
 #include "LordGyms.h"
+#include "LordRoutes.h"
 #include "configuration.h"
 #include "gps/RTC.h"
 #include <time.h>
@@ -326,6 +327,7 @@ void MonsterMeshTerminal::executeLine(const char *line)
         println("  gym         - Legend of Charizard gym list");
         println("  gym fight N - challenge gym N (1-8)");
         println("  fight       - local CPU battle vs neighbor");
+        println("  explore     - wild encounter on the route between gyms");
         println("  help sys    - system commands");
         return;
     }
@@ -503,9 +505,56 @@ void MonsterMeshTerminal::executeLine(const char *line)
         fightFn_(fightCtx_);
         return;
     }
+    if (strncmp(line, "explore", 7) == 0) {
+        // `explore` — wild encounter on the route appropriate to the player's
+        // current badge count. Route 0 = Viridian Forest (pre-Brock), route 7
+        // = Cerulean Cave (post-Blaine, pre-Giovanni). The route table lives
+        // in LordRoutes.cpp; module-side resolves the encounter via
+        // lordPickWildEncounter and starts a local text battle.
+        if (!partyLoaded_) {
+            println("no party loaded — load a SAV first");
+            return;
+        }
+        if (!exploreFn_) {
+            println("explore not wired");
+            return;
+        }
+        uint8_t routeIdx = (uint8_t)__builtin_popcount(lord_.badges);
+        if (routeIdx > 7) routeIdx = 7;
+        const LordRoute *r = lordRoute(routeIdx);
+        char buf[80];
+        snprintf(buf, sizeof(buf), "Heading into %s...",
+                 r ? r->name : "the wild");
+        println(buf);
+        exploreFn_(exploreCtx_, routeIdx);
+        return;
+    }
     char buf[64];
     snprintf(buf, sizeof(buf), "unknown: %s", line);
     println(buf);
+}
+
+void MonsterMeshTerminal::onExploreBattleEnded(uint8_t routeIdx,
+                                               bool playerWon, uint8_t lvl)
+{
+    const LordRoute *r = lordRoute(routeIdx);
+    if (playerWon) {
+        if (lord_.exploreRunsToday < 0xFF)         lord_.exploreRunsToday++;
+        if (lord_.totalRuns        < 0xFFFFFFFFu)  lord_.totalRuns++;
+        // Per-encounter run tracking — simple model: each won wild battle
+        // counts as one cleared "wave", level becomes our highestOppLevel.
+        // No multi-wave chaining yet (will land in a follow-up alongside
+        // healing logic). The single-battle model still feeds best-run news.
+        if (lvl > lord_.bestRunWaves) lord_.bestRunWaves = lvl;
+        char buf[80];
+        snprintf(buf, sizeof(buf), "Defeated wild %s lv%u. Run #%u today.",
+                 r ? r->name : "?", (unsigned)lvl,
+                 (unsigned)lord_.exploreRunsToday);
+        println(buf);
+    } else {
+        println("Wiped out. Returning to base.");
+    }
+    lordSave(lord_);
 }
 
 #endif // T_DECK && !MESHTASTIC_EXCLUDE_MONSTERMESH && HAS_TFT

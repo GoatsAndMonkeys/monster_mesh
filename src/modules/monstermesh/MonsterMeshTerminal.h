@@ -76,6 +76,18 @@ class MonsterMeshTerminal {
         gymFightCtx_ = ctx;
     }
 
+    // Hook for `loc explore` — module spawns a wild CPU battle against a
+    // route encounter pool selected by routeIdx (0..7).
+    typedef void (*ExploreFn)(void *ctx, uint8_t routeIdx);
+    void setExploreFn(ExploreFn fn, void *ctx) {
+        exploreFn_ = fn;
+        exploreCtx_ = ctx;
+    }
+
+    // Called by the module when an explore wild battle ends so the terminal
+    // can update LordRunStats + persist + print a flavor line.
+    void onExploreBattleEnded(uint8_t routeIdx, bool playerWon, uint8_t lvl);
+
     // Called by the module when a gym battle ends — terminal owns LordSave
     // so it advances gymProgress / awards the badge / persists.
     void onGymBattleEnded(uint8_t gymIdx, uint8_t trainerIdx, bool playerWon);
@@ -122,4 +134,6 @@ class MonsterMeshTerminal {
     void               *fightCtx_      = nullptr;
     GymFightFn          gymFightFn_    = nullptr;
     void               *gymFightCtx_   = nullptr;
+    ExploreFn           exploreFn_     = nullptr;
+    void               *exploreCtx_    = nullptr;
 };
