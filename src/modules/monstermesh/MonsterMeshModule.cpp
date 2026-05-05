@@ -950,24 +950,31 @@ int32_t MonsterMeshModule::runOnce()
             } else {
                 textBattleActive_ = false;
 #if HAS_TFT
-                // Wipe the lgfx-rendered battle frame so the terminal panel
-                // doesn't have to "fight through" the leftover pixels when
-                // LVGL repaints. Without this the user can sit on the
-                // press-any-key screen indefinitely while LVGL only redraws
-                // dirty regions over the static battle bitmap.
-                if (g_deviceUiLgfx) {
-                    concurrency::LockGuard g(spiLock);
-                    g_deviceUiLgfx->fillScreen(0x0000);
-                }
+                // Restore LVGL flushing FIRST so subsequent invalidations
+                // actually paint to the screen.
                 lv_display_t *disp = lv_display_get_default();
                 if (disp && savedFlushCb_) {
                     lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
                     savedFlushCb_ = nullptr;
+                }
+                // Then wipe the lgfx-rendered battle frame so the terminal
+                // doesn't have to fight through the press-any-key pixels.
+                // clearClipRect mirrors the battle-start path — without it
+                // the fillScreen could be clipped to whatever sub-region
+                // the last drawSwitchMenu/drawMoveMenu narrowed it to.
+                if (g_deviceUiLgfx) {
+                    concurrency::LockGuard g(spiLock);
+                    g_deviceUiLgfx->clearClipRect();
+                    g_deviceUiLgfx->fillScreen(0x0000);
+                }
+                // Two refreshes: invalidate everything, force a paint, then
+                // invalidate + paint again. A single lv_refr_now after the
+                // flush_cb restore was racing the LVGL incremental redraw
+                // and leaving lgfx text at the bottom of the screen visible.
+                if (disp) {
                     lv_obj_invalidate(lv_screen_active());
-                    // Force an immediate repaint cycle. Without this LVGL
-                    // can sit on its 30-50ms refresh timer before the
-                    // terminal paints over the cleared battle screen, and
-                    // the user thinks the press-any-key state is stuck.
+                    lv_refr_now(disp);
+                    lv_obj_invalidate(lv_screen_active());
                     lv_refr_now(disp);
                 }
 #endif

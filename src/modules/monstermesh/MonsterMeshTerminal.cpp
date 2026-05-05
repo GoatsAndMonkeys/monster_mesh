@@ -284,6 +284,31 @@ void MonsterMeshTerminal::executeLine(const char *line)
 {
     while (*line == ' ') line++;
     if (*line == '\0') return;
+
+    // Pending rematch confirmation: the previous line ran `gym fight N`
+    // against an already-cleared gym, so we asked y/n. Consume this line
+    // as the answer regardless of what it says.
+    if (pendingRematchGym_ >= 0) {
+        int8_t gym = pendingRematchGym_;
+        pendingRematchGym_ = -1;
+        bool yes = (line[0] == 'y' || line[0] == 'Y');
+        if (!yes) {
+            println("Cancelled.");
+            return;
+        }
+        if (!gymFightFn_) { println("gym fight not wired"); return; }
+        if (!partyLoaded_) { println("no party loaded — load a SAV first"); return; }
+        const LordGym *g = lordGym((uint8_t)gym);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Rematch %s of %s...",
+                 g ? g->leaderName : "?", g ? g->city : "?");
+        println(buf);
+        // Rematch starts from trainer 0 — full 5-trainer gauntlet. Badge
+        // already in lord_, so onGymBattleEnded won't double-award.
+        gymFightFn_(gymFightCtx_, (uint8_t)gym, 0);
+        return;
+    }
+
     if (strncmp(line, "help", 4) == 0) {
         const char *args = line + 4;
         while (*args == ' ') ++args;
@@ -404,7 +429,16 @@ void MonsterMeshTerminal::executeLine(const char *line)
                 return;
             }
             if (lordHasBadge(lord_, gymIdx)) {
-                println("gym already cleared");
+                // Cleared already — offer a rematch instead of refusing.
+                // Confirmation captured on the next typed line via
+                // pendingRematchGym_, handled at the top of executeLine().
+                pendingRematchGym_ = (int8_t)gymIdx;
+                const LordGym *g = lordGym(gymIdx);
+                char buf[80];
+                snprintf(buf, sizeof(buf),
+                         "%s already cleared. Rematch? (y/n)",
+                         g ? g->leaderName : "Gym");
+                println(buf);
                 return;
             }
             if (!gymFightFn_) {

@@ -10,6 +10,7 @@
 
 #include <Arduino.h>
 #include "PokemonData.h"
+#include "LordSave.h"
 
 // Forward-declare LVGL types so the header doesn't need lvgl.h.
 struct _lv_obj_t;
@@ -59,6 +60,26 @@ class MonsterMeshTerminal {
         daycareForceCtx_ = ctx;
     }
 
+    // Hook for the `fight` command — kicks off a local CPU battle.
+    typedef void (*FightFn)(void *ctx);
+    void setFightFn(FightFn fn, void *ctx) {
+        fightFn_ = fn;
+        fightCtx_ = ctx;
+    }
+
+    // Hook for `gym fight <N>` — gymIdx is 0..7, trainerIdx is the per-gym
+    // progress slot (0..4; 4 is the leader). Terminal supplies it from
+    // lord_.gymProgress so the module doesn't need to know LordSave.
+    typedef void (*GymFightFn)(void *ctx, uint8_t gymIdx, uint8_t trainerIdx);
+    void setGymFightFn(GymFightFn fn, void *ctx) {
+        gymFightFn_ = fn;
+        gymFightCtx_ = ctx;
+    }
+
+    // Called by the module when a gym battle ends — terminal owns LordSave
+    // so it advances gymProgress / awards the badge / persists.
+    void onGymBattleEnded(uint8_t gymIdx, uint8_t trainerIdx, bool playerWon);
+
     // Called by the module when the deferred SAV-load finishes on the LoRa
     // thread. Wipes the existing scrollback and reprints the party block so
     // the user sees the freshly-loaded data without having to type "party".
@@ -83,8 +104,22 @@ class MonsterMeshTerminal {
     Gen1Party party_ = {};
     bool partyLoaded_ = false;
 
+    // Legend of Charizard — persistent badge / explore-run / news state.
+    // Loaded on first open() per session, saved on any badge change. The
+    // Lord* class names are legacy ("Legend of the Red Dragon" ancestor);
+    // user-facing strings say "Legend of Charizard".
+    LordSave lord_ = {};
+    bool     lordLoaded_ = false;
+    // -1 = no pending rematch confirmation. Otherwise the gym index whose
+    // confirmation prompt is awaiting a yes/no on the next typed line.
+    int8_t   pendingRematchGym_ = -1;
+
     DaycareStatusFn daycareStatusFn_ = nullptr;
     void           *daycareStatusCtx_ = nullptr;
     DaycareForceEventFn daycareForceFn_ = nullptr;
     void               *daycareForceCtx_ = nullptr;
+    FightFn             fightFn_       = nullptr;
+    void               *fightCtx_      = nullptr;
+    GymFightFn          gymFightFn_    = nullptr;
+    void               *gymFightCtx_   = nullptr;
 };
