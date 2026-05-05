@@ -72,7 +72,13 @@ struct LordSave {
     // fights still owed at the current tier.
     uint8_t  gymTierCleared[8];
 
-    uint8_t  reserved[116];                 // forward-compat (PvP, weather)
+    // Highest NG+ tier the Indigo Plateau (Elite Four + Champion) was
+    // cleared at. Only meaningful when leagueCleared == 1; before that,
+    // the gym-9 listing uses leagueCleared as the "ever beaten" gate.
+    uint8_t  e4TierCleared;
+    uint8_t  _pad5[3];
+
+    uint8_t  reserved[112];                 // forward-compat (PvP, weather)
 };
 #pragma pack(pop)
 

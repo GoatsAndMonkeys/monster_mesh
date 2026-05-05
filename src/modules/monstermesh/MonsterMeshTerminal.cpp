@@ -167,6 +167,68 @@ void MonsterMeshTerminal::refocus()
     if (input_) lv_group_focus_obj(input_);
 }
 
+// Cube-root for exp → level using medium-fast curve (level^3 = exp).
+// Picks the largest level whose level^3 fits within `exp`. Returns 1..100.
+static uint8_t levelFromExpMediumFast(uint32_t exp)
+{
+    uint32_t lvl = 1;
+    while (lvl < 100) {
+        uint32_t cube = (lvl + 1) * (lvl + 1) * (lvl + 1);
+        if (cube > exp) break;
+        ++lvl;
+    }
+    return (uint8_t)lvl;
+}
+
+void MonsterMeshTerminal::creditBattleXp(uint32_t totalXp)
+{
+    if (!partyLoaded_ || party_.count == 0 || totalXp == 0) return;
+    // Count survivors (hp > 0).
+    uint8_t alive = 0;
+    for (uint8_t i = 0; i < party_.count && i < 6; ++i) {
+        uint16_t hp = ((uint16_t)party_.mons[i].hp[0] << 8) | party_.mons[i].hp[1];
+        if (hp > 0) alive++;
+    }
+    if (alive == 0) return;
+    uint32_t share = totalXp / alive;
+    if (share == 0) share = 1;
+    bool anyLevel = false;
+    char buf[80];
+    for (uint8_t i = 0; i < party_.count && i < 6; ++i) {
+        uint16_t hp = ((uint16_t)party_.mons[i].hp[0] << 8) | party_.mons[i].hp[1];
+        if (hp == 0) continue;
+        // Read 3-byte big-endian exp, add share, clamp to ~1M (level 100^3).
+        Gen1Pokemon &p = party_.mons[i];
+        uint32_t exp = ((uint32_t)p.exp[0] << 16) |
+                       ((uint32_t)p.exp[1] << 8)  |
+                       (uint32_t)p.exp[2];
+        uint32_t newExp = exp + share;
+        if (newExp > 1000000u) newExp = 1000000u;
+        p.exp[0] = (newExp >> 16) & 0xFF;
+        p.exp[1] = (newExp >> 8)  & 0xFF;
+        p.exp[2] =  newExp        & 0xFF;
+        uint8_t newLevel = levelFromExpMediumFast(newExp);
+        if (newLevel > p.level) {
+            anyLevel = true;
+            snprintf(buf, sizeof(buf), "%.10s grew to level %u!",
+                     (const char *)party_.nicknames[i], (unsigned)newLevel);
+            println(buf);
+            p.level    = newLevel;
+            p.boxLevel = newLevel;
+        }
+    }
+    snprintf(buf, sizeof(buf),
+             "+%u XP (split %u ways).",
+             (unsigned)totalXp, (unsigned)alive);
+    println(buf);
+    if (anyLevel) {
+        // Stat recomputation on level-up isn't done here — the engine
+        // re-derives stats from base+DV+exp+level on each battle start,
+        // so the next fight reflects the new level. SAV write-back is
+        // future work.
+    }
+}
+
 void MonsterMeshTerminal::refreshParty()
 {
     // Append the party listing to the existing scrollback rather than
@@ -287,6 +349,21 @@ void MonsterMeshTerminal::onGymBattleEnded(uint8_t gymIdx,
         }
         println(buf);
     }
+    // Credit XP to the player's party. Trainer fights award 75 * sum of
+    // defeated pokemon levels; the runtime NG+ scaler in lordScaleLevel
+    // bumps roster levels with the tier, so XP scales naturally.
+    const LordGym *g = lordGym(gymIdx);
+    if (g && trainerIdx < LORD_GYM_TRAINERS) {
+        uint32_t totalXp = 0;
+        const LordGymTrainer &t = g->trainers[trainerIdx];
+        for (uint8_t i = 0; i < t.count && i < 6; ++i) {
+            uint8_t lvl = lordScaleLevel(t.party[i].level,
+                                         lord_.ngPlusTier, false);
+            totalXp += (uint32_t)lvl * 75u;
+        }
+        creditBattleXp(totalXp);
+    }
+    refreshParty();
 }
 
 void MonsterMeshTerminal::clearOutput()
@@ -558,12 +635,27 @@ void MonsterMeshTerminal::executeLine(const char *line)
                          (unsigned)i + 1, g->city, g->leaderName, st);
                 println(buf);
             }
-            // Indigo Plateau row uses the current-cycle e4Progress, not the
-            // one-shot leagueCleared flag — after a Champion clear we reset
-            // gyms + e4Progress for NG+, so the row should flip back to
-            // "lock" until the player re-earns all 8 badges.
-            const char *e4st = (lord_.e4Progress >= 5) ? "CLEAR"
-                             : (lord_.badges == 0xFF) ? "open" : "lock";
+            // Indigo Plateau row mirrors the gym tier-cleared logic. CLEAR
+            // only when the league has been beaten AT-OR-ABOVE the current
+            // ngPlusTier. Otherwise show NG+T if badges are full, or
+            // open/lock for a base-game player who hasn't beaten it yet.
+            char e4buf[8];
+            const char *e4st;
+            bool e4ClearedAtTier = lord_.leagueCleared &&
+                                   lord_.e4TierCleared >= lord_.ngPlusTier;
+            if (e4ClearedAtTier) {
+                e4st = "CLEAR";
+            } else if (lord_.badges == 0xFF) {
+                if (lord_.ngPlusTier > 0) {
+                    snprintf(e4buf, sizeof(e4buf), "NG+%u",
+                             (unsigned)lord_.ngPlusTier);
+                    e4st = e4buf;
+                } else {
+                    e4st = "open";
+                }
+            } else {
+                e4st = "lock";
+            }
             snprintf(buf, sizeof(buf), "  9 %-12.12s %-10.10s [%s]",
                      "Indigo Plat.", "Elite Four", e4st);
             println(buf);
@@ -578,6 +670,7 @@ void MonsterMeshTerminal::executeLine(const char *line)
             lord_.badges        = 0xFF;
             lord_.e4Progress    = 0;
             lord_.leagueCleared = 0;
+            lord_.e4TierCleared = 0;
             lord_.ngPlusTier    = 0;
             for (uint8_t i = 0; i < 8; ++i) {
                 lord_.gymProgress[i]    = 5;   // leader cleared
@@ -671,6 +764,12 @@ void MonsterMeshTerminal::onExploreBattleEnded(uint8_t routeIdx,
     } else {
         println("Wiped out. Returning to base.");
     }
+    if (playerWon) {
+        // Wild encounters award 50 * level XP — half of trainer payout
+        // since wild mons are weaker (stat-wise + no leader-stack bonus).
+        creditBattleXp((uint32_t)lvl * 50u);
+        refreshParty();
+    }
     lordSave(lord_);
 }
 
@@ -695,15 +794,25 @@ void MonsterMeshTerminal::onE4BattleEnded(uint8_t memberIdx, bool playerWon)
                  m ? m->name : "?",
                  lordE4Member(memberIdx + 1) ? lordE4Member(memberIdx + 1)->name : "Champion");
         println(buf);
+        // E4 trainers pay 100 * level — slightly above gyms.
+        if (m && m->roster) {
+            uint32_t totalXp = 0;
+            for (uint8_t i = 0; i < m->roster_count && i < 6; ++i) {
+                uint8_t lvl = lordScaleLevel(m->roster[i].level,
+                                             lord_.ngPlusTier, true);
+                totalXp += (uint32_t)lvl * 100u;
+            }
+            creditBattleXp(totalXp);
+        }
+        refreshParty();
         lordSave(lord_);
         return;
     }
-    // Beat the Champion — league cleared. Bump NG+ tier (cap 5), then
-    // reset the league for the next cycle: badges + per-gym progress +
-    // E4 progress all zeroed. leagueCleared stays at 1 (one-shot ever)
-    // so the player can ALWAYS re-enter NG+ from the gym list.
+    // Beat the Champion — league cleared. Record the tier this clear
+    // happened at (mirrors gymTierCleared), then bump NG+ tier (cap 5).
     bool firstClear      = !lord_.leagueCleared;
     lord_.leagueCleared  = 1;
+    lord_.e4TierCleared  = lord_.ngPlusTier;
     uint8_t prevTier     = lord_.ngPlusTier;
     if (lord_.ngPlusTier < 5) {
         lord_.ngPlusTier++;
@@ -732,6 +841,17 @@ void MonsterMeshTerminal::onE4BattleEnded(uint8_t memberIdx, bool playerWon)
         println("Champion defeated again. (NG+5 cap reached.)");
     }
     println("Gym league reset — challenge them all again at the new tier.");
+    // Champion fight XP — biggest payout in the game (150 * level).
+    if (m && m->roster) {
+        uint32_t totalXp = 0;
+        for (uint8_t i = 0; i < m->roster_count && i < 6; ++i) {
+            uint8_t lvl = lordScaleLevel(m->roster[i].level,
+                                         prevTier, true);
+            totalXp += (uint32_t)lvl * 150u;
+        }
+        creditBattleXp(totalXp);
+    }
+    refreshParty();
     lordSave(lord_);
 }
 

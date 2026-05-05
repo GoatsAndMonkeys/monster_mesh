@@ -114,6 +114,12 @@ class MonsterMeshTerminal {
     // tapping the textarea — the battle's lgfx render path stole focus.
     void refocus();
 
+    // Distribute `totalXp` evenly among surviving (hp > 0) party pokemon
+    // and bump their levels via the medium-fast curve (exp = level^3).
+    // In-memory only — the SAV-write path lives in the daycare patcher.
+    // Re-renders the party listing so the user sees the new totals.
+    void creditBattleXp(uint32_t totalXp);
+
   private:
     void println(const char *s);
     void prompt();
