@@ -392,6 +392,7 @@ void MonsterMeshTerminal::executeLine(const char *line)
         println("  gym fight N - challenge gym N (1-8)");
         println("  fight       - local CPU battle vs neighbor");
         println("  explore     - Wild encounters nearby");
+        println("  beacon      - broadcast presence (helps mmt resolve)");
         println("  help sys    - system commands");
         return;
     }
@@ -685,6 +686,12 @@ void MonsterMeshTerminal::executeLine(const char *line)
         return;
     }
     // Indigo Plateau is reached via `gym fight 9`, no standalone command.
+    if (strncmp(line, "beacon", 6) == 0) {
+        if (!beaconFn_) { println("beacon not wired"); return; }
+        beaconFn_(beaconCtx_);
+        println("Beacon broadcast — peers should pick you up shortly.");
+        return;
+    }
     if (strncmp(line, "mmt ", 4) == 0) {
         // T4 wire-format ping: `mmt <short>` sends an MMT:ON DM to the
         // peer whose Meshtastic short_name matches. Module resolves via

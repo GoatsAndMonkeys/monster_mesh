@@ -474,6 +474,10 @@ int32_t MonsterMeshModule::runOnce()
             [](void *ctx) {
                 static_cast<MonsterMeshModule *>(ctx)->daycare_.forceEvent();
             }, this);
+        terminal_.setBeaconFn(
+            [](void *ctx) {
+                static_cast<MonsterMeshModule *>(ctx)->daycare_.forceBeacon();
+            }, this);
         terminal_.setFightFn(
             [](void *ctx) {
                 static_cast<MonsterMeshModule *>(ctx)->requestLocalTextBattle();

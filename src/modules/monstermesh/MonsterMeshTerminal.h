@@ -60,6 +60,15 @@ class MonsterMeshTerminal {
         daycareForceCtx_ = ctx;
     }
 
+    // `beacon` command — manually fire a daycare beacon broadcast. Lets
+    // the user kick a peer's NodeDB / daycare neighbor list before a
+    // multiplayer match instead of waiting for the periodic beacon.
+    typedef void (*BeaconFn)(void *ctx);
+    void setBeaconFn(BeaconFn fn, void *ctx) {
+        beaconFn_ = fn;
+        beaconCtx_ = ctx;
+    }
+
     // Hook for the `fight` command — kicks off a local CPU battle.
     typedef void (*FightFn)(void *ctx);
     void setFightFn(FightFn fn, void *ctx) {
@@ -168,6 +177,8 @@ class MonsterMeshTerminal {
     void           *daycareStatusCtx_ = nullptr;
     DaycareForceEventFn daycareForceFn_ = nullptr;
     void               *daycareForceCtx_ = nullptr;
+    BeaconFn            beaconFn_       = nullptr;
+    void               *beaconCtx_      = nullptr;
     FightFn             fightFn_       = nullptr;
     void               *fightCtx_      = nullptr;
     GymFightFn          gymFightFn_    = nullptr;
