@@ -203,6 +203,14 @@ bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
     if (p->decoded.portnum == meshtastic_PortNum_PRIVATE_APP) {
         return true;
     }
+    // T4: peek at TEXT_MESSAGE_APP DMs only when we have an outstanding
+    // mmt challenge to that sender. handleReceived parses Y/N and returns
+    // CONTINUE so the standard text pipeline still delivers to phone.
+    if (p->decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
+        nodeDB && p->to == nodeDB->getNodeNum() && !isBroadcast(p->to) &&
+        mmtAwaitingReplyFrom_ != 0 && p->from == mmtAwaitingReplyFrom_) {
+        return true;
+    }
     return false;
 }
 
@@ -239,9 +247,28 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             }
         }
     }
-    // Challenge DMs flow through Meshtastic's normal text path — the user
-    // reads them in their phone app and replies as a regular DM. No
-    // module-side parsing for now; battle-start integration lands later.
+    // T4: parse the peer's Y/N reply to our outstanding challenge.
+    if (mp.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
+        mmtAwaitingReplyFrom_ != 0 && mp.from == mmtAwaitingReplyFrom_) {
+        const char *txt = (const char *)mp.decoded.payload.bytes;
+        size_t      len = mp.decoded.payload.size;
+        // Skip leading whitespace; first non-space char is the verdict.
+        size_t i = 0;
+        while (i < len && (txt[i] == ' ' || txt[i] == '\t')) ++i;
+        char first = (i < len) ? txt[i] : '\0';
+        if (first == 'Y' || first == 'y') {
+            pendingMmtAccepted_   = true;
+            pendingMmtAcceptedTx_ = true;
+            mmtAcceptedTxTarget_  = mp.from;
+            mmtAwaitingReplyFrom_ = 0;
+        } else if (first == 'N' || first == 'n') {
+            pendingMmtDeclined_   = true;
+            mmtAwaitingReplyFrom_ = 0;
+        }
+        // Always CONTINUE so the standard chat pipeline still delivers
+        // the reply DM to the user's phone app.
+        return ProcessMessage::CONTINUE;
+    }
     return ProcessMessage::STOP;
 }
 
@@ -273,12 +300,16 @@ void MonsterMeshModule::challengePeerByShortName(const char *peerShort)
         LOG_WARN("[MonsterMesh] %s\n", buf);
         return;
     }
-    snprintf(buf, sizeof(buf), "mmt: %s = 0x%08X — sending MMT:ON",
-             matchedShort, (unsigned)resolved);
+    snprintf(buf, sizeof(buf), "Challenging %s — waiting for reply...",
+             matchedShort);
     terminal_.printLine(buf);
-    LOG_INFO("[MonsterMesh] %s\n", buf);
-    mmtOnTxTarget_  = resolved;
-    pendingMmtOnTx_ = true;
+    LOG_INFO("[MonsterMesh] mmt: challenging %s = 0x%08X\n",
+             matchedShort, (unsigned)resolved);
+    mmtOnTxTarget_       = resolved;
+    pendingMmtOnTx_      = true;
+    mmtAwaitingReplyFrom_ = resolved;
+    strncpy(mmtPeerShort_, matchedShort, sizeof(mmtPeerShort_) - 1);
+    mmtPeerShort_[sizeof(mmtPeerShort_) - 1] = '\0';
 }
 
 void MonsterMeshModule::sendTextDM(uint32_t to, const char *text)
@@ -748,12 +779,38 @@ int32_t MonsterMeshModule::runOnce()
             // chat. No internal MMT: state machine; the receiver just
             // reads + replies normally. Battle-start trigger lands later.
             sendTextDM(mmtOnTxTarget_,
-                       "Want to battle in MonsterMesh? Reply with anything to confirm.");
+                       "Do you want to battle in MonsterMesh? Reply Y or N.");
             LOG_INFO("[MonsterMesh] mmt challenge DM → 0x%08X\n",
                      (unsigned)mmtOnTxTarget_);
         }
     }
-    // (mmt receive: simplified to plain Meshtastic DM — phone handles it.)
+    // T4 reply drain: peer's Y/N to our outstanding challenge.
+    if (pendingMmtAccepted_) {
+        pendingMmtAccepted_ = false;
+        char buf[80];
+        snprintf(buf, sizeof(buf),
+                 "%s accepted! Battle wiring next build — open both terminals.",
+                 mmtPeerShort_[0] ? mmtPeerShort_ : "Peer");
+        terminal_.printLine(buf);
+        LOG_INFO("[MonsterMesh] mmt accept from %s\n",
+                 mmtPeerShort_[0] ? mmtPeerShort_ : "(?)");
+    }
+    if (pendingMmtDeclined_) {
+        pendingMmtDeclined_ = false;
+        char buf[80];
+        snprintf(buf, sizeof(buf), "%s fled.",
+                 mmtPeerShort_[0] ? mmtPeerShort_ : "Peer");
+        terminal_.printLine(buf);
+        LOG_INFO("[MonsterMesh] mmt decline from %s\n",
+                 mmtPeerShort_[0] ? mmtPeerShort_ : "(?)");
+    }
+    if (pendingMmtAcceptedTx_) {
+        pendingMmtAcceptedTx_ = false;
+        if (mmtAcceptedTxTarget_) {
+            sendTextDM(mmtAcceptedTxTarget_,
+                       "Battle on! Open the MonsterMesh terminal.");
+        }
+    }
 
     if (pendingSavWriteBack_) {
         pendingSavWriteBack_ = false;

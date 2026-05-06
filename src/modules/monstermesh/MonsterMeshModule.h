@@ -247,19 +247,18 @@ private:
     char          loadedSavPath_[256] = {};
     volatile bool pendingSavWriteBack_ = false;
 
-    // T4: networked PvP challenge protocol. handleReceived parses MMT: DMs
-    // and stages state here; runOnce drains it on the LoRa thread, never
-    // sending TX from the router context. Per-feedback memory:
+    // T4: simple challenge handshake — sender stores who they're awaiting
+    // a reply from, and handleReceived parses any DM from that peer for
+    // Y/N. Drains stage outbound TX from runOnce per
     // feedback_mm_defer_tx_from_router.md.
-    volatile bool pendingMmtChallengeRx_ = false;   // got MMT:ON from peer
-    volatile bool pendingMmtAcceptRx_    = false;   // got MMT:Y from peer
-    uint32_t      mmtPeerNode_           = 0;       // who challenged us / who we challenged
-    char          mmtPeerShort_[12]      = {};      // their short_name copy
-    uint32_t      mmtRngSeedRx_          = 0;       // seed received in MMT:Y
-    // Outgoing challenge state — set by terminal `mmt @<node>` command
-    // and drained by runOnce so the actual TX leaves the router context.
-    volatile bool pendingMmtOnTx_   = false;
-    uint32_t      mmtOnTxTarget_    = 0;
+    volatile bool pendingMmtOnTx_         = false;  // queued challenge DM
+    uint32_t      mmtOnTxTarget_          = 0;
+    uint32_t      mmtAwaitingReplyFrom_   = 0;      // sender: peer we expect a Y/N from
+    char          mmtPeerShort_[12]       = {};     // peer's short_name for prompts
+    volatile bool pendingMmtAccepted_     = false;  // peer said yes
+    volatile bool pendingMmtDeclined_     = false;  // peer said no
+    volatile bool pendingMmtAcceptedTx_   = false;  // queue "battle start" DM
+    uint32_t      mmtAcceptedTxTarget_    = 0;
 
     // Decoded Gen 1 trainer name from the most recent SAV load. 7 chars + NUL.
     char stagedTrainerName_[8] = {};
