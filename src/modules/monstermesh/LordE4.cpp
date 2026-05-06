@@ -92,8 +92,13 @@ static void writeMonToParty(Gen1Party &out, uint8_t slot,
     uint8_t lvl = lordScaleLevel(src.level, lordCurrentNgPlusTier(),
                                  /*isE4=*/true);
 
+    // NG+ coverage moves — same overlay used for gym leaders.
+    uint8_t moves[4];
+    memcpy(moves, src.moves, 4);
+    lordApplyNgPlusMoves(src.species, lordCurrentNgPlusTier(), moves);
+
     Gen1BattleEngine::BattlePoke tmp;
-    Gen1BattleEngine::initBattlePokeFromBase(tmp, src.species, lvl, src.moves);
+    Gen1BattleEngine::initBattlePokeFromBase(tmp, src.species, lvl, moves);
 
     uint8_t internal = (src.species < 152) ? dexToInternal[src.species] : 0;
 
@@ -115,9 +120,9 @@ static void writeMonToParty(Gen1Party &out, uint8_t slot,
     p.type2   = tmp.type2;
     p.dvs[0]  = 0x88;
     p.dvs[1]  = 0x88;
-    memcpy(p.moves, src.moves, 4);
+    memcpy(p.moves, moves, 4);
     for (int i = 0; i < 4; ++i) {
-        const Gen1MoveData *m = gen1Move(src.moves[i]);
+        const Gen1MoveData *m = gen1Move(moves[i]);
         p.pp[i] = m ? m->pp : 0;
     }
     out.species[slot] = internal;

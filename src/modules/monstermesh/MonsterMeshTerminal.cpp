@@ -390,9 +390,12 @@ void MonsterMeshTerminal::executeLine(const char *line)
         println("  daycare     - daycare status + neighbors");
         println("  gym         - Legend of Charizard gym list");
         println("  gym fight N - challenge gym N (1-8)");
+        println("  bbs         - probe + list online BBS gyms");
+        println("  bbs fight N - challenge online gym N (multiplayer)");
         println("  fight       - local CPU battle vs neighbor");
         println("  explore     - Wild encounters nearby");
         println("  beacon      - broadcast presence (helps mmt resolve)");
+        println("  news        - LoC news ring (badges/runs/NG+)");
         println("  help sys    - system commands");
         return;
     }
@@ -457,6 +460,55 @@ void MonsterMeshTerminal::executeLine(const char *line)
     }
     if (strncmp(line, "party", 5) == 0) {
         showParty();
+        return;
+    }
+    if (strncmp(line, "news", 4) == 0) {
+        if (lord_.newsCount == 0) {
+            println("No news yet. Win a badge to start.");
+            return;
+        }
+        uint32_t now = getValidTime(RTCQualityFromNet, true);
+        // Walk the ring newest -> oldest. newsHead points one past the
+        // most recent entry; back up by 1..newsCount inclusive.
+        for (uint8_t i = 0; i < lord_.newsCount; ++i) {
+            uint8_t idx = (uint8_t)((lord_.newsHead + LORD_NEWS_CAP - 1 - i) % LORD_NEWS_CAP);
+            const LordNewsEntry &e = lord_.news[idx];
+            // "Nh" / "Nd" suffix when both timestamps are valid.
+            char age[16] = "";
+            if (now != 0 && e.ts != 0 && now >= e.ts) {
+                uint32_t s = now - e.ts;
+                if (s < 3600)        snprintf(age, sizeof(age), " (%um)", (unsigned)(s / 60));
+                else if (s < 86400)  snprintf(age, sizeof(age), " (%uh)", (unsigned)(s / 3600));
+                else                 snprintf(age, sizeof(age), " (%ud)", (unsigned)(s / 86400));
+            }
+            char buf[96];
+            switch (e.type) {
+                case LORD_NEWS_BADGE: {
+                    const LordGym *g = lordGym(e.arg1);
+                    snprintf(buf, sizeof(buf), "+ Badge: %s (%s)%s",
+                             g ? g->leaderName : "?",
+                             g ? g->city       : "?", age);
+                    break;
+                }
+                case LORD_NEWS_BEST_RUN:
+                    snprintf(buf, sizeof(buf), "* New best run: %u waves%s",
+                             (unsigned)e.arg2, age);
+                    break;
+                case LORD_NEWS_CENTURY:
+                    snprintf(buf, sizeof(buf), "= %u total runs%s",
+                             (unsigned)e.arg2, age);
+                    break;
+                case LORD_NEWS_RUN_ENDED:
+                    snprintf(buf, sizeof(buf), ". Run ended: %u waves%s",
+                             (unsigned)e.arg2, age);
+                    break;
+                default:
+                    snprintf(buf, sizeof(buf), "? type=%u arg=%u%s",
+                             (unsigned)e.type, (unsigned)e.arg2, age);
+                    break;
+            }
+            println(buf);
+        }
         return;
     }
     if (strncmp(line, "gym", 3) == 0) {
@@ -685,6 +737,59 @@ void MonsterMeshTerminal::executeLine(const char *line)
         fightFn_(fightCtx_);
         return;
     }
+    // ── BBS gym discovery + fight (Phase C) ─────────────────────────────────
+    // `bbs`            — broadcast probe + list discovered gyms
+    // `bbs list`       — re-show last cached list (no probe)
+    // `bbs fight N`    — start networked battle vs gym N (1-based)
+    if (strncmp(line, "bbs", 3) == 0 &&
+        (line[3] == '\0' || line[3] == ' ' || line[3] == '\t')) {
+        const char *args = line + 3;
+        while (*args == ' ') ++args;
+
+        if (strncmp(args, "fight", 5) == 0) {
+            const char *p = args + 5;
+            while (*p == ' ') ++p;
+            int n = 0;
+            while (*p >= '0' && *p <= '9') { n = n * 10 + (*p - '0'); ++p; }
+            if (n < 1 || n > discoveredCount_) {
+                if (discoveredCount_ == 0) println("no gyms discovered — type `bbs` first");
+                else                       println("usage: bbs fight <1..N>");
+                return;
+            }
+            if (!bbsFightFn_) { println("bbs fight not wired"); return; }
+            uint32_t target = discoveredGyms_[n - 1].nodeNum;
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Challenging gym #%d (%s)...",
+                     n, discoveredGyms_[n - 1].gymName);
+            println(buf);
+            bbsFightFn_(bbsFightCtx_, target);
+            return;
+        }
+
+        if (strncmp(args, "list", 4) == 0) {
+            if (discoveredCount_ == 0) {
+                println("no gyms cached — type `bbs` to probe");
+                return;
+            }
+            char buf[80];
+            for (uint8_t i = 0; i < discoveredCount_; ++i) {
+                const DiscoveredGym &g = discoveredGyms_[i];
+                snprintf(buf, sizeof(buf), "%d. %s [%s] ldr:%s rank:%u",
+                         i + 1, g.gymName, g.badgeName, g.leader, g.rosterSize);
+                println(buf);
+            }
+            return;
+        }
+
+        // Default: trigger a fresh probe.
+        if (!bbsProbeFn_) { println("bbs probe not wired"); return; }
+        discoveredCount_ = 0;     // reset cache; replies will repopulate
+        bbsLastProbeMs_  = millis();
+        println("Probing for BBS gyms (5s)...");
+        bbsProbeFn_(bbsProbeCtx_);
+        return;
+    }
+
     // Indigo Plateau is reached via `gym fight 9`, no standalone command.
     if (strncmp(line, "beacon", 6) == 0) {
         if (!beaconFn_) { println("beacon not wired"); return; }
@@ -822,6 +927,54 @@ void MonsterMeshTerminal::onE4BattleEnded(uint8_t memberIdx, bool playerWon)
     refreshParty();
     lordSave(lord_);
     (void)prevTier;
+}
+
+// ── BBS gym discovery callback (Phase C) ────────────────────────────────────
+
+bool MonsterMeshTerminal::isBbsProbing() const
+{
+    if (bbsLastProbeMs_ == 0) return false;
+    return (millis() - bbsLastProbeMs_) < 10000;
+}
+
+void MonsterMeshTerminal::onBbsReply(uint32_t fromNodeNum, const char *gymName,
+                                       const char *badge, const char *leader,
+                                       uint8_t roster)
+{
+    // Dedupe: if we've already cached this nodeNum, just refresh in-place.
+    DiscoveredGym *slot = nullptr;
+    for (uint8_t i = 0; i < discoveredCount_; ++i) {
+        if (discoveredGyms_[i].nodeNum == fromNodeNum) {
+            slot = &discoveredGyms_[i];
+            break;
+        }
+    }
+    bool isNew = false;
+    if (!slot) {
+        if (discoveredCount_ >= MAX_DISCOVERED_GYMS) {
+            // Cache full — drop the reply but mention it once.
+            char buf[64];
+            snprintf(buf, sizeof(buf), "...+1 more (%s)",
+                     gymName ? gymName : "?");
+            println(buf);
+            return;
+        }
+        slot = &discoveredGyms_[discoveredCount_++];
+        isNew = true;
+    }
+    slot->nodeNum = fromNodeNum;
+    snprintf(slot->gymName,   sizeof(slot->gymName),   "%s", gymName  ? gymName  : "?");
+    snprintf(slot->badgeName, sizeof(slot->badgeName), "%s", badge    ? badge    : "?");
+    snprintf(slot->leader,    sizeof(slot->leader),    "%s", leader   ? leader   : "open");
+    slot->rosterSize = roster;
+
+    if (isNew) {
+        char buf[80];
+        snprintf(buf, sizeof(buf), "%u. %s [%s] ldr:%s rank:%u",
+                 (unsigned)discoveredCount_, slot->gymName, slot->badgeName,
+                 slot->leader, slot->rosterSize);
+        println(buf);
+    }
 }
 
 #endif // T_DECK && !MESHTASTIC_EXCLUDE_MONSTERMESH && HAS_TFT

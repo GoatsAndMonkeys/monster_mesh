@@ -56,3 +56,13 @@ uint8_t lordScaleLevel(uint8_t baseLevel, uint8_t ngPlusTier, bool isE4);
 // through the gym-fight callback chain.
 void    lordSetCurrentNgPlusTier(uint8_t tier);
 uint8_t lordCurrentNgPlusTier();
+
+// NG+ coverage moves: gym/E4 leaders get level-appropriate STAB / coverage
+// moves at higher tiers (e.g. Brock's Onix learns Earthquake at NG+1+).
+// Tier 0 = no change (orig moves stay). Tier 1+ overlays one type-1
+// coverage move into the last slot; tier 2+ adds a type-2 coverage move
+// into slot 2; tier 3+ tops the last slot with Hyper Beam.
+//
+// `dex` is the pokedex number; `moves[4]` is patched in-place. Safe to
+// call when tier == 0 (no-op).
+void lordApplyNgPlusMoves(uint8_t dex, uint8_t tier, uint8_t moves[4]);

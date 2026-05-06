@@ -410,6 +410,7 @@ struct DaycareBeacon {
         char    nickname[11]; // Player nickname (10 + null)
         uint8_t moves[4];
     } pokemon[6];
+    uint8_t  ngPlusTier;    // 0 = base game; 1..5 = Legend of Charizard NG+
 };
 #pragma pack(pop)
 

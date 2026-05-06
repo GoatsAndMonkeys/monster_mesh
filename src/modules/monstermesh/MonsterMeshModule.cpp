@@ -20,6 +20,7 @@
 #include "Gen1Species.h"
 #include "LordRoutes.h"
 #include "LordE4.h"
+#include "LordLogic.h"
 #include "RadioLibInterface.h"
 #if HAS_TFT
 #include "graphics/view/TFT/Themes.h"
@@ -48,6 +49,7 @@ static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out,
                                  char *resolvedSavOut, size_t resolvedSavLen,
                                  char *trainerNameOut, size_t trainerNameLen);
 static bool patchSavOnSdWithDaycareXp(const char *romPath, PokemonDaycare &dc);
+static bool patchSdSavPathWithDaycareXp(const char *sdRel, PokemonDaycare &dc);
 static bool writePartyToSavOnSd(const char *savPath, const Gen1Party &party);
 extern bool initWifi();
 
@@ -177,18 +179,19 @@ int MonsterMeshModule::handleInputEvent(const InputEvent *event)
 
 void MonsterMeshModule::ensureMonsterMeshChannel()
 {
-    // Check if channel 1 already has a name set
+    // No-op if channel 1 already exists. The user owns the PSK setup —
+    // they configured it as the MonsterMesh chat channel and we just ride
+    // along (same path daycare beacons use).
     auto &ch = channels.getByIndex(MONSTERMESH_CHANNEL);
     if (ch.role == meshtastic_Channel_Role_DISABLED ||
         strlen(ch.settings.name) == 0) {
-        // Set up channel 1 as "MonsterMesh Center"
+        // Only write if the slot is completely empty — first-boot setup.
         ch.role = meshtastic_Channel_Role_SECONDARY;
         snprintf(ch.settings.name, sizeof(ch.settings.name), "MonsterMesh");
-        // Use default PSK (no encryption for easy joining)
         ch.settings.psk.size = 1;
-        ch.settings.psk.bytes[0] = 0; // no encryption
+        ch.settings.psk.bytes[0] = 0; // user-driven PSK setup expected
         channels.setChannel(ch);
-        Serial.println("[MonsterMesh] channel 1 configured as 'MonsterMesh Center'");
+        Serial.println("[MonsterMesh] channel 1 default-named 'MonsterMesh' (set PSK in app)");
     }
 }
 
@@ -211,6 +214,7 @@ bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
         mmtAwaitingReplyFrom_ != 0 && p->from == mmtAwaitingReplyFrom_) {
         return true;
     }
+    // (BBS_REPLY arrives via PRIVATE_APP, already accepted above.)
     return false;
 }
 
@@ -224,13 +228,93 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
         LOG_INFO("[MonsterMesh] PRIVATE_APP RX: ch=%u sz=%u from=0x%08X\n",
                  (unsigned)mp.channel, (unsigned)mp.decoded.payload.size,
                  (unsigned)mp.from);
-        if (mp.decoded.payload.size >= sizeof(DaycareBeacon)) {
-            const auto *beacon = reinterpret_cast<const DaycareBeacon *>(mp.decoded.payload.bytes);
+
+        // BBS gym discovery — BBS_REPLY from a gym we probed. Parse and
+        // forward to the terminal cache. Length-prefixed strings:
+        //   u8 nameLen | name[] | u8 badgeLen | badge[]
+        //   u8 leaderLen | leader[] | u8 rosterSize
+        if (mp.decoded.payload.size >= BATTLELINK_HDR_SIZE) {
+            const BattlePacket *bp =
+                (const BattlePacket *)mp.decoded.payload.bytes;
+            if ((PktType)bp->type == PktType::BBS_REPLY) {
+                size_t   plen = mp.decoded.payload.size - BATTLELINK_HDR_SIZE;
+                const uint8_t *p = bp->payload;
+                size_t pos = 0;
+                auto pull = [&](char *out, size_t outCap) -> bool {
+                    if (pos >= plen) return false;
+                    uint8_t len = p[pos++];
+                    if (pos + len > plen) return false;
+                    size_t cp = (len + 1 < outCap) ? len : outCap - 1;
+                    memcpy(out, p + pos, cp);
+                    out[cp] = '\0';
+                    pos += len;
+                    return true;
+                };
+                char gym[24], badge[24], leader[16];
+                if (pull(gym, sizeof(gym)) && pull(badge, sizeof(badge)) &&
+                    pull(leader, sizeof(leader)) && pos < plen) {
+                    uint8_t roster = p[pos];
+                    terminal_.onBbsReply(mp.from, gym, badge, leader, roster);
+                }
+                return ProcessMessage::CONTINUE;
+            }
+
+            // BBS gym fight reply — TEXT_BATTLE_PARTY chunks of the gym's
+            // Gen1Party. Reassemble; once complete, kick off a local battle.
+            if ((PktType)bp->type == PktType::TEXT_BATTLE_PARTY &&
+                bbsFightAwaitParty_ && mp.from == bbsFightTarget_) {
+                if (mp.decoded.payload.size < BATTLELINK_HDR_SIZE + 2)
+                    return ProcessMessage::CONTINUE;
+                uint8_t partIdx   = bp->payload[0];
+                uint8_t partTotal = bp->payload[1];
+                size_t  dataLen   = mp.decoded.payload.size -
+                                    BATTLELINK_HDR_SIZE - 2;
+                const size_t CHUNK = BATTLELINK_MAX_PAYLOAD - 2;
+                if (partTotal == 0 || partTotal > 8) return ProcessMessage::CONTINUE;
+                if (partIdx >= partTotal)            return ProcessMessage::CONTINUE;
+                size_t off = (size_t)partIdx * CHUNK;
+                if (off + dataLen > sizeof(bbsPartyChunks_))
+                    return ProcessMessage::CONTINUE;
+                memcpy(bbsPartyChunks_ + off, bp->payload + 2, dataLen);
+                bbsPartyTotal_     = partTotal;
+                bbsPartyChunkMask_ |= (uint8_t)(1u << partIdx);
+
+                uint8_t fullMask = (uint8_t)((1u << partTotal) - 1u);
+                if ((bbsPartyChunkMask_ & fullMask) == fullMask) {
+                    // Full party received. DON'T call textBattle_.startLocal
+                    // here — handleReceived runs on the LoRa router thread
+                    // and the LovyanGFX screen-clear must happen on the
+                    // main loop. Stage a flag; runOnce picks it up.
+                    if (sizeof(bbsGymParty_) <= sizeof(bbsPartyChunks_))
+                        memcpy(&bbsGymParty_, bbsPartyChunks_,
+                               sizeof(bbsGymParty_));
+                    bbsFightAwaitParty_      = false;
+                    bbsBattleStartPending_   = true;
+                    LOG_INFO("[MonsterMesh] BBS gym party received (%u chunks) "
+                             "from %08X — staging local battle\n",
+                             (unsigned)partTotal, (unsigned)mp.from);
+                }
+                return ProcessMessage::CONTINUE;
+            }
+        }
+
+        // Tolerate older firmware that broadcast the beacon without the
+        // trailing ngPlusTier byte. Copy into a local zero-initialized
+        // struct so the missing byte reads as tier 0.
+        if (mp.decoded.payload.size >= sizeof(DaycareBeacon) - 1) {
+            DaycareBeacon beaconBuf;
+            memset(&beaconBuf, 0, sizeof(beaconBuf));
+            size_t copyLen = mp.decoded.payload.size < sizeof(beaconBuf)
+                                 ? mp.decoded.payload.size
+                                 : sizeof(beaconBuf);
+            memcpy(&beaconBuf, mp.decoded.payload.bytes, copyLen);
+            const DaycareBeacon *beacon = &beaconBuf;
             // type=0x60 is the daycare-beacon discriminator (PokemonDaycare.cpp:433).
             if (beacon->type == 0x60 && beacon->nodeId != nodeDB->getNodeNum()) {
-                LOG_INFO("[MonsterMesh] daycare beacon RX from 0x%08X '%s/%s' party=%u\n",
+                LOG_INFO("[MonsterMesh] daycare beacon RX from 0x%08X '%s/%s' party=%u ng+%u\n",
                          (unsigned)beacon->nodeId, beacon->shortName,
-                         beacon->gameName, (unsigned)beacon->partyCount);
+                         beacon->gameName, (unsigned)beacon->partyCount,
+                         (unsigned)beacon->ngPlusTier);
                 uint8_t prevCount = daycare_.getNeighborCount();
                 daycare_.handleBeacon(*beacon);
                 // New trainer arrived — fire an arrival event. The event is
@@ -247,6 +331,11 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             }
         }
     }
+    // (BBS gym discovery used to parse GYM: text DMs here. The discovery
+    // protocol now lives entirely on PRIVATE_APP via BBS_PING / BBS_REPLY
+    // BattlePackets — handled in the PRIVATE_APP block above. Nothing to
+    // do here for BBS in the text-message path.)
+
     // T4: parse the peer's Y/N reply to our outstanding challenge.
     if (mp.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
         mmtAwaitingReplyFrom_ != 0 && mp.from == mmtAwaitingReplyFrom_) {
@@ -346,10 +435,18 @@ void MonsterMeshModule::daycareStatusString(char *buf, size_t bufLen)
     DC_APPEND("Neighbors: %u\n", (unsigned)nc);
     const auto *ns = daycare_.getNeighbors();
     for (uint8_t i = 0; i < nc && i < 6; ++i) {
-        DC_APPEND("  %s/%s Lv%u\n",
-                  ns[i].shortName[0] ? ns[i].shortName : "?",
-                  ns[i].nickname[0]  ? ns[i].nickname  : "?",
-                  (unsigned)ns[i].level);
+        if (ns[i].ngPlusTier > 0) {
+            DC_APPEND("  %s/%s Lv%u NG+%u\n",
+                      ns[i].shortName[0] ? ns[i].shortName : "?",
+                      ns[i].nickname[0]  ? ns[i].nickname  : "?",
+                      (unsigned)ns[i].level,
+                      (unsigned)ns[i].ngPlusTier);
+        } else {
+            DC_APPEND("  %s/%s Lv%u\n",
+                      ns[i].shortName[0] ? ns[i].shortName : "?",
+                      ns[i].nickname[0]  ? ns[i].nickname  : "?",
+                      (unsigned)ns[i].level);
+        }
     }
 
     const auto &evt = daycare_.getLastEvent();
@@ -502,6 +599,79 @@ int32_t MonsterMeshModule::runOnce()
                 static_cast<MonsterMeshModule *>(ctx)
                     ->challengePeerByShortName(peerShort);
             }, this);
+        // BBS gym discovery probe — user-initiated.  Sends a single silent
+        // BBS_PING BattlePacket on MonsterMesh channel 1 / PRIVATE_APP (port
+        // 256). Same back channel daycare beacons use. NEVER on
+        // TEXT_MESSAGE_APP. NEVER on channel 0. Gyms reply unicast with
+        // BBS_REPLY (parsed in handleReceived above). Asymmetric model:
+        // peer-to-peer T-Decks beacon themselves; gyms do NOT — they only
+        // answer probes.  See feedback memory `feedback_no_public_beacons`.
+        terminal_.setBbsProbeFn(
+            [](void *ctx) {
+                auto *self = static_cast<MonsterMeshModule *>(ctx);
+                if (!service || !router) return;
+                meshtastic_MeshPacket *out = router->allocForSending();
+                if (!out) return;
+                out->to              = NODENUM_BROADCAST;
+                out->channel         = MONSTERMESH_CHANNEL;
+                out->want_ack        = false;
+                out->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
+                uint8_t buf[BATTLELINK_HDR_SIZE];
+                BattlePacket *pkt = (BattlePacket *)buf;
+                memset(buf, 0, sizeof(buf));
+                pkt->type = (uint8_t)PktType::BBS_PING;
+                pkt->setSessionId(0);
+                pkt->seq = 0;
+                memcpy(out->decoded.payload.bytes, buf, sizeof(buf));
+                out->decoded.payload.size = sizeof(buf);
+                service->sendToMesh(out, RX_SRC_LOCAL, true);
+                (void)self;
+            }, this);
+        // BBS gym fight — send-party-once model.
+        //   1. Send a tiny BBS_FIGHT_REQUEST to the gym
+        //   2. Gym responds with TEXT_BATTLE_PARTY chunks (its full Gen1Party)
+        //   3. Once reassembled, run the battle entirely LOCAL (player vs CPU)
+        //   4. On battle end, send BBS_FIGHT_RESULT back to the gym
+        // Way fewer LoRa packets than per-turn lockstep, no party-mirror
+        // weirdness because we have the gym's actual party.
+        terminal_.setBbsFightFn(
+            [](void *ctx, uint32_t gymNodeNum) {
+                auto *self = static_cast<MonsterMeshModule *>(ctx);
+                if (!self->terminal_.hasParty()) {
+                    self->terminal_.printLine("no party loaded — load a SAV first");
+                    return;
+                }
+                if (self->bbsFightActive_ || self->bbsFightAwaitParty_) {
+                    self->terminal_.printLine("bbs fight already in progress");
+                    return;
+                }
+                // Send BBS_FIGHT_REQUEST.
+                if (!service || !router) return;
+                meshtastic_MeshPacket *out = router->allocForSending();
+                if (!out) return;
+                out->to              = gymNodeNum;
+                out->channel         = MONSTERMESH_CHANNEL;
+                out->want_ack        = false;
+                out->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
+
+                uint8_t buf[BATTLELINK_HDR_SIZE];
+                BattlePacket *pkt = (BattlePacket *)buf;
+                memset(buf, 0, sizeof(buf));
+                pkt->type = (uint8_t)PktType::BBS_FIGHT_REQUEST;
+                pkt->setSessionId((uint16_t)(millis() & 0xFFFF));
+                pkt->seq = 0;
+                memcpy(out->decoded.payload.bytes, buf, sizeof(buf));
+                out->decoded.payload.size = sizeof(buf);
+                service->sendToMesh(out, RX_SRC_LOCAL, true);
+
+                self->bbsFightTarget_     = gymNodeNum;
+                self->bbsFightRequestMs_  = millis();
+                self->bbsFightAwaitParty_ = true;
+                self->bbsFightActive_     = false;
+                self->bbsPartyChunkMask_  = 0;
+                self->bbsPartyTotal_      = 0;
+                self->terminal_.printLine("Connecting to gym (waiting for party)...");
+            }, this);
         daycare_.setSendDm([](uint32_t dest, const char *msg, void *ctx) {
             auto *self = static_cast<MonsterMeshModule *>(ctx);
             self->sendTextDM(dest, msg);
@@ -513,7 +683,8 @@ int32_t MonsterMeshModule::runOnce()
         daycare_.setSendBeacon([](const DaycareBeacon &beaconIn, void *ctx) {
             (void)ctx;
             DaycareBeacon beacon = beaconIn;
-            beacon.nodeId = nodeDB->getNodeNum();
+            beacon.nodeId     = nodeDB->getNodeNum();
+            beacon.ngPlusTier = lordCurrentNgPlusTier();
             meshtastic_MeshPacket *p = router->allocForSending();
             if (!p) {
                 LOG_WARN("[MonsterMesh] daycare beacon: packet alloc failed\n");
@@ -816,18 +987,45 @@ int32_t MonsterMeshModule::runOnce()
         }
     }
 
+    // Event-driven daycare-XP flush to .sav. Daycare bumps its
+    // lastEventTime each time runEventCycle fires (the only path that can
+    // change totalXpGained). When that timestamp moves past our high-
+    // watermark, sync once. SD only spins up on real XP change.
+    {
+        bool cartLoaded = emuInitialized_ || emu_.isRunning();
+        uint32_t evtTime = daycare_.getLastEventTime();
+        if (!emulatorActive_ && !browserActive_ && !cartLoaded &&
+            daycare_.isActive() && loadedSavPath_[0] &&
+            evtTime != 0 && evtTime != lastSavSyncedEventTime_) {
+            lastSavSyncedEventTime_ = evtTime;
+            const char *sdRel = loadedSavPath_;
+            if (strncmp(sdRel, "/sd", 3) == 0) sdRel += 3;
+            concurrency::LockGuard g(spiLock);
+            if (patchSdSavPathWithDaycareXp(sdRel, daycare_)) {
+                LOG_INFO("[MonsterMesh] daycare→sav flush: '%s'\n", sdRel);
+            }
+        }
+    }
+
     if (pendingSavWriteBack_) {
         pendingSavWriteBack_ = false;
+        // Cart-loaded gate matches the daycare patcher: emu_.running_ stays
+        // true once a cart starts and never resets, so we OR with
+        // emuInitialized_ which DOES go false on Eject Cart. Both must be
+        // false (= cart not in memory) before we touch the SAV — otherwise
+        // the emu's next writeSaveFile would clobber our XP patch.
+        bool cartLoaded = emuInitialized_ || emu_.isRunning();
         if (!emulatorActive_ && !browserActive_ &&
-            !emu_.isRunning() && terminal_.hasParty() &&
+            !cartLoaded && terminal_.hasParty() &&
             loadedSavPath_[0]) {
             const Gen1Party &p = terminal_.getParty();
             concurrency::LockGuard g(spiLock);
             (void)writePartyToSavOnSd(loadedSavPath_, p);
         } else {
-            LOG_INFO("[MonsterMesh] sav writeback: skipped (emu=%d br=%d run=%d hasParty=%d)\n",
+            LOG_INFO("[MonsterMesh] sav writeback: skipped (emu=%d br=%d cart=%d hasParty=%d path=%d)\n",
                      (int)emulatorActive_, (int)browserActive_,
-                     (int)emu_.isRunning(), (int)terminal_.hasParty());
+                     (int)cartLoaded, (int)terminal_.hasParty(),
+                     (int)(loadedSavPath_[0] != 0));
         }
     }
 
@@ -943,6 +1141,37 @@ int32_t MonsterMeshModule::runOnce()
     // in emu/browser mode, so beacons would just queue up uselessly.
     if (setupDone_ && !emulatorActive_ && !browserActive_ && daycare_.isActive()) {
         daycare_.tick(millis());
+    }
+
+    // ── BBS gym fight start (Phase C-2) ───────────────────────────────────
+    // The PRIVATE_APP TEXT_BATTLE_PARTY chunk handler stages a flag once the
+    // gym's full Gen1Party has been reassembled. Run the screen-clear +
+    // startLocal here on the main loop (LovyanGFX must be touched from this
+    // thread, same as the regular fight path below).
+    if (bbsBattleStartPending_ && !textBattleActive_ && setupDone_ &&
+        !emulatorActive_ && !browserActive_ && terminal_.hasParty()) {
+        bbsBattleStartPending_ = false;
+#if HAS_TFT
+        lv_display_t *disp = lv_display_get_default();
+        if (disp && !savedFlushCb_) {
+            savedFlushCb_ = (void *)disp->flush_cb;
+            lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
+                lv_display_flush_ready(d);
+            });
+        }
+#endif
+        if (g_deviceUiLgfx) {
+            concurrency::LockGuard g(spiLock);
+            g_deviceUiLgfx->clearClipRect();
+            g_deviceUiLgfx->fillScreen(0x0000);
+        }
+        textBattleActive_ = true;
+        bbsFightActive_   = true;
+        textBattle_.startLocal(terminal_.getParty(), bbsGymParty_,
+                                "YOU", "GYM");
+        textBattle_.setHeader("BBS Gym Battle");
+        LOG_INFO("[MonsterMesh] BBS local battle started vs gym 0x%08X\n",
+                 (unsigned)bbsFightTarget_);
     }
 
     // ── T2: text battle ────────────────────────────────────────────────────
@@ -1172,6 +1401,52 @@ int32_t MonsterMeshModule::runOnce()
                 pendingBattleEndedCb_ = true;
                 activeExploreRoute_ = 0xFF;
                 activeExploreLevel_ = 0;
+            } else if (bbsFightActive_) {
+                // BBS gym fight ended locally. Send BBS_FIGHT_RESULT back
+                // to the gym so it can update leader / profile state.
+                bool won = (textBattle_.engineResult() ==
+                            Gen1BattleEngine::Result::P1_WIN);
+                if (service && router && bbsFightTarget_) {
+                    meshtastic_MeshPacket *out = router->allocForSending();
+                    if (out) {
+                        out->to              = bbsFightTarget_;
+                        out->channel         = MONSTERMESH_CHANNEL;
+                        out->want_ack        = false;
+                        out->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
+
+                        const meshtastic_NodeInfoLite *self =
+                            nodeDB ? nodeDB->getMeshNode(nodeDB->getNodeNum())
+                                   : nullptr;
+                        const char *name =
+                            (self && self->has_user) ? self->user.short_name
+                                                     : "anon";
+                        uint8_t nameLen = (uint8_t)strlen(name);
+                        if (nameLen > 12) nameLen = 12;
+
+                        uint8_t buf[BATTLELINK_HDR_SIZE + 14];
+                        BattlePacket *pkt = (BattlePacket *)buf;
+                        memset(buf, 0, sizeof(buf));
+                        pkt->type = (uint8_t)PktType::BBS_FIGHT_RESULT;
+                        pkt->setSessionId(0);
+                        pkt->seq = 0;
+                        pkt->payload[0] = won ? 1 : 0;
+                        pkt->payload[1] = nameLen;
+                        memcpy(pkt->payload + 2, name, nameLen);
+
+                        size_t total = BATTLELINK_HDR_SIZE + 2 + nameLen;
+                        memcpy(out->decoded.payload.bytes, buf, total);
+                        out->decoded.payload.size = total;
+                        service->sendToMesh(out, RX_SRC_LOCAL, true);
+                    }
+                }
+                LOG_INFO("[MonsterMesh] BBS fight ended — %s sent to gym 0x%08X\n",
+                         (textBattle_.engineResult() ==
+                              Gen1BattleEngine::Result::P1_WIN) ? "WIN" : "LOSS",
+                         (unsigned)bbsFightTarget_);
+                bbsFightActive_     = false;
+                bbsFightAwaitParty_ = false;
+                bbsFightTarget_     = 0;
+                bbsPartyChunkMask_  = 0;
             } else if (activeE4Member_ < 5) {
                 // Indigo Plateau: chain to next member on win, like the gym
                 // gauntlet. Final win/loss bubbles to terminal.onE4BattleEnded.
@@ -1685,6 +1960,12 @@ void MonsterMeshModule::ejectROM()
 //
 // Returns true if the SAV was both read and re-written successfully. Even
 // then the patcher may have been a no-op (no XP gained). False ⇒ skipped.
+// Patches the daycare-side accumulated XP into the .sav file at savPath
+// (an SD-relative or "/sd/..." absolute path). Caller is responsible for
+// the cart-loaded gate. Returns true if dc.checkOut() actually wrote
+// changes to the SRAM image.
+static bool patchSdSavPathWithDaycareXp(const char *sdRel, PokemonDaycare &dc);
+
 static bool patchSavOnSdWithDaycareXp(const char *romPath, PokemonDaycare &dc)
 {
     if (!romPath || !romPath[0]) return false;
@@ -1698,7 +1979,12 @@ static bool patchSavOnSdWithDaycareXp(const char *romPath, PokemonDaycare &dc)
     strcpy(dot, ".sav");
     const char *sdRel = savPath;
     if (strncmp(sdRel, "/sd", 3) == 0) sdRel += 3;
+    return patchSdSavPathWithDaycareXp(sdRel, dc);
+}
 
+static bool patchSdSavPathWithDaycareXp(const char *sdRel, PokemonDaycare &dc)
+{
+    if (!sdRel || !sdRel[0]) return false;
     SD.end();
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
     if (!SD.begin(SDCARD_CS, SPI)) {

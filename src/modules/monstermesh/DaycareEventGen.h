@@ -20,6 +20,7 @@ struct DaycareNeighborPokemon {
     char     nickname[11];      // = party[0].nickname (compat)
     uint8_t  partyCount;
     struct { uint8_t species; uint8_t level; char nickname[11]; uint8_t moves[4]; } party[6];
+    uint8_t  ngPlusTier;        // 0 = base game; 1..5 = Legend of Charizard NG+
 };
 
 // ── Event generator ──────────────────────────────────────────────────────────

@@ -406,6 +406,7 @@ void PokemonDaycare::handleBeacon(const DaycareBeacon &beacon) {
         strncpy(neighbors_[slot].nickname, beacon.pokemon[0].nickname, 10);
         neighbors_[slot].nickname[10] = '\0';
     }
+    neighbors_[slot].ngPlusTier = beacon.ngPlusTier;
     neighborLastSeen_[slot] = millis();
 }
 
