@@ -60,6 +60,14 @@ class MonsterMeshTerminal {
         daycareForceCtx_ = ctx;
     }
 
+    // `achievements` command renderer. Same shape as DaycareStatusFn —
+    // fills `buf` with newline-separated lines.
+    typedef void (*DaycareAchievementsFn)(void *ctx, char *buf, size_t bufLen);
+    void setDaycareAchievementsFn(DaycareAchievementsFn fn, void *ctx) {
+        daycareAchFn_  = fn;
+        daycareAchCtx_ = ctx;
+    }
+
     // `beacon` command — manually fire a daycare beacon broadcast. Lets
     // the user kick a peer's NodeDB / daycare neighbor list before a
     // multiplayer match instead of waiting for the periodic beacon.
@@ -114,6 +122,35 @@ class MonsterMeshTerminal {
         e4FightFn_ = fn;
         e4FightCtx_ = ctx;
     }
+
+    // ── BBS gym discovery + fight (Phase C — multiplayer gym gauntlet) ─────
+    // Hook for `bbs` (no args): module broadcasts a `!bbs ping` text-message
+    // to all-nodes. Each running gauntlet node replies unicast with a GYM:
+    // line that lands in onBbsReply(). Terminal collects for ~5s then prints.
+    typedef void (*BbsProbeFn)(void *ctx);
+    void setBbsProbeFn(BbsProbeFn fn, void *ctx) {
+        bbsProbeFn_ = fn;
+        bbsProbeCtx_ = ctx;
+    }
+
+    // Hook for `bbs fight N`: terminal looks up the cached gym at slot N-1
+    // and asks the module to start a networked Gen1 battle vs that node.
+    // (Phase C-2: not yet implemented end-to-end; module-side hook prints
+    // "not yet wired" until the receiver-side handshake lands.)
+    typedef void (*BbsFightFn)(void *ctx, uint32_t gymNodeNum);
+    void setBbsFightFn(BbsFightFn fn, void *ctx) {
+        bbsFightFn_ = fn;
+        bbsFightCtx_ = ctx;
+    }
+
+    // Called by the module when a `GYM:` reply arrives (parsed from a text
+    // message). Adds the gym to the discovered-cache and prints a list line.
+    void onBbsReply(uint32_t fromNodeNum, const char *gymName,
+                    const char *badge, const char *leader, uint8_t roster);
+
+    // Module checks this to decide whether to peek at text DMs for `GYM:`
+    // replies. True for ~10 s after the last `bbs` probe.
+    bool isBbsProbing() const;
 
     // Called by the module when the E4 gauntlet ends. On full clear sets
     // leagueCleared=1 in LordSave (NG+ unlock gate).
@@ -177,6 +214,8 @@ class MonsterMeshTerminal {
     void           *daycareStatusCtx_ = nullptr;
     DaycareForceEventFn daycareForceFn_ = nullptr;
     void               *daycareForceCtx_ = nullptr;
+    DaycareAchievementsFn daycareAchFn_  = nullptr;
+    void                 *daycareAchCtx_ = nullptr;
     BeaconFn            beaconFn_       = nullptr;
     void               *beaconCtx_      = nullptr;
     FightFn             fightFn_       = nullptr;
@@ -189,4 +228,24 @@ class MonsterMeshTerminal {
     void               *e4FightCtx_    = nullptr;
     MmtChallengeFn      mmtFn_         = nullptr;
     void               *mmtCtx_        = nullptr;
+
+    // ── BBS gym discovery (Phase C) ─────────────────────────────────────────
+    // Small cache of gyms heard via the last `bbs` probe. Capacity is a
+    // soft cap — we just print a "...+N more" if more replies come in.
+    static constexpr uint8_t MAX_DISCOVERED_GYMS = 8;
+    struct DiscoveredGym {
+        uint32_t nodeNum;
+        char     gymName[16];
+        char     badgeName[16];
+        char     leader[16];
+        uint8_t  rosterSize;
+    };
+    DiscoveredGym discoveredGyms_[MAX_DISCOVERED_GYMS] = {};
+    uint8_t       discoveredCount_ = 0;
+    uint32_t      bbsLastProbeMs_  = 0;
+
+    BbsProbeFn  bbsProbeFn_  = nullptr;
+    void       *bbsProbeCtx_ = nullptr;
+    BbsFightFn  bbsFightFn_  = nullptr;
+    void       *bbsFightCtx_ = nullptr;
 };

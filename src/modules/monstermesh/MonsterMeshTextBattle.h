@@ -61,11 +61,27 @@ public:
     // when a gym battle continues to the next trainer after a win.
     void nextOpponent(const Gen1Party &cpu, const char *theirTag);
 
+    // Restore the player party to full HP/PP/status. Used between MMG gym
+    // ladder fights — Pokemon Center semantics.
+    void healPlayer();
+
+    // Override the "Press any key to exit." prompt shown on the result
+    // screen. Module sets this to "Press any key for next gym member."
+    // when a gym-ladder fight ended in a win and another trainer is on
+    // deck. Empty string falls back to the default exit text.
+    void setEndPrompt(const char *txt) {
+        if (!txt) txt = "";
+        if (strncmp(endPromptOverride_, txt, sizeof(endPromptOverride_)) == 0) return;
+        snprintf(endPromptOverride_, sizeof(endPromptOverride_), "%s", txt);
+        dirty_ = true;
+    }
+
     // Override the header line ("Roguelike T0" / "LoRa Battle T0"). Empty
     // string clears back to the auto-text. Module sets this for gym fights
     // so the user sees "Pewter Gym — Brock 5/5" instead of "Roguelike T..."
     void setHeader(const char *txt) {
         if (!txt) txt = "";
+        if (strncmp(headerOverride_, txt, sizeof(headerOverride_)) == 0) return;
         snprintf(headerOverride_, sizeof(headerOverride_), "%s", txt);
         dirty_ = true;
     }
@@ -170,6 +186,7 @@ private:
 
     bool dirty_ = true;
     char headerOverride_[40] = {};
+    char endPromptOverride_[48] = {};
 
     // Timeouts
     uint32_t lastRecvMs_ = 0;

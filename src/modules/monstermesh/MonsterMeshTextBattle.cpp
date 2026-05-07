@@ -98,6 +98,7 @@ void MonsterMeshTextBattle::startLocal(const Gen1Party &myParty,
                                        const char *theirTag)
 {
     headerOverride_[0] = '\0';
+    endPromptOverride_[0] = '\0';
 
     mode_         = Mode::LOCAL_ROGUELIKE;
     phase_        = Phase::WAIT_ACTION;
@@ -154,6 +155,21 @@ void MonsterMeshTextBattle::startLocal(const Gen1Party &myParty,
         }
     }
     appendLog("A wild battle begins!");
+    dirty_ = true;
+}
+
+void MonsterMeshTextBattle::healPlayer()
+{
+    // HP + status only. PP carries over between gym members so the
+    // ladder still demands move management — Pokemon canon: only the
+    // Pokemon Center (post-gym) restores PP.
+    auto &p = engine_.party(0);
+    for (uint8_t i = 0; i < p.count && i < 6; ++i) {
+        auto &m = p.mons[i];
+        m.hp     = m.maxHp;
+        m.status = 0;
+    }
+    appendLog("HP restored.");
     dirty_ = true;
 }
 
@@ -853,7 +869,7 @@ void MonsterMeshTextBattle::render(lgfx::LGFX_Device *g)
     } else if (phase_ == Phase::FINISHED) {
         g->setTextColor(FG, BG);
         g->setCursor(8, SCREEN_H - 24);
-        g->print("Press any key to exit.");
+        g->print(endPromptOverride_[0] ? endPromptOverride_ : "Press any key to exit.");
     }
     dirty_ = false;
 }

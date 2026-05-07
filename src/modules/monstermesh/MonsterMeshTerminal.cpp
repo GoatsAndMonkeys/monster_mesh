@@ -85,6 +85,15 @@ void MonsterMeshTerminal::open(lv_obj_t *parent)
     lv_obj_set_style_radius(input_, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_pad_left(input_, 4, LV_PART_MAIN | LV_STATE_DEFAULT);
 
+    // Make the typing caret stand out — solid accent-color block instead
+    // of LVGL's default thin underline. The character it covers gets
+    // inverted to the dark bg color so it stays legible.
+    lv_obj_set_style_bg_color(input_, lv_color_hex(Themes::accent()),  LV_PART_CURSOR | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(input_,   LV_OPA_COVER,                    LV_PART_CURSOR | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(input_, lv_color_hex(Themes::darkest()), LV_PART_CURSOR | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(input_, 0,                            LV_PART_CURSOR | LV_STATE_DEFAULT);
+    lv_obj_set_style_anim_duration(input_, 400,                         LV_PART_CURSOR | LV_STATE_DEFAULT);
+
     open_ = true;
     g_termInstance = this;
     lv_obj_add_event_cb(input_, term_input_ready_cb, LV_EVENT_READY, nullptr);
@@ -383,19 +392,20 @@ void MonsterMeshTerminal::executeLine(const char *line)
             println("  version     - firmware build");
             println("  echo <text> - print <text>");
             println("  clear       - wipe screen");
+            println("  beacon      - broadcast presence (daycare + mmt)");
             return;
         }
         println("commands:");
         println("  party       - show your loaded SAV party");
         println("  daycare     - daycare status + neighbors");
         println("  gym         - Legend of Charizard gym list");
-        println("  gym fight N - challenge gym N (1-8)");
-        println("  bbs         - probe + list online BBS gyms");
-        println("  bbs fight N - challenge online gym N (multiplayer)");
+        println("  gym fight N - challenge gym N (1-9)");
+        println("  mmg         - discover MonsterMesh Gyms");
+        println("  mmg fight N - challenge MM gym N");
         println("  fight       - local CPU battle vs neighbor");
         println("  explore     - Wild encounters nearby");
-        println("  beacon      - broadcast presence (helps mmt resolve)");
-        println("  news        - LoC news ring (badges/runs/NG+)");
+        println("  news        - LoC news ring");
+        println("  achievements- list achievements earned");
         println("  help sys    - system commands");
         return;
     }
@@ -460,6 +470,27 @@ void MonsterMeshTerminal::executeLine(const char *line)
     }
     if (strncmp(line, "party", 5) == 0) {
         showParty();
+        return;
+    }
+    if (strncmp(line, "achievements", 12) == 0) {
+        if (!daycareAchFn_) {
+            println("achievements not wired.");
+            return;
+        }
+        char buf[1024] = {};
+        daycareAchFn_(daycareAchCtx_, buf, sizeof(buf));
+        const char *p = buf;
+        while (*p) {
+            const char *nl = p;
+            while (*nl && *nl != '\n') ++nl;
+            char tmp[128];
+            size_t n = (size_t)(nl - p);
+            if (n >= sizeof(tmp)) n = sizeof(tmp) - 1;
+            memcpy(tmp, p, n);
+            tmp[n] = '\0';
+            println(tmp);
+            p = (*nl) ? nl + 1 : nl;
+        }
         return;
     }
     if (strncmp(line, "news", 4) == 0) {
@@ -623,18 +654,15 @@ void MonsterMeshTerminal::executeLine(const char *line)
             // lordGymUnlocked() walks the badge bitmask; the E4 row is
             // gated on the full 8/8 + leagueCleared flag.
             char buf[80];
-            if (lord_.ngPlusTier > 0) {
-                snprintf(buf, sizeof(buf),
-                         "Legend of Charizard — NG+%u  runs %u  badges %u/8",
-                         (unsigned)lord_.ngPlusTier,
-                         (unsigned)lord_.exploreRunsToday,
-                         (unsigned)__builtin_popcount(lord_.badges));
-            } else {
-                snprintf(buf, sizeof(buf),
-                         "Legend of Charizard — runs %u  badges %u/8",
-                         (unsigned)lord_.exploreRunsToday,
-                         (unsigned)__builtin_popcount(lord_.badges));
-            }
+            char tierLabel[8];
+            if (lord_.ngPlusTier == 0) snprintf(tierLabel, sizeof(tierLabel), "Kanto");
+            else                       snprintf(tierLabel, sizeof(tierLabel), "NG+%u",
+                                                 (unsigned)lord_.ngPlusTier);
+            snprintf(buf, sizeof(buf),
+                     "Legend of Charizard — %s  runs %u  badges %u/8",
+                     tierLabel,
+                     (unsigned)lord_.exploreRunsToday,
+                     (unsigned)__builtin_popcount(lord_.badges));
             println(buf);
             char st[8];
             for (uint8_t i = 0; i < 8; ++i) {
@@ -737,12 +765,13 @@ void MonsterMeshTerminal::executeLine(const char *line)
         fightFn_(fightCtx_);
         return;
     }
-    // ── BBS gym discovery + fight (Phase C) ─────────────────────────────────
-    // `bbs`            — broadcast probe + list discovered gyms
-    // `bbs list`       — re-show last cached list (no probe)
-    // `bbs fight N`    — start networked battle vs gym N (1-based)
-    if (strncmp(line, "bbs", 3) == 0 &&
-        (line[3] == '\0' || line[3] == ' ' || line[3] == '\t')) {
+    // ── MMG gym discovery + fight (Phase C) ─────────────────────────────────
+    // `mmg`            — broadcast probe + list discovered gyms
+    // `mmg list`       — re-show last cached list (no probe)
+    // `mmg fight N`    — start networked battle vs gym N (1-based)
+    bool isMmg = (strncmp(line, "mmg", 3) == 0) &&
+                 (line[3] == '\0' || line[3] == ' ' || line[3] == '\t');
+    if (isMmg) {
         const char *args = line + 3;
         while (*args == ' ') ++args;
 
@@ -752,11 +781,11 @@ void MonsterMeshTerminal::executeLine(const char *line)
             int n = 0;
             while (*p >= '0' && *p <= '9') { n = n * 10 + (*p - '0'); ++p; }
             if (n < 1 || n > discoveredCount_) {
-                if (discoveredCount_ == 0) println("no gyms discovered — type `bbs` first");
-                else                       println("usage: bbs fight <1..N>");
+                if (discoveredCount_ == 0) println("no gyms discovered — type `mmg` first");
+                else                       println("usage: mmg fight <1..N>");
                 return;
             }
-            if (!bbsFightFn_) { println("bbs fight not wired"); return; }
+            if (!bbsFightFn_) { println("mmg fight not wired"); return; }
             uint32_t target = discoveredGyms_[n - 1].nodeNum;
             char buf[64];
             snprintf(buf, sizeof(buf), "Challenging gym #%d (%s)...",
@@ -768,7 +797,7 @@ void MonsterMeshTerminal::executeLine(const char *line)
 
         if (strncmp(args, "list", 4) == 0) {
             if (discoveredCount_ == 0) {
-                println("no gyms cached — type `bbs` to probe");
+                println("no gyms cached — type `mmg` to probe");
                 return;
             }
             char buf[80];
@@ -782,10 +811,10 @@ void MonsterMeshTerminal::executeLine(const char *line)
         }
 
         // Default: trigger a fresh probe.
-        if (!bbsProbeFn_) { println("bbs probe not wired"); return; }
+        if (!bbsProbeFn_) { println("mmg probe not wired"); return; }
         discoveredCount_ = 0;     // reset cache; replies will repopulate
         bbsLastProbeMs_  = millis();
-        println("Probing for BBS gyms (5s)...");
+        println("Probing for MMG gyms (5s)...");
         bbsProbeFn_(bbsProbeCtx_);
         return;
     }

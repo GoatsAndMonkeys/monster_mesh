@@ -21,6 +21,11 @@
 #include "LordRoutes.h"
 #include "LordE4.h"
 #include "LordLogic.h"
+// Header-only gym helpers shared with the gauntlet (gym) module — used for
+// reconstructing parties from the bulk ladder dump. Pure inline code; no
+// link-time dependency on GauntletModule.cpp.
+#include "gauntlet/Gen1MinimalStats.h"
+#include "showdown_gen1_moves.h"
 #include "RadioLibInterface.h"
 #if HAS_TFT
 #include "graphics/view/TFT/Themes.h"
@@ -84,8 +89,14 @@ static void mmToggle()
 // device-ui hands us the LVGL panel to parent into so the left nav stays visible.
 extern "C" __attribute__((weak)) void monstermesh_set_terminal_cb(void (*cb)(void *parent)) { (void)cb; }
 static lv_obj_t *g_terminalParent = nullptr;
+// ALT-close suppresses re-open from the map-button callback for a brief
+// window. LVGL's keypad indev forwards an ALT press as a CLICK on the
+// focused widget, which would otherwise immediately re-fire mmTerminalToggle
+// and re-open the panel we just closed.
+static uint32_t g_terminalReopenBlockUntilMs = 0;
 static void mmTerminalToggle(void *parent)
 {
+    if (millis() < g_terminalReopenBlockUntilMs) return;
     g_terminalParent = static_cast<lv_obj_t *>(parent);
     if (monsterMeshModule) monsterMeshModule->toggleTerminal();
 }
@@ -152,6 +163,16 @@ int MonsterMeshModule::handleInputEvent(const InputEvent *event)
     }
 
     // Trackball press toggle is handled by GPIO 0 polling in monsterMeshKeyboardRead()
+
+    // Text battle steals all keys while active (otherwise the post-battle
+    // "press any key" never reaches textBattle and the user is stuck).
+    if (textBattleActive_) {
+        if (event->inputEvent == INPUT_BROKER_ANYKEY && event->kbchar != 0) {
+            handleKeyPress(event->kbchar);
+            lastKeyMs_ = millis();
+        }
+        return 1;
+    }
 
     if (!emulatorActive_ && !browserActive_) return 0;  // let Meshtastic handle keys
 
@@ -236,6 +257,41 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
         if (mp.decoded.payload.size >= BATTLELINK_HDR_SIZE) {
             const BattlePacket *bp =
                 (const BattlePacket *)mp.decoded.payload.bytes;
+
+            // T4 phase 3: live PvP routing. TEXT_BATTLE_START kicks off a
+            // receiver-side battle; ACTION/HASH/FORFEIT feed the running
+            // battle's engine. Module catches START to extract the seed
+            // (textBattle.handlePacket throws it away). Defer the actual
+            // engine spin-up to runOnce so the screen ops happen on the
+            // main loop.
+            if ((PktType)bp->type == PktType::TEXT_BATTLE_START &&
+                mp.decoded.payload.size >= BATTLELINK_HDR_SIZE + 14) {
+                if (!textBattleActive_ && !pendingMmtBattleAsReceiver_ &&
+                    !pendingMmtBattleAsInitiator_) {
+                    uint32_t seed = ((uint32_t)bp->payload[0] << 24) |
+                                    ((uint32_t)bp->payload[1] << 16) |
+                                    ((uint32_t)bp->payload[2] <<  8) |
+                                              bp->payload[3];
+                    mmtBattlePeer_    = mp.from;
+                    mmtBattleSeed_    = seed;
+                    mmtBattleSession_ = bp->sessionId();
+                    pendingMmtBattleAsReceiver_ = true;
+                    LOG_INFO("[MonsterMesh] PvP: TEXT_BATTLE_START rx from 0x%08X seed=0x%08X\n",
+                             (unsigned)mp.from, (unsigned)seed);
+                }
+                return ProcessMessage::CONTINUE;
+            }
+            if ((PktType)bp->type == PktType::TEXT_BATTLE_ACTION ||
+                (PktType)bp->type == PktType::TEXT_BATTLE_FORFEIT ||
+                (PktType)bp->type == PktType::TEXT_BATTLE_HASH) {
+                if (textBattleActive_) {
+                    textBattle_.handlePacket(mp.from,
+                                              mp.decoded.payload.bytes,
+                                              mp.decoded.payload.size);
+                }
+                return ProcessMessage::CONTINUE;
+            }
+
             if ((PktType)bp->type == PktType::BBS_REPLY) {
                 size_t   plen = mp.decoded.payload.size - BATTLELINK_HDR_SIZE;
                 const uint8_t *p = bp->payload;
@@ -255,6 +311,102 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                     pull(leader, sizeof(leader)) && pos < plen) {
                     uint8_t roster = p[pos];
                     terminal_.onBbsReply(mp.from, gym, badge, leader, roster);
+                }
+                return ProcessMessage::CONTINUE;
+            }
+
+            // ── Bulk-ladder reply: NAMES (5 trainer name strings) ────────
+            if ((PktType)bp->type == PktType::BBS_LADDER_NAMES &&
+                bbsLadderBulkActive_ && mp.from == bbsFightTarget_) {
+                size_t plen = mp.decoded.payload.size - BATTLELINK_HDR_SIZE;
+                const uint8_t *p = bp->payload;
+                size_t pos = 0;
+                if (pos >= plen) return ProcessMessage::CONTINUE;
+                uint8_t tc = p[pos++];
+                if (tc > 5) tc = 5;
+                memset(bbsLadderNames_, 0, sizeof(bbsLadderNames_));
+                bool ok = true;
+                for (uint8_t i = 0; i < tc; ++i) {
+                    if (pos >= plen) { ok = false; break; }
+                    uint8_t nl = p[pos++];
+                    if (pos + nl > plen) { ok = false; break; }
+                    uint8_t copy = (nl < 16) ? nl : 16;
+                    memcpy(bbsLadderNames_[i], p + pos, copy);
+                    bbsLadderNames_[i][copy] = '\0';
+                    pos += nl;
+                }
+                if (ok) {
+                    bbsLadderHaveNames_ = true;
+                    LOG_INFO("[MonsterMesh] MMG bulk: NAMES rx (%u trainers)\n",
+                             (unsigned)tc);
+                    if (bbsLadderHaveParties_) bbsLadderStartPending_ = true;
+                }
+                return ProcessMessage::CONTINUE;
+            }
+
+            // ── Bulk-ladder reply: PARTIES (5 minimal mon-lists) ─────────
+            if ((PktType)bp->type == PktType::BBS_LADDER_PARTIES &&
+                bbsLadderBulkActive_ && mp.from == bbsFightTarget_) {
+                size_t plen = mp.decoded.payload.size - BATTLELINK_HDR_SIZE;
+                const uint8_t *p = bp->payload;
+                size_t pos = 0;
+                if (pos >= plen) return ProcessMessage::CONTINUE;
+                uint8_t tc = p[pos++];
+                if (tc > 5) tc = 5;
+                memset(bbsLadderParties_, 0, sizeof(bbsLadderParties_));
+                bool ok = true;
+                for (uint8_t t = 0; t < tc && ok; ++t) {
+                    if (pos >= plen) { ok = false; break; }
+                    uint8_t mc = p[pos++];
+                    if (mc > 6) { ok = false; break; }
+                    Gen1Party &gp = bbsLadderParties_[t];
+                    gp.count = mc;
+                    for (uint8_t m = 0; m < mc; ++m) {
+                        if (pos + 6 > plen) { ok = false; break; }
+                        uint8_t dex   = p[pos++];
+                        uint8_t level = p[pos++];
+                        uint8_t mv0   = p[pos++];
+                        uint8_t mv1   = p[pos++];
+                        uint8_t mv2   = p[pos++];
+                        uint8_t mv3   = p[pos++];
+                        Gen1MinimalStats s = gen1MinimalStats(dex, level);
+                        uint8_t internal   = gen1DexToInternal(dex);
+                        Gen1Pokemon &pk    = gp.mons[m];
+                        memset(&pk, 0, sizeof(pk));
+                        pk.species  = internal;
+                        pk.boxLevel = level;
+                        pk.level    = level;
+                        auto setBe16 = [](uint8_t *dst, uint16_t v) {
+                            dst[0] = (uint8_t)(v >> 8); dst[1] = (uint8_t)v;
+                        };
+                        setBe16(pk.maxHp, s.hp);
+                        setBe16(pk.hp,    s.hp);
+                        setBe16(pk.atk,   s.atk);
+                        setBe16(pk.def,   s.def);
+                        setBe16(pk.spd,   s.spd);
+                        setBe16(pk.spc,   s.spc);
+                        pk.type1 = s.type1;
+                        pk.type2 = s.type2;
+                        pk.dvs[0] = 0x88;
+                        pk.dvs[1] = 0x88;
+                        pk.moves[0] = mv0;
+                        pk.moves[1] = mv1;
+                        pk.moves[2] = mv2;
+                        pk.moves[3] = mv3;
+                        for (uint8_t s2 = 0; s2 < 4; ++s2) {
+                            const Gen1MoveData *mv = gen1Move(pk.moves[s2]);
+                            pk.pp[s2] = mv ? mv->pp : (pk.moves[s2] ? 25 : 0);
+                        }
+                        gp.species[m] = internal;
+                        const char *nm = gen1SpeciesName(internal);
+                        snprintf((char *)gp.nicknames[m], 11, "%s", nm ? nm : "MON");
+                    }
+                }
+                if (ok) {
+                    bbsLadderHaveParties_ = true;
+                    LOG_INFO("[MonsterMesh] MMG bulk: PARTIES rx (%u trainers)\n",
+                             (unsigned)tc);
+                    if (bbsLadderHaveNames_) bbsLadderStartPending_ = true;
                 }
                 return ProcessMessage::CONTINUE;
             }
@@ -417,6 +569,37 @@ void MonsterMeshModule::sendTextDM(uint32_t to, const char *text)
     LOG_INFO("[MonsterMesh] sent DM to 0x%08X: %s\n", (unsigned)to, text);
 }
 
+void MonsterMeshModule::achievementsString(char *buf, size_t bufLen)
+{
+    if (!buf || bufLen == 0) return;
+    size_t off = 0;
+    #define ACH_APPEND(...) do { \
+        if (off < bufLen - 1) { \
+            int _w = snprintf(buf + off, bufLen - off, __VA_ARGS__); \
+            if (_w > 0) off += (size_t)_w; \
+            if (off >= bufLen) off = bufLen - 1; \
+        } \
+    } while (0)
+
+    const auto &st = daycare_.getState();
+    uint8_t earned = 0;
+    for (uint8_t i = 0; i < ACH_COUNT; ++i) {
+        if (st.achievementFlags & (1ULL << i)) ++earned;
+    }
+    ACH_APPEND("Achievements: %u/%u\n", (unsigned)earned, (unsigned)ACH_COUNT);
+    if (earned == 0) {
+        ACH_APPEND("(none yet -- keep playing)\n");
+    } else {
+        for (uint8_t i = 0; i < ACH_COUNT; ++i) {
+            if (st.achievementFlags & (1ULL << i)) {
+                ACH_APPEND("  %s\n", achievementDefs[i].name);
+            }
+        }
+    }
+    buf[off] = '\0';
+    #undef ACH_APPEND
+}
+
 void MonsterMeshModule::daycareStatusString(char *buf, size_t bufLen)
 {
     if (!buf || bufLen == 0) return;
@@ -435,18 +618,15 @@ void MonsterMeshModule::daycareStatusString(char *buf, size_t bufLen)
     DC_APPEND("Neighbors: %u\n", (unsigned)nc);
     const auto *ns = daycare_.getNeighbors();
     for (uint8_t i = 0; i < nc && i < 6; ++i) {
-        if (ns[i].ngPlusTier > 0) {
-            DC_APPEND("  %s/%s Lv%u NG+%u\n",
-                      ns[i].shortName[0] ? ns[i].shortName : "?",
-                      ns[i].nickname[0]  ? ns[i].nickname  : "?",
-                      (unsigned)ns[i].level,
-                      (unsigned)ns[i].ngPlusTier);
-        } else {
-            DC_APPEND("  %s/%s Lv%u\n",
-                      ns[i].shortName[0] ? ns[i].shortName : "?",
-                      ns[i].nickname[0]  ? ns[i].nickname  : "?",
-                      (unsigned)ns[i].level);
-        }
+        char tierLabel[8];
+        if (ns[i].ngPlusTier == 0) snprintf(tierLabel, sizeof(tierLabel), "Kanto");
+        else                       snprintf(tierLabel, sizeof(tierLabel), "NG+%u",
+                                            (unsigned)ns[i].ngPlusTier);
+        DC_APPEND("  %s/%s Lv%u %s\n",
+                  ns[i].shortName[0] ? ns[i].shortName : "?",
+                  ns[i].nickname[0]  ? ns[i].nickname  : "?",
+                  (unsigned)ns[i].level,
+                  tierLabel);
     }
 
     const auto &evt = daycare_.getLastEvent();
@@ -571,6 +751,10 @@ int32_t MonsterMeshModule::runOnce()
             [](void *ctx) {
                 static_cast<MonsterMeshModule *>(ctx)->daycare_.forceEvent();
             }, this);
+        terminal_.setDaycareAchievementsFn(
+            [](void *ctx, char *buf, size_t n) {
+                static_cast<MonsterMeshModule *>(ctx)->achievementsString(buf, n);
+            }, this);
         terminal_.setBeaconFn(
             [](void *ctx) {
                 static_cast<MonsterMeshModule *>(ctx)->daycare_.forceBeacon();
@@ -645,7 +829,9 @@ int32_t MonsterMeshModule::runOnce()
                     self->terminal_.printLine("bbs fight already in progress");
                     return;
                 }
-                // Send BBS_FIGHT_REQUEST.
+                // Bulk-ladder path: send BBS_LADDER_REQUEST once. Falls
+                // back to legacy BBS_FIGHT_REQUEST after 5s if the gym
+                // doesn't speak the bulk protocol (handled in runOnce).
                 if (!service || !router) return;
                 meshtastic_MeshPacket *out = router->allocForSending();
                 if (!out) return;
@@ -657,7 +843,7 @@ int32_t MonsterMeshModule::runOnce()
                 uint8_t buf[BATTLELINK_HDR_SIZE];
                 BattlePacket *pkt = (BattlePacket *)buf;
                 memset(buf, 0, sizeof(buf));
-                pkt->type = (uint8_t)PktType::BBS_FIGHT_REQUEST;
+                pkt->type = (uint8_t)PktType::BBS_LADDER_REQUEST;
                 pkt->setSessionId((uint16_t)(millis() & 0xFFFF));
                 pkt->seq = 0;
                 memcpy(out->decoded.payload.bytes, buf, sizeof(buf));
@@ -670,7 +856,18 @@ int32_t MonsterMeshModule::runOnce()
                 self->bbsFightActive_     = false;
                 self->bbsPartyChunkMask_  = 0;
                 self->bbsPartyTotal_      = 0;
-                self->terminal_.printLine("Connecting to gym (waiting for party)...");
+                // Bulk-ladder cache reset.
+                self->bbsLadderTrainerIdx_     = 0;
+                self->bbsLadderCount_          = 5;
+                self->bbsLadderRequestPending_ = false;
+                self->bbsLadderHaveNames_      = false;
+                self->bbsLadderHaveParties_    = false;
+                self->bbsLadderBulkActive_     = true;
+                self->bbsLadderStartPending_   = false;
+                self->bbsLadderRequestSentMs_  = millis();
+                memset(self->bbsLadderNames_,   0, sizeof(self->bbsLadderNames_));
+                memset(self->bbsLadderParties_, 0, sizeof(self->bbsLadderParties_));
+                self->terminal_.printLine("Connecting to gym (bulk ladder)...");
             }, this);
         daycare_.setSendDm([](uint32_t dest, const char *msg, void *ctx) {
             auto *self = static_cast<MonsterMeshModule *>(ctx);
@@ -678,7 +875,22 @@ int32_t MonsterMeshModule::runOnce()
         }, this);
         daycare_.setBroadcast([](const char *msg, void *ctx) {
             auto *self = static_cast<MonsterMeshModule *>(ctx);
-            self->sendTextDM(NODENUM_BROADCAST, msg);
+            // Achievement / daycare announcements ride MM channel 1 (the
+            // MonsterMesh chat channel) so other MM users see them in
+            // their feed without polluting the public LongFast channel.
+            (void)self;
+            if (!msg) return;
+            meshtastic_MeshPacket *p = router->allocForSending();
+            if (!p) return;
+            p->to              = NODENUM_BROADCAST;
+            p->channel         = MONSTERMESH_CHANNEL;
+            p->decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
+            size_t len = strlen(msg);
+            if (len > sizeof(p->decoded.payload.bytes)) len = sizeof(p->decoded.payload.bytes);
+            memcpy(p->decoded.payload.bytes, msg, len);
+            p->decoded.payload.size = len;
+            service->sendToMesh(p);
+            LOG_INFO("[MonsterMesh] mm-ch broadcast: %s\n", msg);
         }, this);
         daycare_.setSendBeacon([](const DaycareBeacon &beaconIn, void *ctx) {
             (void)ctx;
@@ -964,11 +1176,18 @@ int32_t MonsterMeshModule::runOnce()
         pendingMmtAccepted_ = false;
         char buf[80];
         snprintf(buf, sizeof(buf),
-                 "%s accepted! Battle wiring next build — open both terminals.",
+                 "%s accepted! Starting battle...",
                  mmtPeerShort_[0] ? mmtPeerShort_ : "Peer");
         terminal_.printLine(buf);
-        LOG_INFO("[MonsterMesh] mmt accept from %s\n",
+        LOG_INFO("[MonsterMesh] mmt accept from %s — kicking off PvP\n",
                  mmtPeerShort_[0] ? mmtPeerShort_ : "(?)");
+        // T4 phase 3: stage the actual battle launch. runOnce drains it on
+        // the main loop, where it's safe to swap LVGL's flush_cb and clear
+        // the LGFX framebuffer.
+        if (mmtAcceptedTxTarget_ && terminal_.hasParty()) {
+            mmtBattlePeer_ = mmtAcceptedTxTarget_;
+            pendingMmtBattleAsInitiator_ = true;
+        }
     }
     if (pendingMmtDeclined_) {
         pendingMmtDeclined_ = false;
@@ -1143,6 +1362,127 @@ int32_t MonsterMeshModule::runOnce()
         daycare_.tick(millis());
     }
 
+    // ── T4 phase 3: live PvP battle launch ────────────────────────────────
+    // Both initiator and receiver land here on the main loop. Same screen
+    // setup as the gym fight start path (flush_cb suppression + LGFX
+    // clear), then drive textBattle_ into NETWORKED mode.
+    if ((pendingMmtBattleAsInitiator_ || pendingMmtBattleAsReceiver_) &&
+        !textBattleActive_ && setupDone_ && !emulatorActive_ &&
+        !browserActive_ && terminal_.hasParty()) {
+        bool asInitiator = pendingMmtBattleAsInitiator_;
+        pendingMmtBattleAsInitiator_ = false;
+        pendingMmtBattleAsReceiver_  = false;
+#if HAS_TFT
+        lv_display_t *disp = lv_display_get_default();
+        if (disp && !savedFlushCb_) {
+            savedFlushCb_ = (void *)disp->flush_cb;
+            lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
+                lv_display_flush_ready(d);
+            });
+        }
+#endif
+        if (g_deviceUiLgfx) {
+            concurrency::LockGuard g(spiLock);
+            g_deviceUiLgfx->clearClipRect();
+            g_deviceUiLgfx->fillScreen(0x0000);
+        }
+        textBattleActive_ = true;
+        if (asInitiator) {
+            textBattle_.startNetworkedAsInitiator(mmtBattlePeer_,
+                                                   terminal_.getParty());
+            char hdr[40];
+            snprintf(hdr, sizeof(hdr), "MMT vs %.4s",
+                     mmtPeerShort_[0] ? mmtPeerShort_ : "Peer");
+            textBattle_.setHeader(hdr);
+            LOG_INFO("[MonsterMesh] PvP: started as initiator vs 0x%08X\n",
+                     (unsigned)mmtBattlePeer_);
+        } else {
+            textBattle_.startNetworkedAsReceiver(mmtBattlePeer_,
+                                                  terminal_.getParty(),
+                                                  mmtBattleSeed_);
+            char hdr[40];
+            snprintf(hdr, sizeof(hdr), "MMT incoming");
+            textBattle_.setHeader(hdr);
+            LOG_INFO("[MonsterMesh] PvP: started as receiver from 0x%08X seed=0x%08X\n",
+                     (unsigned)mmtBattlePeer_, (unsigned)mmtBattleSeed_);
+        }
+    }
+
+    // ── MMG bulk ladder: kick off battle 0 once both reply packets in ─────
+    if (bbsLadderStartPending_ && !textBattleActive_ && setupDone_ &&
+        !emulatorActive_ && !browserActive_ && terminal_.hasParty()) {
+        bbsLadderStartPending_ = false;
+        bbsLadderTrainerIdx_ = 0;
+#if HAS_TFT
+        lv_display_t *disp = lv_display_get_default();
+        if (disp && !savedFlushCb_) {
+            savedFlushCb_ = (void *)disp->flush_cb;
+            lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
+                lv_display_flush_ready(d);
+            });
+        }
+#endif
+        if (g_deviceUiLgfx) {
+            concurrency::LockGuard g(spiLock);
+            g_deviceUiLgfx->clearClipRect();
+            g_deviceUiLgfx->fillScreen(0x0000);
+        }
+        textBattleActive_ = true;
+        bbsFightActive_   = true;
+        textBattle_.startLocal(terminal_.getParty(),
+                                bbsLadderParties_[0],
+                                "YOU",
+                                bbsLadderNames_[0][0] ? bbsLadderNames_[0] : "GYM");
+        char hdr[40];
+        snprintf(hdr, sizeof(hdr), "MM Gym - %.16s 1/5",
+                 bbsLadderNames_[0][0] ? bbsLadderNames_[0] : "Trainer");
+        textBattle_.setHeader(hdr);
+        LOG_INFO("[MonsterMesh] MMG bulk ladder started (trainer 0/5)\n");
+    }
+
+    // ── MMG gym ladder: send next REQUEST after a win ─────────────────────
+    if (bbsLadderRequestPending_ && bbsFightTarget_ && service && router) {
+        bbsLadderRequestPending_ = false;
+        meshtastic_MeshPacket *out = router->allocForSending();
+        if (out) {
+            out->to              = bbsFightTarget_;
+            out->channel         = MONSTERMESH_CHANNEL;
+            out->want_ack        = false;
+            out->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
+            uint8_t buf[BATTLELINK_HDR_SIZE];
+            BattlePacket *pkt = (BattlePacket *)buf;
+            memset(buf, 0, sizeof(buf));
+            pkt->type = (uint8_t)PktType::BBS_FIGHT_REQUEST;
+            pkt->setSessionId((uint16_t)(millis() & 0xFFFF));
+            pkt->seq = 0;
+            memcpy(out->decoded.payload.bytes, buf, sizeof(buf));
+            out->decoded.payload.size = sizeof(buf);
+            service->sendToMesh(out, RX_SRC_LOCAL, true);
+            bbsFightAwaitParty_ = true;
+            LOG_INFO("[MonsterMesh] MMG ladder: requesting trainer %u/%u\n",
+                     (unsigned)bbsLadderTrainerIdx_ + 1,
+                     (unsigned)bbsLadderCount_);
+        }
+    }
+
+    // ── MMG ladder continuation — chunks complete with battle still up ────
+    // Distinct from the fresh-start path: here the textBattle is already
+    // active from the previous trainer; just swap opponents.
+    if (bbsBattleStartPending_ && textBattleActive_ &&
+        bbsLadderTrainerIdx_ != 0xFF && bbsLadderTrainerIdx_ > 0) {
+        bbsBattleStartPending_ = false;
+        textBattle_.nextOpponent(bbsGymParty_, "GYM");
+        char hdr[40];
+        snprintf(hdr, sizeof(hdr), "MM Gym - trainer %u/%u",
+                 (unsigned)bbsLadderTrainerIdx_ + 1,
+                 (unsigned)bbsLadderCount_);
+        textBattle_.setHeader(hdr);
+        bbsFightActive_ = true;
+        LOG_INFO("[MonsterMesh] MMG ladder: trainer %u/%u in the ring\n",
+                 (unsigned)bbsLadderTrainerIdx_ + 1,
+                 (unsigned)bbsLadderCount_);
+    }
+
     // ── BBS gym fight start (Phase C-2) ───────────────────────────────────
     // The PRIVATE_APP TEXT_BATTLE_PARTY chunk handler stages a flag once the
     // gym's full Gen1Party has been reassembled. Run the screen-clear +
@@ -1169,7 +1509,15 @@ int32_t MonsterMeshModule::runOnce()
         bbsFightActive_   = true;
         textBattle_.startLocal(terminal_.getParty(), bbsGymParty_,
                                 "YOU", "GYM");
-        textBattle_.setHeader("BBS Gym Battle");
+        if (bbsLadderTrainerIdx_ != 0xFF) {
+            char hdr[40];
+            snprintf(hdr, sizeof(hdr), "MM Gym - trainer %u/%u",
+                     (unsigned)bbsLadderTrainerIdx_ + 1,
+                     (unsigned)bbsLadderCount_);
+            textBattle_.setHeader(hdr);
+        } else {
+            textBattle_.setHeader("MM Gym Battle");
+        }
         LOG_INFO("[MonsterMesh] BBS local battle started vs gym 0x%08X\n",
                  (unsigned)bbsFightTarget_);
     }
@@ -1335,6 +1683,22 @@ int32_t MonsterMeshModule::runOnce()
 
     // Tick + render while active.
     if (textBattleActive_ && setupDone_) {
+        // Mid-ladder prompt: as soon as the engine resolves a win in a
+        // bulk-MMG fight with another trainer on deck, replace the
+        // "press any key to exit" text on the result screen with one
+        // that signals there's more coming. Set early (before isActive
+        // flips false on user dismissal) so the player sees it.
+        if (bbsLadderBulkActive_ &&
+            bbsLadderTrainerIdx_ != 0xFF &&
+            bbsLadderTrainerIdx_ + 1 < bbsLadderCount_ &&
+            textBattle_.engineResult() == Gen1BattleEngine::Result::P1_WIN) {
+            textBattle_.setEndPrompt("Press any key for next gym member.");
+        } else if (bbsLadderBulkActive_ &&
+                   textBattle_.engineResult() != Gen1BattleEngine::Result::ONGOING) {
+            // Final fight in the ladder — clear the override so the
+            // default exit text shows.
+            textBattle_.setEndPrompt("");
+        }
         textBattle_.tick(millis());
         if (textBattle_.dirty() && g_deviceUiLgfx) {
             concurrency::LockGuard g(spiLock);
@@ -1401,52 +1765,134 @@ int32_t MonsterMeshModule::runOnce()
                 pendingBattleEndedCb_ = true;
                 activeExploreRoute_ = 0xFF;
                 activeExploreLevel_ = 0;
+            } else if (!bbsFightActive_ && bbsLadderTrainerIdx_ != 0xFF) {
+                // Between-trainers state: result already handled on a
+                // prior tick, we're waiting for the next party's chunks
+                // to arrive. Keep the battle UI alive so the user doesn't
+                // snap back to the terminal between trainers.
+                gauntletContinue = true;
             } else if (bbsFightActive_) {
-                // BBS gym fight ended locally. Send BBS_FIGHT_RESULT back
-                // to the gym so it can update leader / profile state.
+                // A trainer fight just finished. Behavior splits:
+                //   bulk path  → advance locally with the cached parties;
+                //                send BBS_FIGHT_RESULT only at the end.
+                //   legacy     → send result every fight, re-request next.
                 bool won = (textBattle_.engineResult() ==
                             Gen1BattleEngine::Result::P1_WIN);
-                if (service && router && bbsFightTarget_) {
-                    meshtastic_MeshPacket *out = router->allocForSending();
-                    if (out) {
-                        out->to              = bbsFightTarget_;
-                        out->channel         = MONSTERMESH_CHANNEL;
-                        out->want_ack        = false;
-                        out->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
 
-                        const meshtastic_NodeInfoLite *self =
-                            nodeDB ? nodeDB->getMeshNode(nodeDB->getNodeNum())
-                                   : nullptr;
-                        const char *name =
-                            (self && self->has_user) ? self->user.short_name
-                                                     : "anon";
-                        uint8_t nameLen = (uint8_t)strlen(name);
-                        if (nameLen > 12) nameLen = 12;
+                bool inLadder = (bbsLadderTrainerIdx_ != 0xFF);
+                bool isFinal  = !inLadder ||
+                                !won ||
+                                (bbsLadderTrainerIdx_ + 1 >= bbsLadderCount_);
 
-                        uint8_t buf[BATTLELINK_HDR_SIZE + 14];
-                        BattlePacket *pkt = (BattlePacket *)buf;
-                        memset(buf, 0, sizeof(buf));
-                        pkt->type = (uint8_t)PktType::BBS_FIGHT_RESULT;
-                        pkt->setSessionId(0);
-                        pkt->seq = 0;
-                        pkt->payload[0] = won ? 1 : 0;
-                        pkt->payload[1] = nameLen;
-                        memcpy(pkt->payload + 2, name, nameLen);
-
-                        size_t total = BATTLELINK_HDR_SIZE + 2 + nameLen;
-                        memcpy(out->decoded.payload.bytes, buf, total);
-                        out->decoded.payload.size = total;
-                        service->sendToMesh(out, RX_SRC_LOCAL, true);
+                if (bbsLadderBulkActive_ && inLadder && won &&
+                    bbsLadderTrainerIdx_ + 1 < bbsLadderCount_) {
+                    // BULK path, mid-ladder win: advance locally, no LoRa.
+                    bbsLadderTrainerIdx_++;
+                    textBattle_.healPlayer();
+                    const char *nm = bbsLadderNames_[bbsLadderTrainerIdx_];
+                    textBattle_.nextOpponent(bbsLadderParties_[bbsLadderTrainerIdx_],
+                                              nm[0] ? nm : "GYM");
+                    char hdr[40];
+                    snprintf(hdr, sizeof(hdr), "MM Gym - %.16s %u/%u",
+                             nm[0] ? nm : "Trainer",
+                             (unsigned)bbsLadderTrainerIdx_ + 1,
+                             (unsigned)bbsLadderCount_);
+                    textBattle_.setHeader(hdr);
+                    gauntletContinue = true;
+                    LOG_INFO("[MonsterMesh] MMG bulk: advance to trainer %u/%u\n",
+                             (unsigned)bbsLadderTrainerIdx_ + 1,
+                             (unsigned)bbsLadderCount_);
+                } else if (!bbsLadderBulkActive_ && inLadder && won &&
+                           bbsLadderTrainerIdx_ + 1 < bbsLadderCount_) {
+                    // LEGACY path, mid-ladder win: per-trainer ack + new
+                    // request (1-mon parties from old protocol).
+                    if (service && router && bbsFightTarget_) {
+                        meshtastic_MeshPacket *out = router->allocForSending();
+                        if (out) {
+                            out->to              = bbsFightTarget_;
+                            out->channel         = MONSTERMESH_CHANNEL;
+                            out->want_ack        = false;
+                            out->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
+                            const meshtastic_NodeInfoLite *self =
+                                nodeDB ? nodeDB->getMeshNode(nodeDB->getNodeNum())
+                                       : nullptr;
+                            const char *name =
+                                (self && self->has_user) ? self->user.short_name : "anon";
+                            uint8_t nameLen = (uint8_t)strlen(name);
+                            if (nameLen > 12) nameLen = 12;
+                            uint8_t buf[BATTLELINK_HDR_SIZE + 14];
+                            BattlePacket *pkt = (BattlePacket *)buf;
+                            memset(buf, 0, sizeof(buf));
+                            pkt->type = (uint8_t)PktType::BBS_FIGHT_RESULT;
+                            pkt->setSessionId(0);
+                            pkt->seq = 0;
+                            pkt->payload[0] = 1;
+                            pkt->payload[1] = nameLen;
+                            memcpy(pkt->payload + 2, name, nameLen);
+                            size_t total = BATTLELINK_HDR_SIZE + 2 + nameLen;
+                            memcpy(out->decoded.payload.bytes, buf, total);
+                            out->decoded.payload.size = total;
+                            service->sendToMesh(out, RX_SRC_LOCAL, true);
+                        }
                     }
+                    bbsLadderTrainerIdx_++;
+                    textBattle_.healPlayer();
+                    char hdr[40];
+                    snprintf(hdr, sizeof(hdr),
+                             "MM Gym - awaiting trainer %u/%u...",
+                             (unsigned)bbsLadderTrainerIdx_ + 1,
+                             (unsigned)bbsLadderCount_);
+                    textBattle_.setHeader(hdr);
+                    bbsFightActive_     = false;
+                    bbsFightAwaitParty_ = false;
+                    bbsPartyChunkMask_  = 0;
+                    bbsPartyTotal_      = 0;
+                    bbsLadderRequestPending_ = true;
+                    gauntletContinue = true;
+                } else if (isFinal) {
+                    // Ladder ended (final win, loss, or non-ladder fight) —
+                    // send a single result packet.
+                    if (service && router && bbsFightTarget_) {
+                        meshtastic_MeshPacket *out = router->allocForSending();
+                        if (out) {
+                            out->to              = bbsFightTarget_;
+                            out->channel         = MONSTERMESH_CHANNEL;
+                            out->want_ack        = false;
+                            out->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
+                            const meshtastic_NodeInfoLite *self =
+                                nodeDB ? nodeDB->getMeshNode(nodeDB->getNodeNum())
+                                       : nullptr;
+                            const char *name =
+                                (self && self->has_user) ? self->user.short_name : "anon";
+                            uint8_t nameLen = (uint8_t)strlen(name);
+                            if (nameLen > 12) nameLen = 12;
+                            uint8_t buf[BATTLELINK_HDR_SIZE + 14];
+                            BattlePacket *pkt = (BattlePacket *)buf;
+                            memset(buf, 0, sizeof(buf));
+                            pkt->type = (uint8_t)PktType::BBS_FIGHT_RESULT;
+                            pkt->setSessionId(0);
+                            pkt->seq = 0;
+                            pkt->payload[0] = won ? 1 : 0;
+                            pkt->payload[1] = nameLen;
+                            memcpy(pkt->payload + 2, name, nameLen);
+                            size_t total = BATTLELINK_HDR_SIZE + 2 + nameLen;
+                            memcpy(out->decoded.payload.bytes, buf, total);
+                            out->decoded.payload.size = total;
+                            service->sendToMesh(out, RX_SRC_LOCAL, true);
+                        }
+                    }
+                    if (won && inLadder) {
+                        terminal_.printLine("MM Gym cleared! You bested the leader.");
+                    }
+                    LOG_INFO("[MonsterMesh] BBS fight ended — %s sent to gym 0x%08X\n",
+                             won ? "WIN" : "LOSS", (unsigned)bbsFightTarget_);
+                    bbsLadderTrainerIdx_  = 0xFF;
+                    bbsLadderBulkActive_  = false;
+                    bbsFightActive_       = false;
+                    bbsFightAwaitParty_   = false;
+                    bbsFightTarget_       = 0;
+                    bbsPartyChunkMask_    = 0;
                 }
-                LOG_INFO("[MonsterMesh] BBS fight ended — %s sent to gym 0x%08X\n",
-                         (textBattle_.engineResult() ==
-                              Gen1BattleEngine::Result::P1_WIN) ? "WIN" : "LOSS",
-                         (unsigned)bbsFightTarget_);
-                bbsFightActive_     = false;
-                bbsFightAwaitParty_ = false;
-                bbsFightTarget_     = 0;
-                bbsPartyChunkMask_  = 0;
             } else if (activeE4Member_ < 5) {
                 // Indigo Plateau: chain to next member on win, like the gym
                 // gauntlet. Final win/loss bubbles to terminal.onE4BattleEnded.
@@ -2586,9 +3032,17 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
         powerFSM.trigger(EVENT_INPUT);
     }
 
-    // ── Ctrl+E / mic button: toggle display modes ──────────────────────
-    if (ascii == 0x05) {  // Ctrl+E — terminal stays open in background; only
-                          // routes keys when emulator + browser are inactive.
+    // ── ALT / mic button: toggle display modes ─────────────────────────
+    // ALT semantics:
+    //   browser/emulator active → exit to Meshtastic (existing behavior)
+    //   battle station (terminal) visible → close it → Meshtastic
+    //   Meshtastic + battle station "running" (terminal exists, has party)
+    //     → show battle station
+    //   Meshtastic + battle station NOT running → fall back to ROM loader
+    //     so the user can load a SAV. Once loaded, future ALT presses go
+    //     straight to battle station.
+    // Emulator toggle (when initialized) lives on SYM+E now, not ALT.
+    if (ascii == 0x05) {
         if (browserActive_) {
             // ── Exit browser → Meshtastic UI ──────────────────────────────
             browserActive_ = false;
@@ -2601,6 +3055,48 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
                 lv_obj_invalidate(lv_screen_active());
             }
 #endif
+            return;
+        }
+
+        if (emulatorActive_) {
+            // ── Exit emulator → Meshtastic UI ─────────────────────────────
+            emulatorActive_ = false;
+            exitEmulatorMode();
+            if (emu_.isRunning()) pendingSave_ = true;
+#if HAS_TFT
+            lv_display_t *disp = lv_display_get_default();
+            if (disp) {
+                lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
+                if (gfx) gfx->clearClipRect();
+                if (savedFlushCb_) {
+                    lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
+                    savedFlushCb_ = nullptr;
+                }
+                lv_obj_invalidate(lv_screen_active());
+            }
+#endif
+            return;
+        }
+
+        // ── Battle station toggle ────────────────────────────────────────
+        if (terminal_.isOpen()) {
+            terminal_.close();
+            terminalActive_ = false;
+            // Block the map-button reopen callback for 600ms — LVGL turns
+            // ALT into a CLICK on the focused widget (map button) and
+            // re-fires mmTerminalToggle, which would immediately re-open
+            // the panel we just hid.
+            g_terminalReopenBlockUntilMs = millis() + 600;
+#if HAS_TFT
+            lv_obj_invalidate(lv_screen_active());
+#endif
+            return;
+        }
+
+        // Battle station not visible. If there's a party loaded (or one
+        // staged from a prior SAV load), open the terminal panel.
+        if (terminal_.hasParty() || terminalPartyStaged_) {
+            toggleTerminal();
             return;
         }
 

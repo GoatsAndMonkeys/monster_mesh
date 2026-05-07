@@ -93,6 +93,37 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     uint8_t e4MemberIdx_      = 0xFF;
     uint8_t activeE4Member_   = 0xFF;
 
+    // ── BBS gym fight state (Phase C-2 send-party-once model) ──────────────
+    // Set by the bbsFightFn callback. Cleared on completion / timeout.
+    uint32_t  bbsFightTarget_     = 0;       // gym node ID we sent REQUEST to
+    uint32_t  bbsFightRequestMs_  = 0;       // millis() of last request
+    bool      bbsFightAwaitParty_ = false;   // collecting TEXT_BATTLE_PARTY chunks
+    bool      bbsFightActive_     = false;   // local battle is running, expect RESULT
+    bool      bbsBattleStartPending_ = false; // chunks complete; runOnce will fillScreen + startLocal
+    uint8_t   bbsPartyChunks_[512] = {};     // reassembly buffer (Gen1Party = 404 B)
+    uint8_t   bbsPartyChunkMask_  = 0;       // bitmask of received chunks
+    uint8_t   bbsPartyTotal_      = 0;       // expected chunk count from sender
+    Gen1Party bbsGymParty_        = {};      // reassembled gym party
+
+    // ── MMG gym ladder ─────────────────────────────────────────────────────
+    // Bulk-dump path (preferred): challenger sends BBS_LADDER_REQUEST once;
+    // gym replies with BBS_LADDER_NAMES + BBS_LADDER_PARTIES carrying all
+    // 5 trainers. Challenger then runs every fight locally with no
+    // mid-ladder LoRa. Falls back to the legacy per-trainer
+    // BBS_FIGHT_REQUEST chain if no bulk reply arrives within ~5s.
+    uint8_t   bbsLadderTrainerIdx_     = 0xFF;  // 0..4 = current trainer; 0xFF = no ladder
+    uint8_t   bbsLadderCount_          = 5;     // total trainers in the ladder
+    bool      bbsLadderRequestPending_ = false; // legacy path: runOnce re-fires REQUEST
+
+    // Bulk-dump cache.
+    char      bbsLadderNames_[5][17]   = {};
+    Gen1Party bbsLadderParties_[5]     = {};
+    bool      bbsLadderHaveNames_      = false;
+    bool      bbsLadderHaveParties_    = false;
+    uint32_t  bbsLadderRequestSentMs_  = 0;     // for bulk-reply timeout fallback
+    bool      bbsLadderBulkActive_     = false; // we're driving the bulk path
+    bool      bbsLadderStartPending_   = false; // both bulk packets in; runOnce kicks off battle 0
+
     bool emulatorActive_     = false;
     bool terminalActive_     = false;
     uint8_t brightness_      = 255;
@@ -185,6 +216,9 @@ public:
     // Fill `buf` with a multi-line daycare status report (newline-separated).
     // Used by the terminal `daycare` command.
     void daycareStatusString(char *buf, size_t bufLen);
+    // Fill `buf` with the achievements list. Used by the terminal
+    // `achievements` command.
+    void achievementsString(char *buf, size_t bufLen);
     const char *getSetupStatus() const { return setupStatus_; }
     // RAW mode: set joypad directly from bitmask (bypasses press/release timer)
     void setJoypadDirect(uint8_t mask) { joypadState_ = mask; kbMask_ = 0; }
@@ -247,6 +281,13 @@ private:
     char          loadedSavPath_[256] = {};
     volatile bool pendingSavWriteBack_ = false;
 
+    // Event-driven daycare-XP → .sav flush. Tracks the last daycare event
+    // we've synced; when daycare.getLastEventTime() advances past it (a
+    // new event = potential XP change) we flush the .sav once. SD I/O
+    // only happens when XP actually moves — typically a couple times per
+    // hour at most.
+    uint32_t      lastSavSyncedEventTime_ = 0;
+
     // T4: simple challenge handshake — sender stores who they're awaiting
     // a reply from, and handleReceived parses any DM from that peer for
     // Y/N. Drains stage outbound TX from runOnce per
@@ -259,6 +300,18 @@ private:
     volatile bool pendingMmtDeclined_     = false;  // peer said no
     volatile bool pendingMmtAcceptedTx_   = false;  // queue "battle start" DM
     uint32_t      mmtAcceptedTxTarget_    = 0;
+
+    // T4 phase 3: live PvP launch. Sender flips
+    // pendingMmtBattleAsInitiator_ when the peer's Y arrives — runOnce
+    // calls textBattle_.startNetworkedAsInitiator and sets up the screen.
+    // Receiver flips pendingMmtBattleAsReceiver_ when a TEXT_BATTLE_START
+    // packet arrives — runOnce calls startNetworkedAsReceiver with the
+    // saved seed/peer.
+    volatile bool pendingMmtBattleAsInitiator_ = false;
+    volatile bool pendingMmtBattleAsReceiver_  = false;
+    uint32_t      mmtBattlePeer_     = 0;
+    uint32_t      mmtBattleSeed_     = 0;
+    uint16_t      mmtBattleSession_  = 0;
 
     // Decoded Gen 1 trainer name from the most recent SAV load. 7 chars + NUL.
     char stagedTrainerName_[8] = {};
