@@ -264,8 +264,13 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             // (textBattle.handlePacket throws it away). Defer the actual
             // engine spin-up to runOnce so the screen ops happen on the
             // main loop.
+            // TEXT_BATTLE_START shares type byte 0x60 with DaycareBeacon
+            // (which is 150+ bytes). Gate by EXACT length so a beacon
+            // doesn't get misrouted as a stray battle-start. Battle-start
+            // is exactly BATTLELINK_HDR_SIZE + 14 bytes.
             if ((PktType)bp->type == PktType::TEXT_BATTLE_START &&
-                mp.decoded.payload.size >= BATTLELINK_HDR_SIZE + 14) {
+                mp.decoded.payload.size == BATTLELINK_HDR_SIZE + 14 &&
+                mp.from != nodeDB->getNodeNum()) {
                 if (!textBattleActive_ && !pendingMmtBattleAsReceiver_ &&
                     !pendingMmtBattleAsInitiator_) {
                     uint32_t seed = ((uint32_t)bp->payload[0] << 24) |
@@ -275,20 +280,35 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                     mmtBattlePeer_    = mp.from;
                     mmtBattleSeed_    = seed;
                     mmtBattleSession_ = bp->sessionId();
-                    pendingMmtBattleAsReceiver_ = true;
+                    pendingMmtBattleAsReceiver_  = true;
+                    mmtBattleReceivePendingMs_   = millis();
                     LOG_INFO("[MonsterMesh] PvP: TEXT_BATTLE_START rx from 0x%08X seed=0x%08X\n",
                              (unsigned)mp.from, (unsigned)seed);
                 }
                 return ProcessMessage::CONTINUE;
             }
-            if ((PktType)bp->type == PktType::TEXT_BATTLE_ACTION ||
-                (PktType)bp->type == PktType::TEXT_BATTLE_FORFEIT ||
-                (PktType)bp->type == PktType::TEXT_BATTLE_HASH) {
+            if (((PktType)bp->type == PktType::TEXT_BATTLE_ACTION ||
+                 (PktType)bp->type == PktType::TEXT_BATTLE_FORFEIT ||
+                 (PktType)bp->type == PktType::TEXT_BATTLE_HASH) &&
+                mp.from != nodeDB->getNodeNum()) {
                 if (textBattleActive_) {
                     textBattle_.handlePacket(mp.from,
                                               mp.decoded.payload.bytes,
                                               mp.decoded.payload.size);
                 }
+                return ProcessMessage::CONTINUE;
+            }
+
+            // Dungeons and MonstersMesh — route to dungeon game engine
+            if ((PktType)bp->type == PktType::DUNGEON_BEACON ||
+                (PktType)bp->type == PktType::DUNGEON_JOIN   ||
+                (PktType)bp->type == PktType::DUNGEON_JOIN_ACK ||
+                (PktType)bp->type == PktType::DUNGEON_CMD    ||
+                (PktType)bp->type == PktType::DUNGEON_STATE  ||
+                (PktType)bp->type == PktType::DUNGEON_MSG    ||
+                (PktType)bp->type == PktType::DUNGEON_PROMPT) {
+                dungeon_.handlePacket(mp.decoded.payload.bytes,
+                                      mp.decoded.payload.size);
                 return ProcessMessage::CONTINUE;
             }
 
@@ -694,6 +714,7 @@ int32_t MonsterMeshModule::runOnce()
         if (setupRetries_ == 0) {
             transport_.begin();
             transport_.setNodeId(nodeDB->getNodeNum());
+            dungeon_.begin();
         }
 
 
@@ -758,6 +779,18 @@ int32_t MonsterMeshModule::runOnce()
         terminal_.setBeaconFn(
             [](void *ctx) {
                 static_cast<MonsterMeshModule *>(ctx)->daycare_.forceBeacon();
+            }, this);
+        terminal_.setLoraOnFn(
+            [](void *ctx) {
+                // Force LoRa TX back on at every layer:
+                //   1. clear MM-side radio park (g_meshSuspended etc.)
+                //   2. flip the Meshtastic config flag tx_enabled = true
+                //   3. persist so it survives reboot
+                auto *self = static_cast<MonsterMeshModule *>(ctx);
+                self->exitEmulatorMode();
+                config.lora.tx_enabled = true;
+                if (nodeDB) nodeDB->saveToDisk(SEGMENT_CONFIG);
+                LOG_INFO("[MonsterMesh] lora cmd: tx_enabled=true persisted\n");
             }, this);
         terminal_.setFightFn(
             [](void *ctx) {
@@ -868,6 +901,15 @@ int32_t MonsterMeshModule::runOnce()
                 memset(self->bbsLadderNames_,   0, sizeof(self->bbsLadderNames_));
                 memset(self->bbsLadderParties_, 0, sizeof(self->bbsLadderParties_));
                 self->terminal_.printLine("Connecting to gym (bulk ladder)...");
+            }, this);
+        terminal_.setDungeonFn(
+            [](void *ctx, const char *verb, const char *arg) {
+                auto *self = static_cast<MonsterMeshModule *>(ctx);
+                self->dungeon_.handleLocalCommand(verb, arg);
+                if (self->dungeon_.isActive() && !self->dungeonActive_) {
+                    self->dungeonActive_ = true;
+                    self->dungeonOverlay_.open();
+                }
             }, this);
         daycare_.setSendDm([](uint32_t dest, const char *msg, void *ctx) {
             auto *self = static_cast<MonsterMeshModule *>(ctx);
@@ -1362,16 +1404,21 @@ int32_t MonsterMeshModule::runOnce()
         daycare_.tick(millis());
     }
 
-    // ── T4 phase 3: live PvP battle launch ────────────────────────────────
-    // Both initiator and receiver land here on the main loop. Same screen
-    // setup as the gym fight start path (flush_cb suppression + LGFX
-    // clear), then drive textBattle_ into NETWORKED mode.
-    if ((pendingMmtBattleAsInitiator_ || pendingMmtBattleAsReceiver_) &&
+    // ── T4 phase 3: live PvP battle launch (sender-side only) ────────────
+    // Receiver-side auto-launch was dropping users into spurious battles
+    // when other-agent gauntlet/dungeon code emitted stray
+    // TEXT_BATTLE_START packets. Drop any pending-receiver flag here so it
+    // never fires the launch path.
+    if (pendingMmtBattleAsReceiver_) {
+        pendingMmtBattleAsReceiver_ = false;
+        LOG_INFO("[MonsterMesh] PvP: ignoring incoming TEXT_BATTLE_START (auto-receiver disabled)\n");
+    }
+
+    if (pendingMmtBattleAsInitiator_ &&
         !textBattleActive_ && setupDone_ && !emulatorActive_ &&
-        !browserActive_ && terminal_.hasParty()) {
+        !browserActive_ && terminalActive_ && terminal_.hasParty()) {
         bool asInitiator = pendingMmtBattleAsInitiator_;
         pendingMmtBattleAsInitiator_ = false;
-        pendingMmtBattleAsReceiver_  = false;
 #if HAS_TFT
         lv_display_t *disp = lv_display_get_default();
         if (disp && !savedFlushCb_) {
@@ -1957,6 +2004,32 @@ int32_t MonsterMeshModule::runOnce()
         }
     }
 
+    // Dungeons and MonstersMesh — tick + render overlay
+    if (setupDone_) {
+        dungeon_.tick(millis());
+        if (dungeonActive_ && g_deviceUiLgfx) {
+            uint32_t now = millis();
+            if (now - lastDungeonRenderMs_ > 5000) {
+                // 5-second gap → device likely woke from light sleep.
+                // Re-steal LVGL flush so the Meshtastic UI doesn't paint over us.
+#if HAS_TFT
+                lv_display_t *disp = lv_display_get_default();
+                if (disp) {
+                    dungeonFlushCb_ = (void *)disp->flush_cb;
+                    lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
+                        lv_display_flush_ready(d);
+                    });
+                    if (g_deviceUiLgfx) g_deviceUiLgfx->clearClipRect();
+                }
+#endif
+                dungeonOverlay_.forceRedraw();
+            }
+            concurrency::LockGuard g(spiLock);
+            dungeonOverlay_.render(g_deviceUiLgfx);
+            lastDungeonRenderMs_ = millis();
+        }
+    }
+
     // Drain any newly-fired daycare event, regardless of whether it was
     // generated by tick() or by triggerArrivalEvent() in handleReceived.
     // Running here keeps all DM TX on the LoRa thread, never the router or
@@ -2325,10 +2398,16 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
     }
     g_symActive = false;
 
-    // ── When emulator or browser is active, route keys to game instead of LVGL
+    // ── When any MonsterMesh mode owns the screen, consume the key and route it
+    // directly to handleKeyFromLVGL instead of letting LVGL also process it.
+    // Without this, Enter in terminal mode fires BOTH LV_EVENT_READY (onSubmit)
+    // AND the InputBroker path (onKey), executing the command twice and producing
+    // spurious "unknown command" errors on every other keypress.
     if (monsterMeshModule && (monsterMeshModule->isEmulatorActive() ||
-                              monsterMeshModule->isBrowserActive() ||
-                              monsterMeshModule->isTextBattleActive())) {
+                              monsterMeshModule->isBrowserActive()  ||
+                              monsterMeshModule->isTerminalActive()  ||
+                              monsterMeshModule->isTextBattleActive() ||
+                              monsterMeshModule->isDungeonActive())) {
         monsterMeshModule->handleKeyFromLVGL(key);
         return; // consume — don't pass to LVGL
     }
@@ -3016,6 +3095,45 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
         return;
     }
 
+    // 'G' — dungeon overlay toggle. Must be checked before terminal routing so
+    // pressing G while the terminal is in the background still works after sleep.
+    // GATED on the dungeon module being compiled in. When excluded via
+    // MESHTASTIC_EXCLUDE_MONSTERMESH_DUNGEON the stubs render nothing, so
+    // toggling the overlay just hijacks LVGL's flush_cb and the screen
+    // appears frozen — typing 'g' in the terminal would freeze it.
+#ifndef MESHTASTIC_EXCLUDE_MONSTERMESH_DUNGEON
+    if ((ascii == 'g' || ascii == 'G') && !emulatorActive_ && !browserActive_ && !textBattleActive_) {
+        dungeonActive_ = !dungeonActive_;
+        if (dungeonActive_) {
+            dungeonOverlay_.open();
+#if HAS_TFT
+            // Suppress LVGL using a separate saved-cb so we never clobber the
+            // emulator/browser/textbattle savedFlushCb_ variable.
+            lv_display_t *disp = lv_display_get_default();
+            if (disp && !dungeonFlushCb_) {
+                dungeonFlushCb_ = (void *)disp->flush_cb;
+                lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
+                    lv_display_flush_ready(d);
+                });
+                if (g_deviceUiLgfx) g_deviceUiLgfx->clearClipRect();
+            }
+#endif
+        } else {
+            dungeonOverlay_.close();
+#if HAS_TFT
+            lv_display_t *disp = lv_display_get_default();
+            if (disp && dungeonFlushCb_) {
+                lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)dungeonFlushCb_);
+                dungeonFlushCb_ = nullptr;
+                lv_obj_invalidate(lv_screen_active());
+            }
+#endif
+        }
+        powerFSM.trigger(EVENT_INPUT);
+        return;
+    }
+#endif // !MESHTASTIC_EXCLUDE_MONSTERMESH_DUNGEON
+
     // Terminal: route ASCII keys to it ONLY when terminal is the foreground
     // (i.e. emulator and browser are both inactive). When the user ALT's into
     // ROM browser or emulator, terminalActive_ stays true so the terminal
@@ -3078,49 +3196,23 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
             return;
         }
 
-        // ── Battle station toggle ────────────────────────────────────────
-        if (terminal_.isOpen()) {
-            terminal_.close();
-            terminalActive_ = false;
-            // Block the map-button reopen callback for 600ms — LVGL turns
-            // ALT into a CLICK on the focused widget (map button) and
-            // re-fires mmTerminalToggle, which would immediately re-open
-            // the panel we just hid.
-            g_terminalReopenBlockUntilMs = millis() + 600;
-#if HAS_TFT
-            lv_obj_invalidate(lv_screen_active());
-#endif
-            return;
-        }
-
-        // Battle station not visible. If there's a party loaded (or one
-        // staged from a prior SAV load), open the terminal panel.
-        if (terminal_.hasParty() || terminalPartyStaged_) {
-            toggleTerminal();
-            return;
-        }
-
+        // ── ALT in chat or terminal → ROM loader ─────────────────────────
+        // textBattle / dungeon consume ALT via their own handleKey path
+        // (they're full-screen and block ALT). The terminal panel is
+        // intentionally NOT closed here — when ROM loader exits we want
+        // to return to the terminal slide, not the Meshtastic map.
         if (!emuInitialized_ && !setupDone_) {
             // Setup hasn't finished (SD not mounted yet)
             LOG_WARN("[MonsterMesh] not ready — status: %s\n", setupStatus_);
             return;
         }
 
-        if (!emuInitialized_) {
-            // ── No ROM loaded → open file browser ─────────────────────────
-            // Park radios BEFORE flipping browserActive_, so other tasks
-            // (DeviceUI map tile loader, LVGL flush) have already quiesced
-            // by the time the browser tick task starts rendering. Otherwise
-            // SX126x sleep() races SD/TFT reads on the shared SPI bus.
-            enterEmulatorMode();
-            browserActive_ = true;
-            // Defer browser_.open() to runOnce on the LoRa thread. Doing the
-            // SD reinit + scan inline here on the LVGL thread races with the
-            // renderBrowser call that runOnce fires immediately when
-            // browserActive_ flips true, and we end up wedged on spiLock with
-            // an empty browser. runOnce will see browserNeedsScan_ and scan.
-            browserNeedsScan_ = true;
+        // ALT always opens the ROM loader (file browser), regardless of
+        // whether a cart was previously loaded. Emulator toggle is on
+        // SYM+E. Park radios + suppress LVGL flush BEFORE flipping
+        // browserActive_ so the bus is quiesced before browser render.
 #if HAS_TFT
+        {
             lv_display_t *disp = lv_display_get_default();
             if (disp && !savedFlushCb_) {
                 savedFlushCb_ = (void *)disp->flush_cb;
@@ -3128,56 +3220,18 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
                     lv_display_flush_ready(d);
                 });
             }
-#endif
-            return;
         }
-
-        // ── Toggle emulator on/off ────────────────────────────────────────
-        // For ENTRY, park radios BEFORE flipping the active flag so concurrent
-        // tasks (LVGL/DeviceUI/SD) quiesce before the emulator render task
-        // takes over the SPI bus. For EXIT, flip BEFORE wake so the emulator
-        // render task stops first, then Meshtastic resumes.
-        if (!emulatorActive_) {
-            enterEmulatorMode();
-            emulatorActive_ = true;
-        } else {
-            emulatorActive_ = false;
-            exitEmulatorMode();
-        }
-        // Flag save for runOnce() — don't save here (SD write blocks LVGL callback)
-        if (!emulatorActive_ && emu_.isRunning()) {
-            pendingSave_ = true;
-        }
-#if HAS_TFT
-        lv_display_t *disp = lv_display_get_default();
-        if (disp) {
-            if (emulatorActive_) {
-                savedFlushCb_ = (void *)disp->flush_cb;
-                lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
-                    lv_display_flush_ready(d);
-                });
-                lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
-                if (gfx) {
-                    gfx->clearClipRect();
-                }
-            } else {
-                lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
-                if (gfx) {
-                    gfx->clearClipRect();
-                }
-                if (savedFlushCb_) {
-                    lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
-                    savedFlushCb_ = nullptr;
-                }
-                lv_obj_invalidate(lv_screen_active());
-            }
+        // Black out the framebuffer immediately so the user doesn't see
+        // the empty map_panel for a few ms while the SD scan runs.
+        if (g_deviceUiLgfx) {
+            concurrency::LockGuard g(spiLock);
+            g_deviceUiLgfx->clearClipRect();
+            g_deviceUiLgfx->fillScreen(0x0000);
         }
 #endif
-#if HAS_SCREEN
-        if (emulatorActive_) requestFocus();
-#endif
-        // Switch keyboard mode to match emulator state
-        kbSetMode(emulatorActive_);
+        enterEmulatorMode();
+        browserActive_ = true;
+        browserNeedsScan_ = true;
         return;
     }
 

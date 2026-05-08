@@ -85,14 +85,11 @@ void MonsterMeshTerminal::open(lv_obj_t *parent)
     lv_obj_set_style_radius(input_, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_pad_left(input_, 4, LV_PART_MAIN | LV_STATE_DEFAULT);
 
-    // Make the typing caret stand out — solid accent-color block instead
-    // of LVGL's default thin underline. The character it covers gets
-    // inverted to the dark bg color so it stays legible.
-    lv_obj_set_style_bg_color(input_, lv_color_hex(Themes::accent()),  LV_PART_CURSOR | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_opa(input_,   LV_OPA_COVER,                    LV_PART_CURSOR | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_color(input_, lv_color_hex(Themes::darkest()), LV_PART_CURSOR | LV_STATE_DEFAULT);
-    lv_obj_set_style_border_width(input_, 0,                            LV_PART_CURSOR | LV_STATE_DEFAULT);
-    lv_obj_set_style_anim_duration(input_, 400,                         LV_PART_CURSOR | LV_STATE_DEFAULT);
+    // Cursor: keep LVGL's default underline shape but bump contrast with
+    // a translucent accent-color overlay. Don't touch anim_duration —
+    // that was the offender that caused keystroke freezes.
+    lv_obj_set_style_bg_color(input_, lv_color_hex(Themes::accent()), LV_PART_CURSOR | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(input_,   LV_OPA_50,                      LV_PART_CURSOR | LV_STATE_DEFAULT);
 
     open_ = true;
     g_termInstance = this;
@@ -234,7 +231,18 @@ void MonsterMeshTerminal::refreshParty()
 void MonsterMeshTerminal::println(const char *s)
 {
     if (!output_) return;
+    // Cap scrollback at MAX_OUTPUT_LINES — every println allocates a fresh
+    // lv_label, and LVGL's static memory pool gets exhausted after a few
+    // hundred lines (especially when DeviceUI is also flooding the screen
+    // with chat-history bubbles). Drop the oldest label first.
+    static constexpr uint32_t MAX_OUTPUT_LINES = 100;
+    while (lv_obj_get_child_count(output_) >= MAX_OUTPUT_LINES) {
+        lv_obj_t *oldest = lv_obj_get_child(output_, 0);
+        if (!oldest) break;
+        lv_obj_delete(oldest);
+    }
     lv_obj_t *lbl = lv_label_create(output_);
+    if (!lbl) return;  // LVGL OOM — drop the line silently
     lv_label_set_text(lbl, s ? s : "");
     lv_obj_set_style_text_color(lbl, lv_color_hex(Themes::lightest()), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(lbl, &lv_font_cozette_13, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -393,6 +401,7 @@ void MonsterMeshTerminal::executeLine(const char *line)
             println("  echo <text> - print <text>");
             println("  clear       - wipe screen");
             println("  beacon      - broadcast presence (daycare + mmt)");
+            println("  lora        - force LoRa TX back on");
             return;
         }
         println("commands:");
@@ -826,6 +835,12 @@ void MonsterMeshTerminal::executeLine(const char *line)
         println("Beacon broadcast — peers should pick you up shortly.");
         return;
     }
+    if (strncmp(line, "lora", 4) == 0) {
+        if (!loraOnFn_) { println("lora hook not wired"); return; }
+        loraOnFn_(loraOnCtx_);
+        println("LoRa TX forced back on.");
+        return;
+    }
     if (strncmp(line, "mmt ", 4) == 0) {
         // T4 wire-format ping: `mmt <short>` sends an MMT:ON DM to the
         // peer whose Meshtastic short_name matches. Module resolves via
@@ -864,6 +879,34 @@ void MonsterMeshTerminal::executeLine(const char *line)
         exploreFn_(exploreCtx_, routeIdx);
         return;
     }
+    // ── Dungeons and MonstersMesh ─────────────────────────────────────────────
+    // `dungeon host`         — become dungeon host
+    // `dungeon join`         — join a dungeon
+    // `dungeon <verb> [arg]` — forward to DungeonGame
+    if (strncmp(line, "dungeon", 7) == 0 && (line[7] == '\0' || line[7] == ' ')) {
+        const char *args = line + 7;
+        while (*args == ' ') ++args;
+        if (*args == '\0') {
+            println("dungeon: host | join | start | party");
+            println("         attack <move> | cast <spell>");
+            println("         switch <n> | item <name> | rest | flee");
+            println("Press G to toggle dungeon overlay.");
+            return;
+        }
+        char verb[16] = {};
+        const char *sp = args;
+        while (*sp && *sp != ' ' && (sp - args) < 15) sp++;
+        memcpy(verb, args, sp - args);
+        while (*sp == ' ') sp++;
+        const char *arg = sp;
+        if (dungeonFn_) {
+            dungeonFn_(dungeonCtx_, verb, arg);
+        } else {
+            println("dungeon: not wired");
+        }
+        return;
+    }
+
     char buf[64];
     snprintf(buf, sizeof(buf), "unknown: %s", line);
     println(buf);

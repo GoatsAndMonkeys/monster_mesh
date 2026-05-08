@@ -2,6 +2,7 @@
 # trunk-ignore-all(ruff/F821)
 # trunk-ignore-all(flake8/F821): For SConstruct imports
 import sys
+import os
 from os.path import join
 import subprocess
 import json
@@ -131,16 +132,51 @@ for pref in userPrefs:
 current_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 build_epoch = int(current_date.timestamp())
 
-# MonsterMesh build number from git rev-list --count HEAD (matches the
-# number we use in firmware-builds/ archive filenames) and current branch
-# name. Both fall back to safe defaults if git isn't available.
+# MonsterMesh build number — increments only when source actually changes,
+# not on every `pio run`. Key = git HEAD hash + short hash of `git status`
+# output (captures uncommitted edits). Two flash operations from the same
+# source state produce the same build number so both T-Decks stay in sync.
+# Counter lives in firmware-builds/.build_counter (gitignored).
+mm_build = "0"
 try:
-    mm_build = subprocess.check_output(
-        ["git", "rev-list", "--count", "HEAD"],
-        cwd=env["PROJECT_DIR"], stderr=subprocess.DEVNULL
-    ).decode().strip()
+    import hashlib
+    parent_dir = os.path.dirname(env["PROJECT_DIR"])
+    counter_dir = os.path.join(parent_dir, "firmware-builds")
+    counter_path = os.path.join(counter_dir, ".build_counter")
+
+    # Build a key that uniquely identifies the current source state.
+    try:
+        head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=env["PROJECT_DIR"], stderr=subprocess.DEVNULL
+        ).decode().strip()
+        dirty = subprocess.check_output(
+            ["git", "status", "--porcelain"],
+            cwd=env["PROJECT_DIR"], stderr=subprocess.DEVNULL
+        ).decode().strip()
+        state_key = head + ("+dirty-" + hashlib.md5(dirty.encode()).hexdigest()[:8] if dirty else "")
+    except Exception:
+        import time
+        state_key = "unknown-" + str(int(time.time()))
+
+    n = 0
+    if os.path.exists(counter_path):
+        try:
+            data = open(counter_path).read().strip().split("|", 1)
+            n = int(data[0])
+        except (ValueError, IndexError):
+            n = 0
+
+    # Always increment per build so the boot-screen number moves every
+    # time we flash, even when the source state is identical.
+    n += 1
+    os.makedirs(counter_dir, exist_ok=True)
+    with open(counter_path, "w") as f:
+        f.write(f"{n}|{state_key}")
+
+    mm_build = str(n)
 except Exception:
-    mm_build = "0"
+    pass
 try:
     mm_branch = subprocess.check_output(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],

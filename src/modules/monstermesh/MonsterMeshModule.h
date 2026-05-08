@@ -17,6 +17,33 @@
 #include "PokemonDaycare.h"
 #include "MonsterMeshTextBattle.h"
 #include "LordGyms.h"
+#ifdef MESHTASTIC_EXCLUDE_MONSTERMESH_DUNGEON
+// Stub no-op stand-ins so MonsterMeshModule still compiles when the
+// roguelike dungeon crawler is excluded from the build. Same API surface
+// the module touches; everything is inline + does nothing.
+namespace lgfx { inline namespace v1 { class LGFX_Device; } }
+class DungeonGame {
+  public:
+    DungeonGame(MeshtasticTransport &) {}
+    void begin() {}
+    void tick(uint32_t) {}
+    bool isActive() const { return false; }
+    void handlePacket(const uint8_t *, size_t) {}
+    void handleLocalCommand(const char *, const char *) {}
+};
+class DungeonOverlay {
+  public:
+    DungeonOverlay(DungeonGame &) {}
+    bool isActive() const { return false; }
+    void open() {}
+    void close() {}
+    void forceRedraw() {}
+    void render(lgfx::LGFX_Device *) {}
+};
+#else
+#include "dungeon/DungeonGame.h"
+#include "dungeon/DungeonOverlay.h"
+#endif
 
 // ── MonsterMeshModule ──────────────────────────────────────────────────────────
 // Meshtastic module that runs a Game Boy Pokemon emulator with LoRa-based
@@ -42,8 +69,10 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     static constexpr uint8_t MONSTERMESH_CHANNEL = 1;
 
     // Is the emulator view currently active (vs Meshtastic UI)?
-    bool isEmulatorActive() const { return emulatorActive_; }
-    bool isBrowserActive()  const { return browserActive_; }
+    bool isEmulatorActive()  const { return emulatorActive_; }
+    bool isBrowserActive()   const { return browserActive_; }
+    bool isTerminalActive()  const { return terminalActive_; }
+    bool isDungeonActive()   const { return dungeonActive_; }
 
   protected:
     // ── SinglePortModule overrides ──────────────────────────────────────────
@@ -55,7 +84,7 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     virtual bool wantUIFrame() override { return true; }  // always show frame for debug
     virtual void drawFrame(OLEDDisplay *display, OLEDDisplayUiState *state,
                            int16_t x, int16_t y) override;
-    virtual bool interceptingKeyboardInput() override { return emulatorActive_ || browserActive_; }
+    virtual bool interceptingKeyboardInput() override { return emulatorActive_ || browserActive_ || dungeonActive_; }
 #endif
 
     // ── OSThread override ───────────────────────────────────────────────────
@@ -71,6 +100,10 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     MonsterMeshTerminal      terminal_;
     PokemonDaycare           daycare_;
     MonsterMeshTextBattle    textBattle_{transport_};
+    DungeonGame              dungeon_{transport_};
+    DungeonOverlay           dungeonOverlay_{dungeon_};
+    bool     dungeonActive_        = false;
+    uint32_t lastDungeonRenderMs_  = 0;
 
     bool textBattleActive_   = false;
     bool textBattleStartReq_ = false;  // LVGL→runOnce flag to start a local fight
@@ -312,6 +345,11 @@ private:
     uint32_t      mmtBattlePeer_     = 0;
     uint32_t      mmtBattleSeed_     = 0;
     uint16_t      mmtBattleSession_  = 0;
+    // millis() when pendingMmtBattleAsReceiver_ was set. If the terminal party
+    // hasn't loaded within 30s, the challenge is stale and we discard it so a
+    // latent TEXT_BATTLE_START packet doesn't auto-launch a battle next time the
+    // user opens the terminal.
+    uint32_t      mmtBattleReceivePendingMs_ = 0;
 
     // Decoded Gen 1 trainer name from the most recent SAV load. 7 chars + NUL.
     char stagedTrainerName_[8] = {};
@@ -367,6 +405,9 @@ private:
 
     // Saved LVGL flush callback (swapped out when emulator is active)
     void *savedFlushCb_ = nullptr;
+    // Separate saved flush cb for dungeon overlay — keeps it independent of
+    // emulator/browser/textbattle savedFlushCb_ so mode-detection doesn't cross.
+    void *dungeonFlushCb_ = nullptr;
 
     // Input observer — receives keyboard events from Meshtastic's InputBroker
     int handleInputEvent(const InputEvent *event);

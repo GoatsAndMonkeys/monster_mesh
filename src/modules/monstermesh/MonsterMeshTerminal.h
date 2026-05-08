@@ -77,6 +77,14 @@ class MonsterMeshTerminal {
         beaconCtx_ = ctx;
     }
 
+    // `lora` command — force the LoRa TX gate back on if the radio got
+    // stuck "parked" (e.g. exit path didn't run after a previous app).
+    typedef void (*LoraOnFn)(void *ctx);
+    void setLoraOnFn(LoraOnFn fn, void *ctx) {
+        loraOnFn_  = fn;
+        loraOnCtx_ = ctx;
+    }
+
     // Hook for the `fight` command — kicks off a local CPU battle.
     typedef void (*FightFn)(void *ctx);
     void setFightFn(FightFn fn, void *ctx) {
@@ -131,6 +139,13 @@ class MonsterMeshTerminal {
     void setBbsProbeFn(BbsProbeFn fn, void *ctx) {
         bbsProbeFn_ = fn;
         bbsProbeCtx_ = ctx;
+    }
+
+    // Hook for `dungeon <verb> [arg]`: forward to DungeonGame::handleLocalCommand.
+    typedef void (*DungeonFn)(void *ctx, const char *verb, const char *arg);
+    void setDungeonFn(DungeonFn fn, void *ctx) {
+        dungeonFn_ = fn;
+        dungeonCtx_ = ctx;
     }
 
     // Hook for `bbs fight N`: terminal looks up the cached gym at slot N-1
@@ -218,6 +233,8 @@ class MonsterMeshTerminal {
     void                 *daycareAchCtx_ = nullptr;
     BeaconFn            beaconFn_       = nullptr;
     void               *beaconCtx_      = nullptr;
+    LoraOnFn            loraOnFn_       = nullptr;
+    void               *loraOnCtx_      = nullptr;
     FightFn             fightFn_       = nullptr;
     void               *fightCtx_      = nullptr;
     GymFightFn          gymFightFn_    = nullptr;
@@ -248,4 +265,6 @@ class MonsterMeshTerminal {
     void       *bbsProbeCtx_ = nullptr;
     BbsFightFn  bbsFightFn_  = nullptr;
     void       *bbsFightCtx_ = nullptr;
+    DungeonFn   dungeonFn_   = nullptr;
+    void       *dungeonCtx_  = nullptr;
 };
