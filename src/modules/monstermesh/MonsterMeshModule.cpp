@@ -156,9 +156,16 @@ int MonsterMeshModule::handleInputEvent(const InputEvent *event)
 {
     if (!event) return 0;
 
-    // Always process Ctrl+E regardless of emulator state
+    // Always process Ctrl+E regardless of emulator state.
+    // Share the global ALT-fire debounce window with the I2C poll and the
+    // KEY-mode peek so a single press doesn't fire the handler twice
+    // (which would enter ROM loader and immediately exit it back to chat).
     if (event->kbchar == 0x05) {  // Ctrl+E
-        handleKeyPress(0x05);
+        uint32_t now = millis();
+        if (now - g_lastAltFireMs > 1000) {
+            g_lastAltFireMs = now;
+            handleKeyPress(0x05);
+        }
         return 0;
     }
 
@@ -227,12 +234,15 @@ bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
     if (p->decoded.portnum == meshtastic_PortNum_PRIVATE_APP) {
         return true;
     }
-    // T4: peek at TEXT_MESSAGE_APP DMs only when we have an outstanding
-    // mmt challenge to that sender. handleReceived parses Y/N and returns
-    // CONTINUE so the standard text pipeline still delivers to phone.
+    // T4: peek at every TEXT_MESSAGE_APP DM addressed to us.
+    //   - sender path: parse Y/N reply to our outstanding mmt challenge.
+    //   - receiver path: detect incoming "Wanna battle?" DM and arm the
+    //     mmtChallengerPeer_ window so a matching TEXT_BATTLE_START
+    //     can auto-launch the receiver-side battle.
+    // handleReceived always returns CONTINUE so the standard text
+    // pipeline still delivers the DM to the user's phone client.
     if (p->decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
-        nodeDB && p->to == nodeDB->getNodeNum() && !isBroadcast(p->to) &&
-        mmtAwaitingReplyFrom_ != 0 && p->from == mmtAwaitingReplyFrom_) {
+        nodeDB && p->to == nodeDB->getNodeNum() && !isBroadcast(p->to)) {
         return true;
     }
     // (BBS_REPLY arrives via PRIVATE_APP, already accepted above.)
@@ -268,6 +278,13 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             // (which is 150+ bytes). Gate by EXACT length so a beacon
             // doesn't get misrouted as a stray battle-start. Battle-start
             // is exactly BATTLELINK_HDR_SIZE + 14 bytes.
+            //
+            // Matches b237 behavior: any TEXT_BATTLE_START with the
+            // correct size from another node auto-launches the receiver
+            // side. Other-agent gauntlet/dungeon code that could emit
+            // stray BATTLE_STARTs is compiled out of t-deck-tft via
+            // MESHTASTIC_EXCLUDE_GAUNTLET / EXCLUDE_MONSTERMESH_DUNGEON,
+            // so we don't need the mmtChallengerPeer_ window any more.
             if ((PktType)bp->type == PktType::TEXT_BATTLE_START &&
                 mp.decoded.payload.size == BATTLELINK_HDR_SIZE + 14 &&
                 mp.from != nodeDB->getNodeNum()) {
@@ -508,6 +525,33 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
     // BattlePackets — handled in the PRIVATE_APP block above. Nothing to
     // do here for BBS in the text-message path.)
 
+    // T4: detect an INCOMING MMT challenge DM ("Do you want to battle in
+    // MonsterMesh? Reply Y or N.") and arm a 60 s window for the
+    // matching TEXT_BATTLE_START to auto-launch the receiver-side
+    // battle. Without this gate we'd take any 0x60 packet of the right
+    // size as a battle invite (and other-agent gauntlet/dungeon code
+    // emits stray ones).
+    if (mp.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
+        mp.from != 0 && mp.from != nodeDB->getNodeNum()) {
+        const char *txt = (const char *)mp.decoded.payload.bytes;
+        size_t      len = mp.decoded.payload.size;
+        // Quick substring match for the well-known challenge phrase.
+        // "battle in MonsterMesh" is unique enough for our purposes.
+        const char *needle = "battle in MonsterMesh";
+        size_t nlen = 21;
+        if (len >= nlen) {
+            for (size_t i = 0; i + nlen <= len; ++i) {
+                if (memcmp(txt + i, needle, nlen) == 0) {
+                    mmtChallengerPeer_     = mp.from;
+                    mmtChallengerExpireMs_ = millis() + 60000;
+                    LOG_INFO("[MonsterMesh] mmt: challenge DM from 0x%08X — armed 60s\n",
+                             (unsigned)mp.from);
+                    break;
+                }
+            }
+        }
+    }
+
     // T4: parse the peer's Y/N reply to our outstanding challenge.
     if (mp.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
         mmtAwaitingReplyFrom_ != 0 && mp.from == mmtAwaitingReplyFrom_) {
@@ -530,7 +574,12 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
         // the reply DM to the user's phone app.
         return ProcessMessage::CONTINUE;
     }
-    return ProcessMessage::STOP;
+    // Fall-through default: CONTINUE so any packet that reached us (e.g.
+    // a normal text DM addressed to us, which wantPacket now accepts so
+    // we can sniff for an incoming MMT challenge phrase) still flows to
+    // the standard chat / DeviceUI pipeline. STOP here would silently
+    // drop incoming DMs and the user would never see them in chat.
+    return ProcessMessage::CONTINUE;
 }
 
 void MonsterMeshModule::challengePeerByShortName(const char *peerShort)
@@ -780,17 +829,38 @@ int32_t MonsterMeshModule::runOnce()
             [](void *ctx) {
                 static_cast<MonsterMeshModule *>(ctx)->daycare_.forceBeacon();
             }, this);
-        terminal_.setLoraOnFn(
-            [](void *ctx) {
-                // Force LoRa TX back on at every layer:
-                //   1. clear MM-side radio park (g_meshSuspended etc.)
-                //   2. flip the Meshtastic config flag tx_enabled = true
-                //   3. persist so it survives reboot
+        terminal_.setMmtListFn(
+            [](void *ctx, char *buf, size_t n) {
                 auto *self = static_cast<MonsterMeshModule *>(ctx);
-                self->exitEmulatorMode();
-                config.lora.tx_enabled = true;
-                if (nodeDB) nodeDB->saveToDisk(SEGMENT_CONFIG);
-                LOG_INFO("[MonsterMesh] lora cmd: tx_enabled=true persisted\n");
+                if (!buf || n == 0) return;
+                size_t off = 0;
+                #define MMT_APPEND(...) do { \
+                    if (off < n - 1) { \
+                        int _w = snprintf(buf + off, n - off, __VA_ARGS__); \
+                        if (_w > 0) off += (size_t)_w; \
+                        if (off >= n) off = n - 1; \
+                    } \
+                } while (0)
+                uint8_t nc = self->daycare_.getNeighborCount();
+                if (nc == 0) {
+                    MMT_APPEND("No peers in range. Have them open MM and beacon.\n");
+                } else {
+                    MMT_APPEND("Online peers (last beacon):\n");
+                    const auto *neigh = self->daycare_.getNeighbors();
+                    for (uint8_t i = 0; i < nc && i < 6; ++i) {
+                        const char *sn = neigh[i].shortName[0] ? neigh[i].shortName : "?";
+                        const char *gn = neigh[i].gameName[0]  ? neigh[i].gameName  : "?";
+                        if (neigh[i].ngPlusTier > 0) {
+                            MMT_APPEND("  %s/%s NG+%u\n",
+                                       sn, gn, (unsigned)neigh[i].ngPlusTier);
+                        } else {
+                            MMT_APPEND("  %s/%s\n", sn, gn);
+                        }
+                    }
+                    MMT_APPEND("\nUsage: mmt <short_name>\n");
+                }
+                buf[off] = '\0';
+                #undef MMT_APPEND
             }, this);
         terminal_.setFightFn(
             [](void *ctx) {
@@ -1036,6 +1106,9 @@ int32_t MonsterMeshModule::runOnce()
     int curIdx = (int)Themes::get();
     if (curIdx != lastThemeIdx) {
         lastThemeIdx = curIdx;
+        // Terminal re-skin happens on next terminal_.open() (LVGL thread).
+        // Calling applyTheme() here would touch LVGL widgets from the LoRa
+        // thread and race the LVGL render thread → chat panel deadlock.
         auto rgb565 = [](uint32_t aarrggbb) -> uint16_t {
             uint8_t r = (aarrggbb >> 16) & 0xFF, g = (aarrggbb >> 8) & 0xFF, b = aarrggbb & 0xFF;
             return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
@@ -1122,6 +1195,33 @@ int32_t MonsterMeshModule::runOnce()
 #endif
 
     // blitFrame() moved to emulator task on Core 1 — runOnce() is too slow for screen updates
+
+    // ── Deferred ALT-to-browser activation ────────────────────────────────
+    // LVGL thread set pendingBrowserActivate_; we do all the heavy stuff
+    // here on the LoRa thread (spiLock-guarded fillScreen, flush_cb swap,
+    // radio park) so the LVGL thread doesn't deadlock against in-progress
+    // DeviceUI render work (250-node restore, chat-history flood).
+    if (pendingBrowserActivate_ && !browserActive_ && !emulatorActive_ &&
+        !textBattleActive_ && setupDone_) {
+        pendingBrowserActivate_ = false;
+#if HAS_TFT
+        lv_display_t *disp = lv_display_get_default();
+        if (disp && !savedFlushCb_) {
+            savedFlushCb_ = (void *)disp->flush_cb;
+            lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
+                lv_display_flush_ready(d);
+            });
+        }
+        if (g_deviceUiLgfx) {
+            concurrency::LockGuard g(spiLock);
+            g_deviceUiLgfx->clearClipRect();
+            g_deviceUiLgfx->fillScreen(0x0000);
+        }
+#endif
+        enterEmulatorMode();
+        browserActive_ = true;
+        browserNeedsScan_ = true;
+    }
 
     // Process buffered browser keys and render
     if (browserActive_) {
@@ -1404,21 +1504,17 @@ int32_t MonsterMeshModule::runOnce()
         daycare_.tick(millis());
     }
 
-    // ── T4 phase 3: live PvP battle launch (sender-side only) ────────────
-    // Receiver-side auto-launch was dropping users into spurious battles
-    // when other-agent gauntlet/dungeon code emitted stray
-    // TEXT_BATTLE_START packets. Drop any pending-receiver flag here so it
-    // never fires the launch path.
-    if (pendingMmtBattleAsReceiver_) {
-        pendingMmtBattleAsReceiver_ = false;
-        LOG_INFO("[MonsterMesh] PvP: ignoring incoming TEXT_BATTLE_START (auto-receiver disabled)\n");
-    }
-
-    if (pendingMmtBattleAsInitiator_ &&
+    // ── T4 phase 3: live PvP battle launch ────────────────────────────────
+    // Both initiator and receiver land here on the main loop. Receiver-side
+    // auto-launch is now gated by the mmtChallengerPeer_ window (set when
+    // the sender's challenge DM lands), so stray TEXT_BATTLE_START packets
+    // from other-agent code can't bounce us into spurious PvP.
+    if ((pendingMmtBattleAsInitiator_ || pendingMmtBattleAsReceiver_) &&
         !textBattleActive_ && setupDone_ && !emulatorActive_ &&
-        !browserActive_ && terminalActive_ && terminal_.hasParty()) {
+        !browserActive_ && terminal_.hasParty()) {
         bool asInitiator = pendingMmtBattleAsInitiator_;
         pendingMmtBattleAsInitiator_ = false;
+        pendingMmtBattleAsReceiver_  = false;
 #if HAS_TFT
         lv_display_t *disp = lv_display_get_default();
         if (disp && !savedFlushCb_) {
@@ -2689,6 +2785,20 @@ static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out,
             if (nick[j] == SAV_TERMINATOR) break;
         }
     }
+    // Heal the in-memory party for on-deck play. HP → maxHp, clear status,
+    // PP → canonical max for each move. The SAV's original values stay
+    // untouched on disk: writePartyToSavOnSd snapshots HP/status/PP from
+    // the existing SAV bytes before writing and restores them.
+    for (uint8_t i = 0; i < count; ++i) {
+        Gen1Pokemon &p = out.mons[i];
+        p.hp[0] = p.maxHp[0];
+        p.hp[1] = p.maxHp[1];
+        p.status = 0;
+        for (uint8_t s = 0; s < 4; ++s) {
+            const Gen1MoveData *mv = gen1Move(p.moves[s]);
+            p.pp[s] = mv ? mv->pp : (p.moves[s] ? 25 : 0);
+        }
+    }
     if (trainerNameOut && trainerNameLen) {
         // Decode 7-char Gen 1 trainer name at SAV+0x2598. Stops at the 0x50
         // terminator. trainerNameLen must be >= 8 for a clean copy.
@@ -2754,7 +2864,37 @@ static bool writePartyToSavOnSd(const char *savPath, const Gen1Party &party)
     uint8_t count = party.count > 6 ? 6 : party.count;
     buf[SAV_PARTY_COUNT] = count;
     memcpy(&buf[SAV_SPECIES_LIST], party.species, 7);
+
+    // Snapshot per-mon HP / status / PP from the existing SAV before
+    // overwriting the block. We DON'T want our in-deck "fully healed"
+    // values written back — the SAV should reflect whatever HP/status/PP
+    // state the player left the game in. Level / EXP / stat changes from
+    // battles still propagate (those fields come from party.mons[i]).
+    // Gen1Pokemon layout (44 bytes): hp at 1-2, status at 4, pp at 29-32.
+    struct PreservedMonFields { uint8_t hpHi, hpLo, status, pp0, pp1, pp2, pp3; };
+    PreservedMonFields snap[6] = {};
+    for (uint8_t i = 0; i < count; ++i) {
+        const uint8_t *m = &buf[SAV_POKEMON_DATA + i * 44];
+        snap[i].hpHi   = m[1];
+        snap[i].hpLo   = m[2];
+        snap[i].status = m[4];
+        snap[i].pp0    = m[29];
+        snap[i].pp1    = m[30];
+        snap[i].pp2    = m[31];
+        snap[i].pp3    = m[32];
+    }
     memcpy(&buf[SAV_POKEMON_DATA], (const uint8_t *)party.mons, (size_t)count * 44);
+    // Restore the snapshot — HP / status / PP stay as the SAV had them.
+    for (uint8_t i = 0; i < count; ++i) {
+        uint8_t *m = &buf[SAV_POKEMON_DATA + i * 44];
+        m[1]  = snap[i].hpHi;
+        m[2]  = snap[i].hpLo;
+        m[4]  = snap[i].status;
+        m[29] = snap[i].pp0;
+        m[30] = snap[i].pp1;
+        m[31] = snap[i].pp2;
+        m[32] = snap[i].pp3;
+    }
     for (uint8_t i = 0; i < count; ++i) {
         memcpy(&buf[SAV_OT_NAMES   + i * SAV_NAME_SIZE],
                party.otNames[i],   SAV_NAME_SIZE);
@@ -3166,6 +3306,14 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
             browserActive_ = false;
             exitEmulatorMode();  // emulatorActive_ already false
 #if HAS_TFT
+            // Wipe the framebuffer to black BEFORE restoring LVGL's flush
+            // so the partial-region redraw doesn't leave stale browser
+            // pixels visible in areas LVGL doesn't invalidate.
+            if (g_deviceUiLgfx) {
+                concurrency::LockGuard g(spiLock);
+                g_deviceUiLgfx->clearClipRect();
+                g_deviceUiLgfx->fillScreen(0x0000);
+            }
             lv_display_t *disp = lv_display_get_default();
             if (disp && savedFlushCb_) {
                 lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
@@ -3185,7 +3333,13 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
             lv_display_t *disp = lv_display_get_default();
             if (disp) {
                 lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
-                if (gfx) gfx->clearClipRect();
+                if (gfx) {
+                    concurrency::LockGuard g(spiLock);
+                    gfx->clearClipRect();
+                    // Full wipe so emulator pixels don't bleed through
+                    // LVGL's partial-region redraw.
+                    gfx->fillScreen(0x0000);
+                }
                 if (savedFlushCb_) {
                     lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
                     savedFlushCb_ = nullptr;
@@ -3209,29 +3363,15 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
 
         // ALT always opens the ROM loader (file browser), regardless of
         // whether a cart was previously loaded. Emulator toggle is on
-        // SYM+E. Park radios + suppress LVGL flush BEFORE flipping
-        // browserActive_ so the bus is quiesced before browser render.
-#if HAS_TFT
-        {
-            lv_display_t *disp = lv_display_get_default();
-            if (disp && !savedFlushCb_) {
-                savedFlushCb_ = (void *)disp->flush_cb;
-                lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
-                    lv_display_flush_ready(d);
-                });
-            }
-        }
-        // Black out the framebuffer immediately so the user doesn't see
-        // the empty map_panel for a few ms while the SD scan runs.
-        if (g_deviceUiLgfx) {
-            concurrency::LockGuard g(spiLock);
-            g_deviceUiLgfx->clearClipRect();
-            g_deviceUiLgfx->fillScreen(0x0000);
-        }
-#endif
-        enterEmulatorMode();
-        browserActive_ = true;
-        browserNeedsScan_ = true;
+        // SYM+E.
+        //
+        // CRITICAL: ALT can fire from the LVGL thread (KEY-mode peek,
+        // input broker) AND the LoRa thread (runOnce I2C poll). LVGL
+        // ops + spiLock-guarded LGFX fillScreen on the LVGL thread can
+        // deadlock with in-progress DeviceUI rendering (e.g. during the
+        // 250-node restore). Stage a flag and let runOnce handle the
+        // expensive parts on the LoRa thread.
+        pendingBrowserActivate_ = true;
         return;
     }
 

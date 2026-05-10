@@ -25,6 +25,10 @@ class MonsterMeshTerminal {
     void open(lv_obj_t *parent);
     // Hide the panel (does not destroy LVGL objects).
     void close();
+    // Re-apply theme colors to all child widgets. Module calls this from
+    // the runOnce theme-change branch so the terminal re-skins along
+    // with the rest of the UI when the user picks a new theme.
+    void applyTheme();
 
     bool isOpen() const { return open_; }
 
@@ -77,13 +81,14 @@ class MonsterMeshTerminal {
         beaconCtx_ = ctx;
     }
 
-    // `lora` command — force the LoRa TX gate back on if the radio got
-    // stuck "parked" (e.g. exit path didn't run after a previous app).
-    typedef void (*LoraOnFn)(void *ctx);
-    void setLoraOnFn(LoraOnFn fn, void *ctx) {
-        loraOnFn_  = fn;
-        loraOnCtx_ = ctx;
+    // `mmt` (no args) lists peers we've recently heard a daycare beacon
+    // from. Module fills the buffer with newline-separated lines.
+    typedef void (*MmtListFn)(void *ctx, char *buf, size_t bufLen);
+    void setMmtListFn(MmtListFn fn, void *ctx) {
+        mmtListFn_  = fn;
+        mmtListCtx_ = ctx;
     }
+
 
     // Hook for the `fight` command — kicks off a local CPU battle.
     typedef void (*FightFn)(void *ctx);
@@ -231,10 +236,10 @@ class MonsterMeshTerminal {
     void               *daycareForceCtx_ = nullptr;
     DaycareAchievementsFn daycareAchFn_  = nullptr;
     void                 *daycareAchCtx_ = nullptr;
+    MmtListFn           mmtListFn_      = nullptr;
+    void               *mmtListCtx_     = nullptr;
     BeaconFn            beaconFn_       = nullptr;
     void               *beaconCtx_      = nullptr;
-    LoraOnFn            loraOnFn_       = nullptr;
-    void               *loraOnCtx_      = nullptr;
     FightFn             fightFn_       = nullptr;
     void               *fightCtx_      = nullptr;
     GymFightFn          gymFightFn_    = nullptr;

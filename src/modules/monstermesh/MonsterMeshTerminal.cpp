@@ -34,12 +34,45 @@ static void term_input_ready_cb(lv_event_t *e)
     lv_textarea_set_text(ta, "");
 }
 
+void MonsterMeshTerminal::applyTheme()
+{
+    if (!panel_) return;
+    lv_obj_set_style_bg_color(panel_, lv_color_hex(Themes::darkest()), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(panel_, lv_color_hex(Themes::lightest()), LV_PART_MAIN | LV_STATE_DEFAULT);
+    if (output_) {
+        lv_obj_set_style_bg_color(output_, lv_color_hex(Themes::darkest()), LV_PART_MAIN | LV_STATE_DEFAULT);
+        // Update each scrollback line's text color in case the theme
+        // changed accent.
+        uint32_t n = lv_obj_get_child_count(output_);
+        for (uint32_t i = 0; i < n; ++i) {
+            lv_obj_t *lbl = lv_obj_get_child(output_, i);
+            if (lbl) {
+                lv_obj_set_style_text_color(lbl, lv_color_hex(Themes::lightest()), LV_PART_MAIN | LV_STATE_DEFAULT);
+            }
+        }
+    }
+    if (input_) {
+        lv_obj_set_style_bg_color(input_, lv_color_hex(Themes::dark()), LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_color(input_, lv_color_hex(Themes::lightest()), LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_color(input_, lv_color_hex(Themes::accent()), LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_color(input_, lv_color_hex(Themes::accent()), LV_PART_CURSOR | LV_STATE_DEFAULT);
+    }
+}
+
 void MonsterMeshTerminal::open(lv_obj_t *parent)
 {
     if (panel_) {
         // Already built — re-entry path. Preserve the scrollback so the user
         // can read prior output. Just unhide, reset the input field, refocus.
+        // Also re-apply the theme in case it changed since last open.
         lv_obj_clear_flag(panel_, LV_OBJ_FLAG_HIDDEN);
+        applyTheme();
+        // close() removed input_ from its group so the user could type in
+        // Meshtastic chat; add it back now that we're foregrounded.
+        if (input_) {
+            lv_group_t *grp = lv_group_get_default();
+            if (grp) lv_group_add_obj(grp, input_);
+        }
         lv_textarea_set_text(input_, "");
         inbuf_[0] = '\0'; inlen_ = 0;
         open_ = true;
@@ -133,6 +166,20 @@ void MonsterMeshTerminal::onSubmit(const char *line)
 void MonsterMeshTerminal::close()
 {
     if (panel_) lv_obj_add_flag(panel_, LV_OBJ_FLAG_HIDDEN);
+    // Release focus so keystrokes flow to whatever Meshtastic widget the
+    // user navigates to next (e.g. chat input). Three steps because LVGL
+    // doesn't have a single "blur" call:
+    //   1. clear LV_STATE_FOCUSED on the input
+    //   2. remove from its group (otherwise it remains the group's focused obj)
+    //   3. ask the group to advance focus to the next obj if there is one
+    if (input_) {
+        lv_obj_remove_state(input_, LV_STATE_FOCUSED);
+        lv_group_t *grp = (lv_group_t *)lv_obj_get_group(input_);
+        if (grp) {
+            lv_group_remove_obj(input_);
+            lv_group_focus_next(grp);
+        }
+    }
     open_ = false;
 }
 
@@ -401,16 +448,16 @@ void MonsterMeshTerminal::executeLine(const char *line)
             println("  echo <text> - print <text>");
             println("  clear       - wipe screen");
             println("  beacon      - broadcast presence (daycare + mmt)");
-            println("  lora        - force LoRa TX back on");
             return;
         }
         println("commands:");
         println("  party       - show your loaded SAV party");
         println("  daycare     - daycare status + neighbors");
-        println("  gym         - Legend of Charizard gym list");
+        println("  gym         - Local Kanto Gym List");
         println("  gym fight N - challenge gym N (1-9)");
         println("  mmg         - discover MonsterMesh Gyms");
         println("  mmg fight N - challenge MM gym N");
+        println("  mmt <peer>  - challenge a peer to PvP battle");
         println("  fight       - local CPU battle vs neighbor");
         println("  explore     - Wild encounters nearby");
         println("  news        - LoC news ring");
@@ -835,13 +882,31 @@ void MonsterMeshTerminal::executeLine(const char *line)
         println("Beacon broadcast — peers should pick you up shortly.");
         return;
     }
-    if (strncmp(line, "lora", 4) == 0) {
-        if (!loraOnFn_) { println("lora hook not wired"); return; }
-        loraOnFn_(loraOnCtx_);
-        println("LoRa TX forced back on.");
+    // Bare `mmt` (no args) → list peers we've recently heard a daycare
+    // beacon from. Convenience for "who's online to fight?"
+    if (strcasecmp(line, "mmt") == 0) {
+        if (!mmtListFn_) {
+            println("mmt: peer list not wired");
+            println("usage: mmt <peer_short_name>");
+            return;
+        }
+        char buf[512] = {};
+        mmtListFn_(mmtListCtx_, buf, sizeof(buf));
+        const char *p = buf;
+        while (*p) {
+            const char *nl = p;
+            while (*nl && *nl != '\n') ++nl;
+            char tmp[80];
+            size_t n = (size_t)(nl - p);
+            if (n >= sizeof(tmp)) n = sizeof(tmp) - 1;
+            memcpy(tmp, p, n);
+            tmp[n] = '\0';
+            println(tmp);
+            p = (*nl) ? nl + 1 : nl;
+        }
         return;
     }
-    if (strncmp(line, "mmt ", 4) == 0) {
+    if (strncasecmp(line, "mmt ", 4) == 0) {
         // T4 wire-format ping: `mmt <short>` sends an MMT:ON DM to the
         // peer whose Meshtastic short_name matches. Module resolves via
         // NodeDB; we just hand it the typed string.

@@ -267,6 +267,12 @@ private:
     // Set true by LVGL thread on browser entry; consumed by runOnce on LoRa
     // thread which then runs the SD reinit + scan. Keeps LVGL thread fast.
     volatile bool browserNeedsScan_ = false;
+    // ALT pressed in chat/terminal → user wants ROM loader. LVGL thread
+    // sets this flag and returns immediately; runOnce on the LoRa thread
+    // does the spiLock-guarded fillScreen + flush_cb swap + radio park.
+    // Avoids the LVGL-vs-DeviceUI deadlock that froze the screen during
+    // the 250-node restore.
+    volatile bool pendingBrowserActivate_ = false;
 
     // Set true by LVGL thread when terminal opens; consumed by runOnce on LoRa
     // thread which loads the party from SAV. Keeps the LVGL thread free of
@@ -350,6 +356,13 @@ private:
     // latent TEXT_BATTLE_START packet doesn't auto-launch a battle next time the
     // user opens the terminal.
     uint32_t      mmtBattleReceivePendingMs_ = 0;
+
+    // Receiver-side PvP gate: only allow a TEXT_BATTLE_START to auto-launch
+    // a battle if the same peer just sent us a "Do you want to battle..." DM
+    // within the last 60 s. Stops other-agent gauntlet/dungeon stray
+    // TEXT_BATTLE_START packets from auto-bouncing the user into PvP.
+    uint32_t      mmtChallengerPeer_     = 0;
+    uint32_t      mmtChallengerExpireMs_ = 0;
 
     // Decoded Gen 1 trainer name from the most recent SAV load. 7 chars + NUL.
     char stagedTrainerName_[8] = {};
