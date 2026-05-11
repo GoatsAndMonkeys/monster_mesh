@@ -56,8 +56,12 @@ public:
     // Force an immediate event cycle (for testing)
     void forceEvent() { if (active_) { runEventCycle(millis()); state_.lastEventMs = millis(); } }
 
-    // Force an immediate beacon broadcast (call after auto-checkin)
-    void forceBeacon() { if (active_) { broadcastBeacon(millis()); state_.lastBeaconMs = millis(); } }
+    // Force an immediate beacon broadcast. Always fires — even before
+    // checkIn() flipped active_, so the user-typed `beacon` command can
+    // reach peers right after boot. With no party loaded, the beacon
+    // carries short_name + gameName but partyCount=0; receivers still
+    // register us as a neighbor.
+    void forceBeacon() { broadcastBeacon(millis()); state_.lastBeaconMs = millis(); }
 
     // Trigger a "dog park" arrival event when a new trainer comes online
     // Returns true if an event was generated (and DM sent)

@@ -378,6 +378,14 @@ private:
     // (feedback_mm_no_boot_beacon). Periodic beacons take over from there.
     bool firstBeaconDone_ = false;
 
+    // Reciprocal-beacon trigger: when handleReceived adds a NEW daycare
+    // neighbor we set this. runOnce drains it on the LoRa thread and fires
+    // a forceBeacon() so the peer learns about us within seconds instead
+    // of waiting up to 15 min for our next BEACON_INTERVAL_MS broadcast.
+    // Throttled so a burst of new neighbors only triggers one reply beacon.
+    volatile bool pendingReplyBeacon_ = false;
+    uint32_t lastReplyBeaconMs_ = 0;
+
     // Last daycare event time we DM'd. When the daycare's lastEventTime moves
     // past this, runOnce DMs the new event. Covers both periodic events
     // (generated in tick()) and arrival events (generated from

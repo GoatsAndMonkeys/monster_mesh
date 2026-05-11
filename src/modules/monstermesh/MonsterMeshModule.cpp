@@ -512,6 +512,11 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 // from this router-context handler.
                 if (daycare_.getNeighborCount() > prevCount) {
                     daycare_.triggerArrivalEvent(*beacon);
+                    // Reciprocal beacon: ask runOnce to broadcast our own
+                    // beacon so the new peer learns about us within seconds
+                    // instead of waiting up to 15 min for our next periodic
+                    // BEACON_INTERVAL_MS broadcast.
+                    pendingReplyBeacon_ = true;
                 }
             } else {
                 LOG_INFO("[MonsterMesh] PRIVATE_APP not daycare beacon (type=0x%02X self=%d)\n",
@@ -585,7 +590,7 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
 void MonsterMeshModule::challengePeerByShortName(const char *peerShort)
 {
     if (!nodeDB || !peerShort || !peerShort[0]) {
-        terminal_.printLine("mmt: empty target");
+        terminal_.printLine("mmb: empty target");
         return;
     }
     size_t total = nodeDB->getNumMeshNodes();
@@ -604,7 +609,7 @@ void MonsterMeshModule::challengePeerByShortName(const char *peerShort)
     char buf[80];
     if (resolved == 0) {
         snprintf(buf, sizeof(buf),
-                 "mmt: no node '%s' in NodeDB. Try after they NodeInfo.",
+                 "mmb: no node '%s' in NodeDB. Try after they NodeInfo.",
                  peerShort);
         terminal_.printLine(buf);
         LOG_WARN("[MonsterMesh] %s\n", buf);
@@ -857,7 +862,7 @@ int32_t MonsterMeshModule::runOnce()
                             MMT_APPEND("  %s/%s\n", sn, gn);
                         }
                     }
-                    MMT_APPEND("\nUsage: mmt <short_name>\n");
+                    MMT_APPEND("\nUsage: mmb <short_name>\n");
                 }
                 buf[off] = '\0';
                 #undef MMT_APPEND
@@ -1498,6 +1503,23 @@ int32_t MonsterMeshModule::runOnce()
         LOG_INFO("[MonsterMesh] first daycare beacon fired (30s gate)\n");
     }
 
+    // Reciprocal beacon: handleReceived set pendingReplyBeacon_ when a new
+    // neighbor was added. Fire a single forceBeacon() back so the peer
+    // learns about us promptly. Throttle to one per 60 s so a flurry of new
+    // neighbors doesn't spam the airwaves.
+    if (setupDone_ && pendingReplyBeacon_ && daycare_.isActive() &&
+        !emulatorActive_ && !browserActive_ && firstBeaconDone_) {
+        uint32_t now = millis();
+        if (lastReplyBeaconMs_ == 0 || now - lastReplyBeaconMs_ > 60000) {
+            pendingReplyBeacon_ = false;
+            lastReplyBeaconMs_  = now;
+            daycare_.forceBeacon();
+            LOG_INFO("[MonsterMesh] reciprocal daycare beacon fired (new neighbor)\n");
+        } else {
+            // Hold the flag until the throttle window clears.
+        }
+    }
+
     // Daycare tick — only run while in the Meshtastic UI. The radio is asleep
     // in emu/browser mode, so beacons would just queue up uselessly.
     if (setupDone_ && !emulatorActive_ && !browserActive_ && daycare_.isActive()) {
@@ -1534,7 +1556,7 @@ int32_t MonsterMeshModule::runOnce()
             textBattle_.startNetworkedAsInitiator(mmtBattlePeer_,
                                                    terminal_.getParty());
             char hdr[40];
-            snprintf(hdr, sizeof(hdr), "MMT vs %.4s",
+            snprintf(hdr, sizeof(hdr), "MMB vs %.4s",
                      mmtPeerShort_[0] ? mmtPeerShort_ : "Peer");
             textBattle_.setHeader(hdr);
             LOG_INFO("[MonsterMesh] PvP: started as initiator vs 0x%08X\n",
@@ -1544,7 +1566,7 @@ int32_t MonsterMeshModule::runOnce()
                                                   terminal_.getParty(),
                                                   mmtBattleSeed_);
             char hdr[40];
-            snprintf(hdr, sizeof(hdr), "MMT incoming");
+            snprintf(hdr, sizeof(hdr), "MMB incoming");
             textBattle_.setHeader(hdr);
             LOG_INFO("[MonsterMesh] PvP: started as receiver from 0x%08X seed=0x%08X\n",
                      (unsigned)mmtBattlePeer_, (unsigned)mmtBattleSeed_);
@@ -2977,14 +2999,15 @@ void MonsterMeshModule::tryConsumeStagedParty()
         stagedEndKind_ = StagedEndKind::NONE;
     }
     if (!terminalPartyStaged_) return;
-    if (!terminalActive_) {
-        // Terminal isn't visible — drop the staged party rather than mutating
-        // a hidden panel. Next open will trigger a fresh load.
-        terminalPartyStaged_ = false;
-        return;
-    }
+    // Always commit the staged party into the terminal's data model so
+    // hasParty() flips true and downstream features (PvP launch gate,
+    // daycare check-in, gym fights) work even before the user has
+    // opened the terminal panel. The visible UI refresh is gated on
+    // terminalActive_ so we don't touch LVGL labels on a hidden panel.
     terminal_.setParty(terminalStagedParty_);
-    terminal_.refreshParty();
+    if (terminalActive_) {
+        terminal_.refreshParty();
+    }
     terminalPartyStaged_ = false;
 }
 
