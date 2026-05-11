@@ -45,7 +45,8 @@ void MonsterMeshTextBattle::appendLog(const char *line)
 // ── Networked initiator ─────────────────────────────────────────────────────
 
 void MonsterMeshTextBattle::startNetworkedAsInitiator(uint32_t remoteId,
-                                                     const Gen1Party &myParty)
+                                                     const Gen1Party &myParty,
+                                                     const Gen1Party &oppParty)
 {
     mode_     = Mode::NETWORKED;
     phase_    = Phase::WAIT_REMOTE;
@@ -58,12 +59,11 @@ void MonsterMeshTextBattle::startNetworkedAsInitiator(uint32_t remoteId,
     // Pick a deterministic seed; broadcast it so the receiver matches us.
     uint32_t rngSeed = (uint32_t)(esp_random() ^ remoteId ^ session_);
 
-    // For now, both sides use the same party for the receiver — the *real*
-    // protocol broadcasts both parties via TEXT_BATTLE_PARTY chunks. As an
-    // intermediate step we mirror our party on the opponent side so the engine
-    // can run; full party exchange is a follow-up TODO.
-    Gen1Party fakeOpp = myParty;
-    engine_.start(myParty, fakeOpp, rngSeed);
+    // Opponent party comes from the peer's daycare beacon — the module
+    // reconstructed it locally before calling us. If it's empty (peer not
+    // in daycare), fall back to mirror-match so the battle still starts.
+    Gen1Party opp = (oppParty.count > 0) ? oppParty : myParty;
+    engine_.start(myParty, opp, rngSeed);
 
     sendStart(rngSeed, myParty);
     appendLog("Battle started!");
@@ -77,7 +77,8 @@ void MonsterMeshTextBattle::startNetworkedAsInitiator(uint32_t remoteId,
 
 void MonsterMeshTextBattle::startNetworkedAsReceiver(uint32_t remoteId,
                                                      const Gen1Party &myParty,
-                                                     uint32_t rngSeed)
+                                                     uint32_t rngSeed,
+                                                     const Gen1Party &oppParty)
 {
     mode_     = Mode::NETWORKED;
     phase_    = Phase::WAIT_ACTION;
@@ -85,8 +86,8 @@ void MonsterMeshTextBattle::startNetworkedAsReceiver(uint32_t remoteId,
     cursor_   = 0; switchCursor_ = 0;
     logFill_ = logHead_ = 0; scrollPending_ = 0;
 
-    Gen1Party fakeOpp = myParty;
-    engine_.start(myParty, fakeOpp, rngSeed);
+    Gen1Party opp = (oppParty.count > 0) ? oppParty : myParty;
+    engine_.start(myParty, opp, rngSeed);
     appendLog("Battle started!");
     lastRecvMs_ = millis();
     dirty_ = true;

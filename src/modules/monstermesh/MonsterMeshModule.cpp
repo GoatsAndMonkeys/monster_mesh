@@ -53,6 +53,58 @@ static bool g_keyPeekAltSeenLow    = false;
 static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out,
                                  char *resolvedSavOut, size_t resolvedSavLen,
                                  char *trainerNameOut, size_t trainerNameLen);
+
+// Build a full Gen1Party from a daycare neighbor's beacon-broadcast summary.
+// The beacon carries only (dex, level, nickname, moves[4]) per mon; this
+// helper inflates that to a Gen1Pokemon with deterministic stats so a peer
+// who received the beacon can run a battle against the broadcaster's team
+// without needing a separate party-exchange protocol. Same conversion the
+// BBS bulk-ladder receive path uses (MonsterMeshModule.cpp BBS_LADDER_PARTIES
+// branch), kept here so MMB PvP can reuse it.
+static void buildPartyFromNeighbor(const DaycareNeighborPokemon &n,
+                                   Gen1Party &out)
+{
+    memset(&out, 0, sizeof(out));
+    uint8_t mc = n.partyCount;
+    if (mc > 6) mc = 6;
+    out.count = mc;
+    for (uint8_t i = 0; i < mc; ++i) {
+        uint8_t dex   = n.party[i].species;
+        uint8_t level = n.party[i].level;
+        if (level == 0) level = 5;  // defensive: neighbor data was zeroed
+        Gen1MinimalStats s = gen1MinimalStats(dex, level);
+        uint8_t internal   = gen1DexToInternal(dex);
+        Gen1Pokemon &pk    = out.mons[i];
+        pk.species  = internal;
+        pk.boxLevel = level;
+        pk.level    = level;
+        auto setBe16 = [](uint8_t *dst, uint16_t v) {
+            dst[0] = (uint8_t)(v >> 8); dst[1] = (uint8_t)v;
+        };
+        setBe16(pk.maxHp, s.hp);
+        setBe16(pk.hp,    s.hp);
+        setBe16(pk.atk,   s.atk);
+        setBe16(pk.def,   s.def);
+        setBe16(pk.spd,   s.spd);
+        setBe16(pk.spc,   s.spc);
+        pk.type1 = s.type1;
+        pk.type2 = s.type2;
+        pk.dvs[0] = 0x88;
+        pk.dvs[1] = 0x88;
+        for (uint8_t mi = 0; mi < 4; ++mi) {
+            pk.moves[mi] = n.party[i].moves[mi];
+            const Gen1MoveData *mv = gen1Move(pk.moves[mi]);
+            pk.pp[mi] = mv ? mv->pp : (pk.moves[mi] ? 25 : 0);
+        }
+        // Use the broadcaster's nickname so it shows up correctly in
+        // battle log lines. Gen1Pokemon has no nickname field — nicknames
+        // live on Gen1Party.nicknames[i] and the engine pulls from there.
+        out.species[i]  = internal;
+        size_t nlen = strnlen(n.party[i].nickname, 10);
+        memcpy(out.nicknames[i], n.party[i].nickname, nlen);
+        out.nicknames[i][nlen] = '\0';
+    }
+}
 static bool patchSavOnSdWithDaycareXp(const char *romPath, PokemonDaycare &dc);
 static bool patchSdSavPathWithDaycareXp(const char *sdRel, PokemonDaycare &dc);
 static bool writePartyToSavOnSd(const char *savPath, const Gen1Party &party);
@@ -1552,24 +1604,50 @@ int32_t MonsterMeshModule::runOnce()
             g_deviceUiLgfx->fillScreen(0x0000);
         }
         textBattleActive_ = true;
+
+        // Reconstruct the opponent's party from their latest daycare
+        // beacon. Both sides have each other's beacon (the daycare neighbor
+        // table) so each can build the same Gen1Party locally without
+        // pushing parties over the wire. If the peer hasn't broadcast a
+        // beacon recently we fall back to mirror-match (engine uses our
+        // own party as the opponent) so the fight still starts.
+        Gen1Party oppParty{};
+        memset(&oppParty, 0, sizeof(oppParty));
+        const DaycareNeighborPokemon *peers = daycare_.getNeighbors();
+        uint8_t peerCount = daycare_.getNeighborCount();
+        for (uint8_t i = 0; i < peerCount; ++i) {
+            if (peers[i].nodeId == mmtBattlePeer_) {
+                buildPartyFromNeighbor(peers[i], oppParty);
+                break;
+            }
+        }
+        if (oppParty.count == 0) {
+            LOG_WARN("[MonsterMesh] PvP: peer 0x%08X not in daycare table — "
+                     "falling back to mirror-match\n",
+                     (unsigned)mmtBattlePeer_);
+        }
+
         if (asInitiator) {
             textBattle_.startNetworkedAsInitiator(mmtBattlePeer_,
-                                                   terminal_.getParty());
+                                                   terminal_.getParty(),
+                                                   oppParty);
             char hdr[40];
             snprintf(hdr, sizeof(hdr), "MMB vs %.4s",
                      mmtPeerShort_[0] ? mmtPeerShort_ : "Peer");
             textBattle_.setHeader(hdr);
-            LOG_INFO("[MonsterMesh] PvP: started as initiator vs 0x%08X\n",
-                     (unsigned)mmtBattlePeer_);
+            LOG_INFO("[MonsterMesh] PvP: started as initiator vs 0x%08X opp=%u\n",
+                     (unsigned)mmtBattlePeer_, (unsigned)oppParty.count);
         } else {
             textBattle_.startNetworkedAsReceiver(mmtBattlePeer_,
                                                   terminal_.getParty(),
-                                                  mmtBattleSeed_);
+                                                  mmtBattleSeed_,
+                                                  oppParty);
             char hdr[40];
             snprintf(hdr, sizeof(hdr), "MMB incoming");
             textBattle_.setHeader(hdr);
-            LOG_INFO("[MonsterMesh] PvP: started as receiver from 0x%08X seed=0x%08X\n",
-                     (unsigned)mmtBattlePeer_, (unsigned)mmtBattleSeed_);
+            LOG_INFO("[MonsterMesh] PvP: started as receiver from 0x%08X seed=0x%08X opp=%u\n",
+                     (unsigned)mmtBattlePeer_, (unsigned)mmtBattleSeed_,
+                     (unsigned)oppParty.count);
         }
     }
 

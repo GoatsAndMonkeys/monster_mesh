@@ -41,13 +41,20 @@ public:
       : transport_(transport) {}
 
     // ── Lifecycle ───────────────────────────────────────────────────────────
-    // Networked initiator. `myParty` is our current save's party; `remoteId`
-    // is the peer node. We pick the seed and broadcast START.
-    void startNetworkedAsInitiator(uint32_t remoteId, const Gen1Party &myParty);
+    // Networked initiator. `myParty` is our current save's party; `oppParty`
+    // is the peer's party (reconstructed from their daycare beacon — both
+    // sides build the same party locally from the same beacon data so we
+    // don't need to push it over the wire). `remoteId` is the peer node.
+    // We pick the seed and broadcast START. If oppParty.count == 0 the
+    // engine falls back to a mirror-match against myParty so the battle
+    // still starts (matches pre-restart behavior).
+    void startNetworkedAsInitiator(uint32_t remoteId, const Gen1Party &myParty,
+                                   const Gen1Party &oppParty);
 
     // Networked receiver. Called by handlePacket() on TEXT_BATTLE_START.
     void startNetworkedAsReceiver(uint32_t remoteId, const Gen1Party &myParty,
-                                  uint32_t rngSeed);
+                                  uint32_t rngSeed,
+                                  const Gen1Party &oppParty);
 
     // Local roguelike battle. CPU runs side 1. trainerTags[2] are the short
     // names prepended to each pokemon's nickname so messages like
