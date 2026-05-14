@@ -684,8 +684,18 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                  (unsigned)mmtAwaitingReplyFrom_, preview);
 
         if (mmtAwaitingReplyFrom_ != 0 && mp.from == mmtAwaitingReplyFrom_) {
+            // Skip ANY non-printable / non-letter prefix bytes. Meshtastic's
+            // DeviceUI chat panel sometimes prepends 0xFF (or other control
+            // bytes — possibly a broken emoji shim) before the user's text,
+            // which made our previous "Y" parse pick up the 0xFF instead of
+            // the actual letter. Walk forward to the first ASCII letter and
+            // use that as the verdict char.
             size_t i = 0;
-            while (i < len && (txt[i] == ' ' || txt[i] == '\t')) ++i;
+            while (i < len) {
+                char c = txt[i];
+                if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) break;
+                ++i;
+            }
             char first = (i < len) ? txt[i] : '\0';
             LOG_INFO("[MonsterMesh] mmt: reply first char='%c' (0x%02X)\n",
                      first ? first : '?', (unsigned)first);
