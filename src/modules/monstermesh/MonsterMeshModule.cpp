@@ -1401,9 +1401,19 @@ int32_t MonsterMeshModule::runOnce()
         // T4 phase 3: stage the actual battle launch. runOnce drains it on
         // the main loop, where it's safe to swap LVGL's flush_cb and clear
         // the LGFX framebuffer.
+        LOG_INFO("[MonsterMesh] mmt accept gate: target=0x%08X hasParty=%d "
+                 "emu=%d br=%d tb=%d\n",
+                 (unsigned)mmtAcceptedTxTarget_, (int)terminal_.hasParty(),
+                 (int)emulatorActive_, (int)browserActive_, (int)textBattleActive_);
         if (mmtAcceptedTxTarget_ && terminal_.hasParty()) {
             mmtBattlePeer_ = mmtAcceptedTxTarget_;
             pendingMmtBattleAsInitiator_ = true;
+            LOG_INFO("[MonsterMesh] mmt: pendingMmtBattleAsInitiator_ SET, "
+                     "peer=0x%08X\n", (unsigned)mmtBattlePeer_);
+        } else {
+            LOG_WARN("[MonsterMesh] mmt: launch SKIPPED — target=%u hasParty=%d\n",
+                     (unsigned)(mmtAcceptedTxTarget_ ? 1 : 0),
+                     (int)terminal_.hasParty());
         }
     }
     if (pendingMmtDeclined_) {
@@ -1601,6 +1611,25 @@ int32_t MonsterMeshModule::runOnce()
     // auto-launch is now gated by the mmtChallengerPeer_ window (set when
     // the sender's challenge DM lands), so stray TEXT_BATTLE_START packets
     // from other-agent code can't bounce us into spurious PvP.
+    // Log every tick where launch flag is set but a gate blocks. Throttled
+    // to once a second so we don't spam the serial.
+    if ((pendingMmtBattleAsInitiator_ || pendingMmtBattleAsReceiver_) &&
+        (textBattleActive_ || !setupDone_ || emulatorActive_ ||
+         browserActive_ || !terminal_.hasParty())) {
+        static uint32_t lastBlockLogMs = 0;
+        uint32_t now = millis();
+        if (now - lastBlockLogMs > 1000) {
+            lastBlockLogMs = now;
+            LOG_WARN("[MonsterMesh] mmt launch BLOCKED: init=%d recv=%d tb=%d "
+                     "setupDone=%d emu=%d br=%d hasParty=%d\n",
+                     (int)pendingMmtBattleAsInitiator_,
+                     (int)pendingMmtBattleAsReceiver_,
+                     (int)textBattleActive_, (int)setupDone_,
+                     (int)emulatorActive_, (int)browserActive_,
+                     (int)terminal_.hasParty());
+        }
+    }
+
     if ((pendingMmtBattleAsInitiator_ || pendingMmtBattleAsReceiver_) &&
         !textBattleActive_ && setupDone_ && !emulatorActive_ &&
         !browserActive_ && terminal_.hasParty()) {
