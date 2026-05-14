@@ -610,22 +610,40 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
     }
 
     // T4: parse the peer's Y/N reply to our outstanding challenge.
-    if (mp.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
-        mmtAwaitingReplyFrom_ != 0 && mp.from == mmtAwaitingReplyFrom_) {
+    if (mp.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP) {
+        // Diagnostic: log EVERY text DM the module sees, with the awaiting
+        // state. This is how we tell whether a Y reply reached us at all
+        // vs. silently dropped on the wire / filtered by wantPacket.
         const char *txt = (const char *)mp.decoded.payload.bytes;
         size_t      len = mp.decoded.payload.size;
-        // Skip leading whitespace; first non-space char is the verdict.
-        size_t i = 0;
-        while (i < len && (txt[i] == ' ' || txt[i] == '\t')) ++i;
-        char first = (i < len) ? txt[i] : '\0';
-        if (first == 'Y' || first == 'y') {
-            pendingMmtAccepted_   = true;
-            pendingMmtAcceptedTx_ = true;
-            mmtAcceptedTxTarget_  = mp.from;
-            mmtAwaitingReplyFrom_ = 0;
-        } else if (first == 'N' || first == 'n') {
-            pendingMmtDeclined_   = true;
-            mmtAwaitingReplyFrom_ = 0;
+        char preview[24] = {};
+        size_t cp = (len < sizeof(preview) - 1) ? len : sizeof(preview) - 1;
+        memcpy(preview, txt, cp);
+        for (size_t k = 0; k < cp; ++k) {
+            if ((uint8_t)preview[k] < 0x20 || (uint8_t)preview[k] > 0x7E)
+                preview[k] = '.';
+        }
+        LOG_INFO("[MonsterMesh] mmt RX text DM: fr=0x%08X len=%u await=0x%08X '%s'\n",
+                 (unsigned)mp.from, (unsigned)len,
+                 (unsigned)mmtAwaitingReplyFrom_, preview);
+
+        if (mmtAwaitingReplyFrom_ != 0 && mp.from == mmtAwaitingReplyFrom_) {
+            size_t i = 0;
+            while (i < len && (txt[i] == ' ' || txt[i] == '\t')) ++i;
+            char first = (i < len) ? txt[i] : '\0';
+            LOG_INFO("[MonsterMesh] mmt: reply first char='%c' (0x%02X)\n",
+                     first ? first : '?', (unsigned)first);
+            if (first == 'Y' || first == 'y') {
+                pendingMmtAccepted_   = true;
+                pendingMmtAcceptedTx_ = true;
+                mmtAcceptedTxTarget_  = mp.from;
+                mmtAwaitingReplyFrom_ = 0;
+                LOG_INFO("[MonsterMesh] mmt: ACCEPT staged from 0x%08X\n",
+                         (unsigned)mp.from);
+            } else if (first == 'N' || first == 'n') {
+                pendingMmtDeclined_   = true;
+                mmtAwaitingReplyFrom_ = 0;
+            }
         }
         // Always CONTINUE so the standard chat pipeline still delivers
         // the reply DM to the user's phone app.
