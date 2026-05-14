@@ -46,7 +46,8 @@ void MonsterMeshTextBattle::appendLog(const char *line)
 
 void MonsterMeshTextBattle::startNetworkedAsInitiator(uint32_t remoteId,
                                                      const Gen1Party &myParty,
-                                                     const Gen1Party &oppParty)
+                                                     const Gen1Party &oppParty,
+                                                     uint32_t existingSeed)
 {
     mode_     = Mode::NETWORKED;
     phase_    = Phase::WAIT_REMOTE;
@@ -56,16 +57,17 @@ void MonsterMeshTextBattle::startNetworkedAsInitiator(uint32_t remoteId,
     pendingRemoteAction_ = false;
     logFill_ = logHead_ = 0; scrollPending_ = 0;
 
-    // Pick a deterministic seed; broadcast it so the receiver matches us.
-    uint32_t rngSeed = (uint32_t)(esp_random() ^ remoteId ^ session_);
+    // If the caller already broadcast TEXT_BATTLE_START (with this seed),
+    // reuse it and skip the duplicate sendStart below. Otherwise generate
+    // one and emit the start packet ourselves.
+    uint32_t rngSeed = existingSeed
+                         ? existingSeed
+                         : (uint32_t)(esp_random() ^ remoteId ^ session_);
 
-    // Opponent party comes from the peer's daycare beacon — the module
-    // reconstructed it locally before calling us. If it's empty (peer not
-    // in daycare), fall back to mirror-match so the battle still starts.
     Gen1Party opp = (oppParty.count > 0) ? oppParty : myParty;
     engine_.start(myParty, opp, rngSeed);
 
-    sendStart(rngSeed, myParty);
+    if (!existingSeed) sendStart(rngSeed, myParty);
     appendLog("Battle started!");
     appendLog("Waiting for opponent…");
     lastRecvMs_ = millis();

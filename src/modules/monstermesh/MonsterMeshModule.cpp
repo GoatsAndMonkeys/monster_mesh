@@ -513,8 +513,15 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             // daycare-beacon party data for the engine because identical SAVs
             // produce a self-fight and stale data can mismatch the current
             // party. Reassembled into mmbOppParty_.
+            // Accept chunks from either the formally-armed peer
+            // (mmbPartyRxFrom_, set on Y or START receipt) OR the still-armed
+            // mmtChallengerPeer_ (set the moment we saw their "battle in
+            // MonsterMesh" DM). The latter covers the race where the
+            // sender's chunks arrive before the TEXT_BATTLE_START packet
+            // does — same session, just timing.
             if ((PktType)bp->type == PktType::TEXT_BATTLE_PARTY &&
-                mmbPartyRxFrom_ != 0 && mp.from == mmbPartyRxFrom_) {
+                ((mmbPartyRxFrom_ != 0 && mp.from == mmbPartyRxFrom_) ||
+                 (mmtChallengerPeer_ != 0 && mp.from == mmtChallengerPeer_))) {
                 if (mp.decoded.payload.size < BATTLELINK_HDR_SIZE + 2)
                     return ProcessMessage::CONTINUE;
                 uint8_t partIdx   = bp->payload[0];
@@ -761,6 +768,39 @@ void MonsterMeshModule::challengePeerByShortName(const char *peerShort)
         daycare_.forceBeacon();
         LOG_INFO("[MonsterMesh] mmb: forced beacon so peer has our party data\n");
     }
+}
+
+// Send TEXT_BATTLE_START directly from the module (not via textBattle's
+// internal sendStart) so the receiver can arm its party-RX state machine
+// before our chunks arrive. The seed lives in mmtBattleSeed_ on both
+// sides so the actual engine.start (deferred until party exchange
+// completes) uses the same value.
+void MonsterMeshModule::sendMmbBattleStart(uint32_t seed)
+{
+    if (!router || !service || !mmtBattlePeer_) return;
+    meshtastic_MeshPacket *p = router->allocForSending();
+    if (!p) {
+        LOG_WARN("[MonsterMesh] mmt: allocForSending(START) failed\n");
+        return;
+    }
+    p->to = NODENUM_BROADCAST;  // BATTLE_START is broadcast on MM channel
+    p->channel = channels.getPrimaryIndex();
+    p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
+    BattlePacket *bp = (BattlePacket *)p->decoded.payload.bytes;
+    memset(bp, 0, BATTLELINK_HDR_SIZE + 14);
+    bp->type = (uint8_t)PktType::TEXT_BATTLE_START;
+    bp->setSessionId((uint16_t)(millis() & 0xFFFF));
+    bp->seq = 0;
+    bp->payload[0] = (seed >> 24) & 0xFF;
+    bp->payload[1] = (seed >> 16) & 0xFF;
+    bp->payload[2] = (seed >> 8)  & 0xFF;
+    bp->payload[3] =  seed        & 0xFF;
+    bp->payload[4] = 1;  // gen
+    bp->payload[5] = 0;  // party count placeholder; real party comes via chunks
+    p->decoded.payload.size = BATTLELINK_HDR_SIZE + 14;
+    service->sendToMesh(p);
+    LOG_INFO("[MonsterMesh] mmt: sent TEXT_BATTLE_START seed=0x%08X\n",
+             (unsigned)seed);
 }
 
 // Chunk and send our current party to a peer as TEXT_BATTLE_PARTY packets
@@ -1507,18 +1547,22 @@ int32_t MonsterMeshModule::runOnce()
         terminal_.printLine(buf);
         LOG_INFO("[MonsterMesh] mmt accept from %s — kicking off PvP\n",
                  mmtPeerShort_[0] ? mmtPeerShort_ : "(?)");
-        // T4 phase 3: stage the actual battle launch. runOnce drains it on
-        // the main loop, where it's safe to swap LVGL's flush_cb and clear
-        // the LGFX framebuffer.
         LOG_INFO("[MonsterMesh] mmt accept gate: target=0x%08X hasParty=%d "
                  "emu=%d br=%d tb=%d\n",
                  (unsigned)mmtAcceptedTxTarget_, (int)terminal_.hasParty(),
                  (int)emulatorActive_, (int)browserActive_, (int)textBattleActive_);
         if (mmtAcceptedTxTarget_ && terminal_.hasParty()) {
             mmtBattlePeer_ = mmtAcceptedTxTarget_;
+            // Pre-compute seed and send TEXT_BATTLE_START right now so the
+            // receiver arms its party-RX state machine before our chunks
+            // arrive. Without this the chunks were ignored on the receiver
+            // side (mmbPartyRxFrom_=0) and the protocol deadlocked.
+            mmtBattleSeed_ = (uint32_t)(esp_random() ^ mmtBattlePeer_ ^ millis());
+            sendMmbBattleStart(mmtBattleSeed_);
             pendingMmtBattleAsInitiator_ = true;
             LOG_INFO("[MonsterMesh] mmt: pendingMmtBattleAsInitiator_ SET, "
-                     "peer=0x%08X\n", (unsigned)mmtBattlePeer_);
+                     "peer=0x%08X seed=0x%08X\n",
+                     (unsigned)mmtBattlePeer_, (unsigned)mmtBattleSeed_);
         } else {
             LOG_WARN("[MonsterMesh] mmt: launch SKIPPED — target=%u hasParty=%d\n",
                      (unsigned)(mmtAcceptedTxTarget_ ? 1 : 0),
@@ -1783,9 +1827,12 @@ int32_t MonsterMeshModule::runOnce()
                  "party (count=%u)\n", (unsigned)oppParty.count);
 
         if (asInitiator) {
+            // Pass the pre-computed seed — TEXT_BATTLE_START was already
+            // broadcast by sendMmbBattleStart() right when Y was received.
             textBattle_.startNetworkedAsInitiator(mmtBattlePeer_,
                                                    terminal_.getParty(),
-                                                   oppParty);
+                                                   oppParty,
+                                                   mmtBattleSeed_);
             char hdr[40];
             snprintf(hdr, sizeof(hdr), "MMB vs %.4s",
                      mmtPeerShort_[0] ? mmtPeerShort_ : "Peer");

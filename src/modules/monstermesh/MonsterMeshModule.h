@@ -212,6 +212,13 @@ public:
     // callbacks for visitor messages and broadcasts.
     void sendTextDM(uint32_t to, const char *text);
     void sendMmbPartyChunks(uint32_t to, const Gen1Party &party);
+    // Broadcast TEXT_BATTLE_START (the seed + handshake header) when the
+    // sender's Y-DM is received. Doing this from the module — instead of
+    // inside startNetworkedAsInitiator — lets the receiver arm its
+    // mmbPartyRxFrom_ before our party chunks arrive (avoiding a deadlock
+    // where chunks were ignored because the receiver hadn't yet seen a
+    // BATTLE_START to know to expect them).
+    void sendMmbBattleStart(uint32_t seed);
 
     // Run an in-game daycare check-in for the most recent party loaded from
     // SAV. Safe to call when no ROM is loaded — silently no-ops.

@@ -48,8 +48,12 @@ public:
     // We pick the seed and broadcast START. If oppParty.count == 0 the
     // engine falls back to a mirror-match against myParty so the battle
     // still starts (matches pre-restart behavior).
+    // If existingSeed != 0, use it and skip the internal sendStart (caller
+    // already broadcast TEXT_BATTLE_START with the same seed). Otherwise
+    // a seed is generated and the engine emits its own start packet.
     void startNetworkedAsInitiator(uint32_t remoteId, const Gen1Party &myParty,
-                                   const Gen1Party &oppParty);
+                                   const Gen1Party &oppParty,
+                                   uint32_t existingSeed = 0);
 
     // Networked receiver. Called by handlePacket() on TEXT_BATTLE_START.
     void startNetworkedAsReceiver(uint32_t remoteId, const Gen1Party &myParty,
