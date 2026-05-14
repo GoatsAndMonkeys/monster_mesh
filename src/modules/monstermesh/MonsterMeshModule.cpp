@@ -695,6 +695,16 @@ void MonsterMeshModule::challengePeerByShortName(const char *peerShort)
     mmtAwaitingReplyFrom_ = resolved;
     strncpy(mmtPeerShort_, matchedShort, sizeof(mmtPeerShort_) - 1);
     mmtPeerShort_[sizeof(mmtPeerShort_) - 1] = '\0';
+    // Force a beacon broadcast right now so the peer's daycare neighbor
+    // table has our latest party summary by the time they reply Y and the
+    // TEXT_BATTLE_START arrives. Without this, the peer may run a mirror
+    // match because their `buildPartyFromNeighbor` lookup found no entry
+    // for our node ID. Beacons are cheap (~150 bytes broadcast) and the
+    // BEACON_INTERVAL_MS is 15 min — too slow for ad-hoc challenges.
+    if (daycare_.isActive()) {
+        daycare_.forceBeacon();
+        LOG_INFO("[MonsterMesh] mmb: forced beacon so peer has our party data\n");
+    }
 }
 
 void MonsterMeshModule::sendTextDM(uint32_t to, const char *text)
