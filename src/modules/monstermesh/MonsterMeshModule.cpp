@@ -528,7 +528,11 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 uint8_t partTotal = bp->payload[1];
                 size_t  dataLen   = mp.decoded.payload.size -
                                     BATTLELINK_HDR_SIZE - 2;
-                const size_t CHUNK = BATTLELINK_MAX_PAYLOAD - 2;
+                // Must match the sender's CHUNK in sendMmbPartyChunks().
+                // 100-byte chunks keep each LoRa packet well under the
+                // 237-byte encrypted limit so bidirectional exchange is
+                // reliable on busy channels.
+                const size_t CHUNK = 100;
                 if (partTotal == 0 || partTotal > 8) return ProcessMessage::CONTINUE;
                 if (partIdx >= partTotal)            return ProcessMessage::CONTINUE;
                 size_t off = (size_t)partIdx * CHUNK;
@@ -825,7 +829,12 @@ void MonsterMeshModule::sendMmbPartyChunks(uint32_t to, const Gen1Party &party)
     if (!to || !router || !service) return;
     const uint8_t *src = (const uint8_t *)&party;
     const size_t totalBytes = sizeof(Gen1Party);
-    const size_t CHUNK = BATTLELINK_MAX_PAYLOAD - 2;
+    // Use a smaller chunk size than the LoRa max so each encrypted packet
+    // is well under the ~237-byte LoRa limit. Earlier 194-byte chunks
+    // produced 236-byte encrypted packets that were too unreliable for
+    // bidirectional exchange on busy channels. 100 bytes → 5 chunks for
+    // a 404-byte Gen1Party → ~140-byte encrypted packets that survive.
+    const size_t CHUNK = 100;
     uint8_t total = (uint8_t)((totalBytes + CHUNK - 1) / CHUNK);
     if (total == 0) total = 1;
     if (total > 8) total = 8;  // RX gate rejects > 8
