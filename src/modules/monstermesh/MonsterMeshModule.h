@@ -211,6 +211,7 @@ public:
     // Send a text DM to a node (or NODENUM_BROADCAST). Used by daycare
     // callbacks for visitor messages and broadcasts.
     void sendTextDM(uint32_t to, const char *text);
+    void sendMmbPartyChunks(uint32_t to, const Gen1Party &party);
 
     // Run an in-game daycare check-in for the most recent party loaded from
     // SAV. Safe to call when no ROM is loaded — silently no-ops.
@@ -394,6 +395,30 @@ private:
     // Throttled so a burst of new neighbors only triggers one reply beacon.
     volatile bool pendingReplyBeacon_ = false;
     uint32_t lastReplyBeaconMs_ = 0;
+
+    // ── MMB direct-party-exchange protocol ──────────────────────────────
+    // Beacon-derived opponent parties were producing self-fights when both
+    // T-Decks ran the same SAV (or when the neighbor table had stale data).
+    // After handshake (Y received OR TEXT_BATTLE_START received) both sides
+    // send their full Gen1Party via TEXT_BATTLE_PARTY chunks point-to-point,
+    // and the engine doesn't launch until each side has the other's party.
+    //
+    // mmbPartyTxTarget_: peer we owe a party to (0 = nothing to send).
+    //   Set on Y receipt (sender) or TEXT_BATTLE_START receipt (receiver).
+    //   runOnce drains by emitting chunks.
+    // mmbPartyRxFrom_: peer we expect chunks from (0 = not collecting).
+    //   Set at the same time as mmbPartyTxTarget_.
+    // mmbOppParty_: assembled party once all chunks arrive.
+    // mmbOppPartyReady_: true once chunks fully assembled and parsed.
+    volatile uint32_t mmbPartyTxTarget_  = 0;
+    volatile uint32_t mmbPartyRxFrom_    = 0;
+    Gen1Party         mmbOppParty_       = {};
+    volatile bool     mmbOppPartyReady_  = false;
+    // Chunk reassembly buffer — Gen1Party = 404 bytes, with 194 bytes per
+    // chunk that's 3 chunks. Reserve 8 chunks * 194 bytes = 1552 to be safe.
+    uint8_t           mmbPartyChunks_[1552] = {};
+    uint8_t           mmbPartyChunkMask_ = 0;
+    uint8_t           mmbPartyTotal_     = 0;
 
     // Last daycare event time we DM'd. When the daycare's lastEventTime moves
     // past this, runOnce DMs the new event. Covers both periodic events

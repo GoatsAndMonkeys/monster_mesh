@@ -351,7 +351,14 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                     mmtBattleSession_ = bp->sessionId();
                     pendingMmtBattleAsReceiver_  = true;
                     mmtBattleReceivePendingMs_   = millis();
-                    LOG_INFO("[MonsterMesh] PvP: TEXT_BATTLE_START rx from 0x%08X seed=0x%08X\n",
+                    // Arm direct party exchange — we owe sender our party,
+                    // and we expect theirs. Reset reassembly state.
+                    mmbPartyTxTarget_  = mp.from;
+                    mmbPartyRxFrom_    = mp.from;
+                    mmbOppPartyReady_  = false;
+                    mmbPartyChunkMask_ = 0;
+                    mmbPartyTotal_     = 0;
+                    LOG_INFO("[MonsterMesh] PvP: TEXT_BATTLE_START rx from 0x%08X seed=0x%08X (party exchange armed)\n",
                              (unsigned)mp.from, (unsigned)seed);
                 }
                 return ProcessMessage::CONTINUE;
@@ -500,6 +507,48 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 return ProcessMessage::CONTINUE;
             }
 
+            // MMB PvP party-exchange — TEXT_BATTLE_PARTY chunks of the peer's
+            // current Gen1Party, sent point-to-point right after the handshake.
+            // Engine launch is gated on mmbOppPartyReady_; we don't trust
+            // daycare-beacon party data for the engine because identical SAVs
+            // produce a self-fight and stale data can mismatch the current
+            // party. Reassembled into mmbOppParty_.
+            if ((PktType)bp->type == PktType::TEXT_BATTLE_PARTY &&
+                mmbPartyRxFrom_ != 0 && mp.from == mmbPartyRxFrom_) {
+                if (mp.decoded.payload.size < BATTLELINK_HDR_SIZE + 2)
+                    return ProcessMessage::CONTINUE;
+                uint8_t partIdx   = bp->payload[0];
+                uint8_t partTotal = bp->payload[1];
+                size_t  dataLen   = mp.decoded.payload.size -
+                                    BATTLELINK_HDR_SIZE - 2;
+                const size_t CHUNK = BATTLELINK_MAX_PAYLOAD - 2;
+                if (partTotal == 0 || partTotal > 8) return ProcessMessage::CONTINUE;
+                if (partIdx >= partTotal)            return ProcessMessage::CONTINUE;
+                size_t off = (size_t)partIdx * CHUNK;
+                if (off + dataLen > sizeof(mmbPartyChunks_))
+                    return ProcessMessage::CONTINUE;
+                memcpy(mmbPartyChunks_ + off, bp->payload + 2, dataLen);
+                mmbPartyTotal_     = partTotal;
+                mmbPartyChunkMask_ |= (uint8_t)(1u << partIdx);
+
+                uint8_t fullMask = (uint8_t)((1u << partTotal) - 1u);
+                if ((mmbPartyChunkMask_ & fullMask) == fullMask) {
+                    // All chunks in — parse into Gen1Party. Sender wrote
+                    // it as raw memcpy(buf, &party, sizeof(Gen1Party)).
+                    if (sizeof(mmbOppParty_) <= sizeof(mmbPartyChunks_)) {
+                        memcpy(&mmbOppParty_, mmbPartyChunks_,
+                               sizeof(mmbOppParty_));
+                        mmbOppPartyReady_ = true;
+                        LOG_INFO("[MonsterMesh] MMB party RX complete from 0x%08X "
+                                 "count=%u (%u chunks)\n",
+                                 (unsigned)mp.from, (unsigned)mmbOppParty_.count,
+                                 (unsigned)partTotal);
+                    }
+                    mmbPartyRxFrom_ = 0;  // done collecting
+                }
+                return ProcessMessage::CONTINUE;
+            }
+
             // BBS gym fight reply — TEXT_BATTLE_PARTY chunks of the gym's
             // Gen1Party. Reassemble; once complete, kick off a local battle.
             if ((PktType)bp->type == PktType::TEXT_BATTLE_PARTY &&
@@ -638,7 +687,14 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 pendingMmtAcceptedTx_ = true;
                 mmtAcceptedTxTarget_  = mp.from;
                 mmtAwaitingReplyFrom_ = 0;
-                LOG_INFO("[MonsterMesh] mmt: ACCEPT staged from 0x%08X\n",
+                // Arm direct party exchange — we owe peer our party, and we
+                // expect their party in chunks. Reset reassembly state.
+                mmbPartyTxTarget_   = mp.from;
+                mmbPartyRxFrom_     = mp.from;
+                mmbOppPartyReady_   = false;
+                mmbPartyChunkMask_  = 0;
+                mmbPartyTotal_      = 0;
+                LOG_INFO("[MonsterMesh] mmt: ACCEPT staged from 0x%08X (party exchange armed)\n",
                          (unsigned)mp.from);
             } else if (first == 'N' || first == 'n') {
                 pendingMmtDeclined_   = true;
@@ -704,6 +760,49 @@ void MonsterMeshModule::challengePeerByShortName(const char *peerShort)
     if (daycare_.isActive()) {
         daycare_.forceBeacon();
         LOG_INFO("[MonsterMesh] mmb: forced beacon so peer has our party data\n");
+    }
+}
+
+// Chunk and send our current party to a peer as TEXT_BATTLE_PARTY packets
+// (point-to-point on channel 0). Format mirrors what the matching RX code
+// in handleReceived expects: BattlePacket header, then payload[0]=partIdx,
+// payload[1]=partTotal, payload[2..]=raw Gen1Party bytes for this chunk.
+// Receiver assembles via mmbPartyChunks_ + mmbPartyChunkMask_ and once full
+// memcpy's into mmbOppParty_ then flips mmbOppPartyReady_=true so the
+// engine launch can proceed. SAFE to call from runOnce/LoRa thread.
+void MonsterMeshModule::sendMmbPartyChunks(uint32_t to, const Gen1Party &party)
+{
+    if (!to || !router || !service) return;
+    const uint8_t *src = (const uint8_t *)&party;
+    const size_t totalBytes = sizeof(Gen1Party);
+    const size_t CHUNK = BATTLELINK_MAX_PAYLOAD - 2;
+    uint8_t total = (uint8_t)((totalBytes + CHUNK - 1) / CHUNK);
+    if (total == 0) total = 1;
+    if (total > 8) total = 8;  // RX gate rejects > 8
+    LOG_INFO("[MonsterMesh] MMB party TX → 0x%08X count=%u total=%u chunks\n",
+             (unsigned)to, (unsigned)party.count, (unsigned)total);
+    for (uint8_t i = 0; i < total; ++i) {
+        size_t off = (size_t)i * CHUNK;
+        size_t dataLen = (off + CHUNK <= totalBytes) ? CHUNK : totalBytes - off;
+        meshtastic_MeshPacket *p = router->allocForSending();
+        if (!p) {
+            LOG_WARN("[MonsterMesh] MMB party TX: allocForSending failed at chunk %u\n",
+                     (unsigned)i);
+            return;
+        }
+        p->to = to;
+        p->channel = channels.getPrimaryIndex();
+        p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
+        BattlePacket *bp = (BattlePacket *)p->decoded.payload.bytes;
+        memset(bp, 0, BATTLELINK_HDR_SIZE);
+        bp->type = (uint8_t)PktType::TEXT_BATTLE_PARTY;
+        bp->setSessionId(0);
+        bp->seq = i;
+        bp->payload[0] = i;
+        bp->payload[1] = total;
+        memcpy(bp->payload + 2, src + off, dataLen);
+        p->decoded.payload.size = BATTLELINK_HDR_SIZE + 2 + dataLen;
+        service->sendToMesh(p);
     }
 }
 
@@ -1621,31 +1720,45 @@ int32_t MonsterMeshModule::runOnce()
     // auto-launch is now gated by the mmtChallengerPeer_ window (set when
     // the sender's challenge DM lands), so stray TEXT_BATTLE_START packets
     // from other-agent code can't bounce us into spurious PvP.
+    // Drain pending MMB party TX (point-to-point). Sender sets this on Y
+    // receipt; receiver sets it on TEXT_BATTLE_START receipt. Once chunks
+    // are emitted, we wait passively for the opponent's chunks in
+    // handleReceived; mmbOppPartyReady_ flips true when assembly completes.
+    if (mmbPartyTxTarget_ != 0 && terminal_.hasParty()) {
+        uint32_t target = mmbPartyTxTarget_;
+        mmbPartyTxTarget_ = 0;
+        sendMmbPartyChunks(target, terminal_.getParty());
+    }
+
     // Log every tick where launch flag is set but a gate blocks. Throttled
     // to once a second so we don't spam the serial.
     if ((pendingMmtBattleAsInitiator_ || pendingMmtBattleAsReceiver_) &&
         (textBattleActive_ || !setupDone_ || emulatorActive_ ||
-         browserActive_ || !terminal_.hasParty())) {
+         browserActive_ || !terminal_.hasParty() || !mmbOppPartyReady_)) {
         static uint32_t lastBlockLogMs = 0;
         uint32_t now = millis();
         if (now - lastBlockLogMs > 1000) {
             lastBlockLogMs = now;
             LOG_WARN("[MonsterMesh] mmt launch BLOCKED: init=%d recv=%d tb=%d "
-                     "setupDone=%d emu=%d br=%d hasParty=%d\n",
+                     "setupDone=%d emu=%d br=%d hasParty=%d oppReady=%d\n",
                      (int)pendingMmtBattleAsInitiator_,
                      (int)pendingMmtBattleAsReceiver_,
                      (int)textBattleActive_, (int)setupDone_,
                      (int)emulatorActive_, (int)browserActive_,
-                     (int)terminal_.hasParty());
+                     (int)terminal_.hasParty(),
+                     (int)mmbOppPartyReady_);
         }
     }
 
     if ((pendingMmtBattleAsInitiator_ || pendingMmtBattleAsReceiver_) &&
         !textBattleActive_ && setupDone_ && !emulatorActive_ &&
-        !browserActive_ && terminal_.hasParty()) {
+        !browserActive_ && terminal_.hasParty() && mmbOppPartyReady_) {
         bool asInitiator = pendingMmtBattleAsInitiator_;
         pendingMmtBattleAsInitiator_ = false;
         pendingMmtBattleAsReceiver_  = false;
+        // Consume the just-arrived opponent party for the launch below; clear
+        // the ready flag so a fresh exchange is required for the next fight.
+        mmbOppPartyReady_ = false;
 #if HAS_TFT
         lv_display_t *disp = lv_display_get_default();
         if (disp && !savedFlushCb_) {
@@ -1662,27 +1775,12 @@ int32_t MonsterMeshModule::runOnce()
         }
         textBattleActive_ = true;
 
-        // Reconstruct the opponent's party from their latest daycare
-        // beacon. Both sides have each other's beacon (the daycare neighbor
-        // table) so each can build the same Gen1Party locally without
-        // pushing parties over the wire. If the peer hasn't broadcast a
-        // beacon recently we fall back to mirror-match (engine uses our
-        // own party as the opponent) so the fight still starts.
-        Gen1Party oppParty{};
-        memset(&oppParty, 0, sizeof(oppParty));
-        const DaycareNeighborPokemon *peers = daycare_.getNeighbors();
-        uint8_t peerCount = daycare_.getNeighborCount();
-        for (uint8_t i = 0; i < peerCount; ++i) {
-            if (peers[i].nodeId == mmtBattlePeer_) {
-                buildPartyFromNeighbor(peers[i], oppParty);
-                break;
-            }
-        }
-        if (oppParty.count == 0) {
-            LOG_WARN("[MonsterMesh] PvP: peer 0x%08X not in daycare table — "
-                     "falling back to mirror-match\n",
-                     (unsigned)mmtBattlePeer_);
-        }
+        // Use the directly-exchanged opponent party (assembled from
+        // TEXT_BATTLE_PARTY chunks). The launch gate above requires
+        // mmbOppPartyReady_ so this is guaranteed populated.
+        Gen1Party oppParty = mmbOppParty_;
+        LOG_INFO("[MonsterMesh] PvP: launching with direct-exchange opp "
+                 "party (count=%u)\n", (unsigned)oppParty.count);
 
         if (asInitiator) {
             textBattle_.startNetworkedAsInitiator(mmtBattlePeer_,
