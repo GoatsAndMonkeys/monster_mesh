@@ -218,8 +218,14 @@ void MonsterMeshTerminal::setParty(const Gen1Party &p)
 bool MonsterMeshTerminal::hasInputFocus() const
 {
     if (!input_ || !panel_) return false;
-    if (lv_obj_has_flag(panel_, LV_OBJ_FLAG_HIDDEN)) return false;
-    return lv_obj_has_state(input_, LV_STATE_FOCUSED);
+    // lv_obj_is_visible walks up the parent chain checking LV_OBJ_FLAG_HIDDEN
+    // — Meshtastic's nav system reparents/hides panels at an ancestor level,
+    // so the terminal's own panel_ may not carry the HIDDEN flag directly
+    // when the user navigates to chat. Also confirm input_ is on the
+    // currently active LVGL screen (defense against multi-screen nav).
+    if (!lv_obj_is_visible(panel_) || !lv_obj_is_visible(input_)) return false;
+    if (lv_obj_get_screen(input_) != lv_screen_active()) return false;
+    return true;
 }
 
 void MonsterMeshTerminal::refocus()
