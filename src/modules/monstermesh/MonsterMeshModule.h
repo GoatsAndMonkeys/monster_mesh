@@ -72,6 +72,15 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     bool isEmulatorActive()  const { return emulatorActive_; }
     bool isBrowserActive()   const { return browserActive_; }
     bool isTerminalActive()  const { return terminalActive_; }
+    // Terminal panel exists AND is currently the foregrounded LVGL widget.
+    // Different from isTerminalActive(): once the user opens the terminal we
+    // keep it alive when they navigate to other Meshtastic panels (chat,
+    // nodes, etc.), so isTerminalActive() stays true. isTerminalForeground()
+    // flips false the moment any ancestor is hidden by the nav system, so
+    // the I2C keyboard reader knows to let chat panels see keystrokes.
+    bool isTerminalForeground() const {
+        return terminalActive_ && terminal_.hasInputFocus();
+    }
     bool isDungeonActive()   const { return dungeonActive_; }
 
   protected:

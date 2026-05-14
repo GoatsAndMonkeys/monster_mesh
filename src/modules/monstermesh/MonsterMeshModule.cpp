@@ -2599,13 +2599,23 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
     // Without this, Enter in terminal mode fires BOTH LV_EVENT_READY (onSubmit)
     // AND the InputBroker path (onKey), executing the command twice and producing
     // spurious "unknown command" errors on every other keypress.
-    if (monsterMeshModule && (monsterMeshModule->isEmulatorActive() ||
-                              monsterMeshModule->isBrowserActive()  ||
-                              monsterMeshModule->isTerminalActive()  ||
-                              monsterMeshModule->isTextBattleActive() ||
-                              monsterMeshModule->isDungeonActive())) {
-        monsterMeshModule->handleKeyFromLVGL(key);
-        return; // consume — don't pass to LVGL
+    //
+    // Terminal special-case: isTerminalActive() stays true even when the user
+    // navigates to chat / nodes / settings (the panel is preserved in the
+    // background). Only swallow the key if the terminal's input is actually
+    // the foregrounded LVGL widget — otherwise chat replies (and any other
+    // panel's textarea) never receive keystrokes.
+    if (monsterMeshModule) {
+        bool ownsScreen = monsterMeshModule->isEmulatorActive() ||
+                          monsterMeshModule->isBrowserActive()  ||
+                          monsterMeshModule->isTextBattleActive() ||
+                          monsterMeshModule->isDungeonActive() ||
+                          (monsterMeshModule->isTerminalActive() &&
+                           monsterMeshModule->isTerminalForeground());
+        if (ownsScreen) {
+            monsterMeshModule->handleKeyFromLVGL(key);
+            return; // consume — don't pass to LVGL
+        }
     }
 
     // Normal MUI LVGL key mapping (replicates TDeckKeyboardInputDriver)
