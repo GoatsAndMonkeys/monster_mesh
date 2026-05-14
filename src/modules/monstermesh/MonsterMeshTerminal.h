@@ -46,6 +46,14 @@ class MonsterMeshTerminal {
     bool hasParty() const { return partyLoaded_; }
     const Gen1Party &getParty() const { return party_; }
 
+    // True only when the terminal's input field is the LVGL-focused object.
+    // The module's keystroke intercept uses this to know whether to route
+    // ASCII keys to onKey() (terminal foregrounded) or fall through to LVGL
+    // so the user can type in chat / DM panels that were navigated to
+    // without closing the terminal. Safe to call from any thread; touches
+    // LVGL state but reads only.
+    bool hasInputFocus() const;
+
     // Callback used to fill `buf` with the current daycare status (multiline,
     // newline-separated). Invoked when the user types `daycare` in the
     // terminal. Set by the module so the terminal stays decoupled from

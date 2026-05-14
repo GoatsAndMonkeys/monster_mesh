@@ -215,6 +215,13 @@ void MonsterMeshTerminal::setParty(const Gen1Party &p)
     partyLoaded_ = (p.count > 0 && p.count <= 6);
 }
 
+bool MonsterMeshTerminal::hasInputFocus() const
+{
+    if (!input_ || !panel_) return false;
+    if (lv_obj_has_flag(panel_, LV_OBJ_FLAG_HIDDEN)) return false;
+    return lv_obj_has_state(input_, LV_STATE_FOCUSED);
+}
+
 void MonsterMeshTerminal::refocus()
 {
     if (input_) lv_group_focus_obj(input_);
@@ -457,7 +464,8 @@ void MonsterMeshTerminal::executeLine(const char *line)
         println("  gym fight N - challenge gym N (1-9)");
         println("  mmg         - discover MonsterMesh Gyms");
         println("  mmg fight N - challenge MM gym N");
-        println("  mmt <peer>  - challenge a peer to PvP battle");
+        println("  mmb         - list peers online for battle");
+        println("  mmb <peer>  - MonsterMesh Battle (PvP)");
         println("  fight       - local CPU battle vs neighbor");
         println("  explore     - Wild encounters nearby");
         println("  news        - LoC news ring");
@@ -882,12 +890,13 @@ void MonsterMeshTerminal::executeLine(const char *line)
         println("Beacon broadcast — peers should pick you up shortly.");
         return;
     }
-    // Bare `mmt` (no args) → list peers we've recently heard a daycare
+    // Bare `mmb` (no args) → list peers we've recently heard a daycare
     // beacon from. Convenience for "who's online to fight?"
-    if (strcasecmp(line, "mmt") == 0) {
+    // `mmt` kept as a backward-compat alias for the old name.
+    if (strcasecmp(line, "mmb") == 0 || strcasecmp(line, "mmt") == 0) {
         if (!mmtListFn_) {
-            println("mmt: peer list not wired");
-            println("usage: mmt <peer_short_name>");
+            println("mmb: peer list not wired");
+            println("usage: mmb <peer_short_name>");
             return;
         }
         char buf[512] = {};
@@ -906,14 +915,16 @@ void MonsterMeshTerminal::executeLine(const char *line)
         }
         return;
     }
-    if (strncasecmp(line, "mmt ", 4) == 0) {
-        // T4 wire-format ping: `mmt <short>` sends an MMT:ON DM to the
-        // peer whose Meshtastic short_name matches. Module resolves via
-        // NodeDB; we just hand it the typed string.
+    // `mmb <short>` (or backward-compat `mmt <short>`) — MonsterMesh
+    // Battle: sends a challenge DM to the peer. Module resolves the
+    // short_name via NodeDB; we just hand it the typed string.
+    bool isBattleCmd = (strncasecmp(line, "mmb ", 4) == 0 ||
+                        strncasecmp(line, "mmt ", 4) == 0);
+    if (isBattleCmd) {
         const char *p = line + 4;
         while (*p == ' ' || *p == '@') ++p;
-        if (!*p) { println("usage: mmt <short_name>"); return; }
-        if (!mmtFn_) { println("mmt not wired"); return; }
+        if (!*p) { println("usage: mmb <short_name>"); return; }
+        if (!mmtFn_) { println("mmb not wired"); return; }
         char buf[64];
         snprintf(buf, sizeof(buf), "Challenging %s...", p);
         println(buf);

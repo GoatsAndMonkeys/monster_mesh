@@ -3375,12 +3375,15 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
     }
 #endif // !MESHTASTIC_EXCLUDE_MONSTERMESH_DUNGEON
 
-    // Terminal: route ASCII keys to it ONLY when terminal is the foreground
-    // (i.e. emulator and browser are both inactive). When the user ALT's into
-    // ROM browser or emulator, terminalActive_ stays true so the terminal
-    // remains "running in background" with its session preserved, but we let
-    // browser/emu own the keyboard. ALT itself always falls through.
-    if (terminalActive_ && !emulatorActive_ && !browserActive_ && ascii != 0x05) {
+    // Terminal: route ASCII keys to it ONLY when its input field is the
+    // LVGL-focused widget. That means the user is *currently* looking at
+    // the MM Terminal panel — not at chat, nodes, or any other panel they
+    // may have navigated to while leaving the terminal alive in the
+    // background. Without this focus gate the intercept swallowed every
+    // keystroke so chat replies (e.g. typing Y to an MMB challenge) never
+    // reached the chat textarea.
+    if (terminalActive_ && !emulatorActive_ && !browserActive_ &&
+        ascii != 0x05 && terminal_.hasInputFocus()) {
         terminal_.onKey(ascii);
         powerFSM.trigger(EVENT_INPUT);
         return;
