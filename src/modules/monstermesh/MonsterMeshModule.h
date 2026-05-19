@@ -456,6 +456,14 @@ private:
     // Auto-save tracking
     uint8_t prevBattle_ = 0;
 
+    // Emu task idle signal — set by emuTaskLoop when it parks itself
+    // (because emulatorActive_=false), cleared as soon as it's running a
+    // frame. The ALT-exit path polls this so it knows the emu task has
+    // finished any in-progress runFrame + auto-save before we issue our
+    // own SAV flush + screen wipe. Avoids the spiLock collisions between
+    // emu task SD writes and the LVGL thread.
+    volatile bool emuTaskIdle_ = true;
+
     // Viewport
     volatile int8_t viewportDelta_ = 0;
     volatile bool   viewportRecenter_ = false;

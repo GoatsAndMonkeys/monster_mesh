@@ -3421,10 +3421,12 @@ void MonsterMeshModule::emuTaskLoop()
         // to Meshtastic — the screen would appear frozen on the emulator and the
         // music would keep playing.
         if (!emulatorActive_) {
+            emuTaskIdle_ = true;  // ALT-exit polls this to wait for emu quiescence
             vTaskDelay(pdMS_TO_TICKS(50));
             lastWake = xTaskGetTickCount();
             continue;
         }
+        emuTaskIdle_ = false;  // we're about to runFrame — not idle
         // Write to framebuffer every 3rd frame — render task blits to TFT separately
         frameCount++;
         renderFrame_ = (emulatorActive_ && frameCount >= 3);
@@ -3684,43 +3686,58 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
 
         if (emulatorActive_) {
             // ── Exit emulator → Meshtastic UI ─────────────────────────────
-            LOG_INFO("[MonsterMesh] ALT-exit emu: step 1 — flipping emulatorActive_\n");
+            // Strict order (per user spec): SAV save → screen → radio.
+            // Running them sequentially on the LVGL thread avoids the
+            // emu-task / LVGL-thread / LoRa-thread spiLock collision that
+            // froze the device. We block LVGL for ~100-200ms total during
+            // this transition, which is acceptable for a mode change.
+            LOG_INFO("[MonsterMesh] ALT-exit: stage A — park emu task\n");
             emulatorActive_ = false;
-            LOG_INFO("[MonsterMesh] ALT-exit emu: step 2 — exitEmulatorMode()\n");
-            exitEmulatorMode();
-            LOG_INFO("[MonsterMesh] ALT-exit emu: step 3 — emu_.isRunning()=%d\n",
-                     (int)emu_.isRunning());
-            if (emu_.isRunning()) pendingSave_ = true;
+            // Poll the emu task's idle signal so we know its in-progress
+            // runFrame (and any auto-save inside it) is fully done before
+            // we touch the screen or SD. Snaps out the moment the emu
+            // task quiesces; cap at 250ms to guard against a stuck task.
+            {
+                uint32_t startWait = millis();
+                while (!emuTaskIdle_ && (millis() - startWait) < 250) {
+                    vTaskDelay(pdMS_TO_TICKS(2));
+                }
+                LOG_INFO("[MonsterMesh] ALT-exit: emu idle after %ums (idle=%d)\n",
+                         (unsigned)(millis() - startWait), (int)emuTaskIdle_);
+            }
+
 #if HAS_TFT
-            LOG_INFO("[MonsterMesh] ALT-exit emu: step 4 — fillScreen\n");
+            // Stage 1 — screen first: restore LVGL flush_cb + full repaint.
+            // User sees Meshtastic instantly; SAV save is deferred so the
+            // SD write doesn't sit between the keypress and the visual
+            // transition.
+            LOG_INFO("[MonsterMesh] ALT-exit: stage 1 — screen restore\n");
             lv_display_t *disp = lv_display_get_default();
             if (disp) {
-                lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
-                if (gfx) {
-                    concurrency::LockGuard g(spiLock);
-                    gfx->clearClipRect();
-                    // Full wipe so emulator pixels don't bleed through
-                    // LVGL's partial-region redraw.
-                    gfx->fillScreen(0x0000);
-                }
-                LOG_INFO("[MonsterMesh] ALT-exit emu: step 5 — restore flush_cb (saved=%p)\n",
-                         savedFlushCb_);
                 if (savedFlushCb_) {
                     lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
                     savedFlushCb_ = nullptr;
                 }
-                LOG_INFO("[MonsterMesh] ALT-exit emu: step 6 — invalidate + force refresh\n");
                 lv_obj_invalidate(lv_screen_active());
-                // lv_obj_invalidate alone only marks the area dirty; the
-                // refresh timer normally picks it up on next tick. After
-                // emu mode that wasn't happening — screen stayed black
-                // until screen-sleep/wake forced a redraw. lv_refr_now
-                // pulls the timer's work forward so the chat panel paints
-                // immediately.
                 lv_refr_now(disp);
-                LOG_INFO("[MonsterMesh] ALT-exit emu: step 7 — done\n");
             }
+            LOG_INFO("[MonsterMesh] ALT-exit: stage 1 done\n");
 #endif
+
+            // Stage 2 — radio: re-arm LoRa + WiFi. exitEmulatorMode flips
+            // atomic flags; the actual SPI work runs in runOnce under
+            // spiLock so it serializes with the deferred SAV save below.
+            LOG_INFO("[MonsterMesh] ALT-exit: stage 2 — re-arm radios\n");
+            exitEmulatorMode();
+
+            // Stage 3 — defer the SAV save to runOnce so the LVGL thread
+            // is freed immediately. SD write happens on the LoRa thread
+            // alongside normal radio operation; spiLock serializes them.
+            if (emu_.isRunning()) {
+                LOG_INFO("[MonsterMesh] ALT-exit: stage 3 — staged SAV save\n");
+                pendingSave_ = true;
+            }
+            LOG_INFO("[MonsterMesh] ALT-exit: all stages done\n");
             return;
         }
 
