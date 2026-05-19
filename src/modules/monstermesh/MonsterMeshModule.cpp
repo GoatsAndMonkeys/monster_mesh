@@ -3786,13 +3786,13 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
             }
 
 #if HAS_TFT
-            // Stage 1 — screen: restore LVGL flush_cb + invalidate.
-            // Skip the spiLock-guarded fillScreen — even with emu task
-            // parked, the render task may still hold spiLock mid-blit
-            // (~16-64ms window) and taking the lock here was freezing
-            // the device. LVGL's invalidate marks the screen dirty;
-            // partial pixels from emu may briefly show through but
-            // the chat panel repaint over them within a tick or two.
+            // Stage 1 — screen: restore LVGL flush_cb + invalidate every
+            // child of the active screen. lv_obj_invalidate(screen) only
+            // marks the screen object's own area as dirty — Meshtastic's
+            // panels are children that LVGL skips unless explicitly
+            // invalidated, so only widgets the user pokes get repainted.
+            // Walk the tree and invalidate each so the entire UI
+            // repaints with proper Meshtastic background pixels.
             LOG_INFO("[MonsterMesh] ALT-exit: stage 1 — screen restore\n");
             lv_display_t *disp = lv_display_get_default();
             if (disp) {
@@ -3800,7 +3800,17 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
                     lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
                     savedFlushCb_ = nullptr;
                 }
-                lv_obj_invalidate(lv_screen_active());
+                lv_obj_t *scr = lv_screen_active();
+                if (scr) {
+                    lv_obj_invalidate(scr);
+                    // Force every descendant to repaint too — LVGL won't
+                    // redraw children just because the parent invalidates.
+                    uint32_t n = lv_obj_get_child_count(scr);
+                    for (uint32_t i = 0; i < n; ++i) {
+                        lv_obj_t *child = lv_obj_get_child(scr, i);
+                        if (child) lv_obj_invalidate(child);
+                    }
+                }
             }
             LOG_INFO("[MonsterMesh] ALT-exit: stage 1 done\n");
 #endif

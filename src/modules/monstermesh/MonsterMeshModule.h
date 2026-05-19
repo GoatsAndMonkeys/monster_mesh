@@ -470,6 +470,13 @@ private:
     // own SAV flush + screen wipe. Avoids the spiLock collisions between
     // emu task SD writes and the LVGL thread.
     volatile bool emuTaskIdle_ = true;
+    // Render task idle signal — set by renderTaskLoop when it's NOT
+    // currently inside blitFrame. ALT-exit polls this too so the LVGL
+    // thread's fillScreen doesn't race with a mid-blit TFT push (both
+    // need spiLock and the render task's blitFrame holds it for one of
+    // four chunks at a time — taking the lock for fillScreen mid-chunk
+    // froze the device).
+    volatile bool renderTaskIdle_ = true;
 
     // Viewport
     volatile int8_t viewportDelta_ = 0;
