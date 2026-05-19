@@ -1472,20 +1472,12 @@ int32_t MonsterMeshModule::runOnce()
     // a separate step + delay between gives the chip time to flush.
     if (radioNeedsRx_) {
         radioNeedsRx_ = false;
-        if (RadioLibInterface::instance) {
-            // The chip was put into IRQ-cleared state on emu entry by
-            // disableInterrupt(). Give it a moment to settle before we
-            // run the heavy startReceive() sequence (which internally
-            // does setStandby + startReceiveDutyCycleAuto + setDio1Action).
-            // Direct startReceive without this settle was reliably hanging
-            // — chip seemed to be in a state setStandby couldn't recover
-            // from. 50ms of yield resolves the race.
-            vTaskDelay(pdMS_TO_TICKS(50));
-            LOG_INFO("[MonsterMesh] sync: re-arming LoRa RX\n");
-            concurrency::LockGuard g(spiLock);
-            RadioLibInterface::instance->startReceive();
-            LOG_INFO("[MonsterMesh] sync: LoRa RX re-armed\n");
-        }
+        // No-op: enterEmulatorMode no longer calls disableInterrupt, so
+        // the radio is still in RX continuously during emu. g_meshSuspended
+        // drops packets at the receivePacket level for the duration. On
+        // exit we just clear g_meshSuspended (in exitEmulatorMode) and
+        // packets flow normally again — no startReceive needed.
+        LOG_INFO("[MonsterMesh] sync: radio already RX'ing (no-op re-arm)\n");
     }
     if (radioParked_ && wifiBooted_) {
         LOG_INFO("[MonsterMesh] sync: tearing WiFi down\n");
@@ -4153,21 +4145,14 @@ void MonsterMeshModule::enterEmulatorMode()
     // come up instantly after pressing ALT.
     wifiSuppressed = true;
     g_meshSuspended = true;
-    // Yield so any in-flight LoRa SPI tx completes and spiLock is released
-    // before we take it for the chip sleep command. Skipping this caused
-    // SX126x sleep() to hang waiting for the bus.
-    vTaskDelay(pdMS_TO_TICKS(20));
-    LOG_INFO("MonsterMesh: parking LoRa radio (IRQ disable)\n");
-    if (RadioLibInterface::instance) {
-        // Soft park: just disable the DIO1 IRQ. The full chip sleep() path
-        // (setStandby → checkNotification → standby command → SetSleep) was
-        // hanging mid-call on the LVGL thread. Disabling IRQ is one SPI op
-        // (clearDio1Action) and matches what the older firmware did.
-        // RX packets won't be processed, and TX is already gated by
-        // g_meshSuspended in MeshService::handleToRadio.
-        RadioLibInterface::instance->disableInterrupt();
-    }
-    LOG_INFO("MonsterMesh: radios parked\n");
+    // No-op park on the radio chip: previously we called disableInterrupt()
+    // here to silence DIO1 callbacks. That left the chip in a state that
+    // startReceive() on exit could not recover from — every exit hung at
+    // setStandby/checkNotification inside startReceive. Instead, let the
+    // chip keep RX'ing autonomously; g_meshSuspended already drops the
+    // packets at the receivePacket level and gates TX at three other layers
+    // (per feedback_mm_tx_gate_layered.md), so emu mode stays quiet.
+    LOG_INFO("MonsterMesh: radios parked (soft — IRQ left enabled to avoid resume hang)\n");
 }
 
 void MonsterMeshModule::exitEmulatorMode()
