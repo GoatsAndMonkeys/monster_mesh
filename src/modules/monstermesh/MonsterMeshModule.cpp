@@ -1418,7 +1418,15 @@ int32_t MonsterMeshModule::runOnce()
         radioNeedsRx_ = false;
         if (RadioLibInterface::instance) {
             LOG_INFO("[MonsterMesh] sync: re-arming LoRa RX\n");
+            // startReceive() does SPI ops (setStandby + startReceiveDutyCycleAuto
+            // + setDio1Action) but doesn't take spiLock itself. The LVGL thread
+            // is concurrently running fillScreen+spiLock during ALT-exit, and
+            // the emu render task may still be mid-blit on Core 0. Bus
+            // collisions between LoRa SPI and TFT SPI froze the device. Hold
+            // spiLock here so SPI is serialized across all three users.
+            concurrency::LockGuard g(spiLock);
             RadioLibInterface::instance->startReceive();
+            LOG_INFO("[MonsterMesh] sync: LoRa RX re-armed\n");
         }
     }
     if (radioParked_ && wifiBooted_) {
