@@ -1559,11 +1559,11 @@ int32_t MonsterMeshModule::runOnce()
     // T4 reply drain: peer's Y/N to our outstanding challenge.
     if (pendingMmtAccepted_) {
         pendingMmtAccepted_ = false;
-        char buf[80];
-        snprintf(buf, sizeof(buf),
-                 "%s accepted! Starting battle...",
-                 mmtPeerShort_[0] ? mmtPeerShort_ : "Peer");
-        terminal_.printLine(buf);
+        // NOTE: do NOT call terminal_.printLine() here. runOnce is on the
+        // LoRa task; printLine allocates LVGL labels on that thread and can
+        // deadlock LVGL when label-create contends with the LVGL render
+        // task. The battle screen takes over the display in a few ticks
+        // anyway, so the user wouldn't see the line either way.
         LOG_INFO("[MonsterMesh] mmt accept from %s — kicking off PvP\n",
                  mmtPeerShort_[0] ? mmtPeerShort_ : "(?)");
         LOG_INFO("[MonsterMesh] mmt accept gate: target=0x%08X hasParty=%d "
@@ -1590,10 +1590,8 @@ int32_t MonsterMeshModule::runOnce()
     }
     if (pendingMmtDeclined_) {
         pendingMmtDeclined_ = false;
-        char buf[80];
-        snprintf(buf, sizeof(buf), "%s fled.",
-                 mmtPeerShort_[0] ? mmtPeerShort_ : "Peer");
-        terminal_.printLine(buf);
+        // Same LVGL-from-LoRa-thread hazard as the accept path above — skip
+        // the printLine and just log to serial.
         LOG_INFO("[MonsterMesh] mmt decline from %s\n",
                  mmtPeerShort_[0] ? mmtPeerShort_ : "(?)");
     }
@@ -2708,15 +2706,21 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
         }
         if (!symAltHeld) g_symAltConsumed = false;
 
-        // ALT button in RAW mode — toggle screens (exit emulator)
+        // ALT button in RAW mode — toggle screens (exit emulator).
+        // CRITICAL: this is one of THREE ALT detectors (the others are the
+        // KEY-mode peek above and the runOnce I2C poll). They must share the
+        // same g_lastAltFireMs debounce, otherwise a single physical press
+        // fires here AND in the runOnce poll, double-toggling — emulator
+        // exit + immediate browser activate — and freezing the device.
         bool altHeld = (b[0] & 0x10) != 0;
         static bool g_altWasHeldRaw = false;
         static bool g_altSeenLowRaw = false;
         if (!altHeld) g_altSeenLowRaw = true;
         if (altHeld && !g_altWasHeldRaw && g_altSeenLowRaw) {
             uint32_t now = millis();
-            if (now - g_micLastToggleMs > 600) {
-                g_micLastToggleMs = now;
+            if (now - g_lastAltFireMs > 1000) {
+                g_lastAltFireMs = now;
+                g_micLastToggleMs = now;  // also gate mic so it doesn't bounce
                 if (monsterMeshModule) {
                     monsterMeshModule->setJoypadDirect(0);
                     monsterMeshModule->handleKeyFromLVGL(0x05);
