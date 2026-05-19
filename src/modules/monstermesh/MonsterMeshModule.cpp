@@ -3786,21 +3786,16 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
             }
 
 #if HAS_TFT
-            // Stage 1 — screen: wipe TFT to black, then restore LVGL
-            // flush_cb + invalidate. Without the wipe, LVGL's partial
-            // repaint only updates regions widgets ask for; left-over
-            // emulator pixels stay in untouched areas → user sees
-            // half-emu-half-chat artifacts. Safe to take spiLock here
-            // now that the emu task is parked (stage A polled
-            // emuTaskIdle_) and the SAV save is deferred to stage 3.
-            LOG_INFO("[MonsterMesh] ALT-exit: stage 1 — screen wipe + restore\n");
+            // Stage 1 — screen: restore LVGL flush_cb + invalidate.
+            // Skip the spiLock-guarded fillScreen — even with emu task
+            // parked, the render task may still hold spiLock mid-blit
+            // (~16-64ms window) and taking the lock here was freezing
+            // the device. LVGL's invalidate marks the screen dirty;
+            // partial pixels from emu may briefly show through but
+            // the chat panel repaint over them within a tick or two.
+            LOG_INFO("[MonsterMesh] ALT-exit: stage 1 — screen restore\n");
             lv_display_t *disp = lv_display_get_default();
             if (disp) {
-                if (g_deviceUiLgfx) {
-                    concurrency::LockGuard g(spiLock);
-                    g_deviceUiLgfx->clearClipRect();
-                    g_deviceUiLgfx->fillScreen(0x0000);
-                }
                 if (savedFlushCb_) {
                     lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
                     savedFlushCb_ = nullptr;
