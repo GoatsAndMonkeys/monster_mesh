@@ -524,6 +524,17 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                  (mmtChallengerPeer_ != 0 && mp.from == mmtChallengerPeer_))) {
                 if (mp.decoded.payload.size < BATTLELINK_HDR_SIZE + 2)
                     return ProcessMessage::CONTINUE;
+                // Lazy-allocate the chunk-assembly buffer in PSRAM the first
+                // time we need it. Keeps it out of heap so emu task stack
+                // alloc can succeed even after long runtime fragmentation.
+                if (!mmbPartyChunks_) {
+                    mmbPartyChunks_ = (uint8_t *)ps_malloc(MMB_PARTY_CHUNKS_BYTES);
+                    if (!mmbPartyChunks_) {
+                        LOG_WARN("[MonsterMesh] mmbPartyChunks PSRAM alloc failed\n");
+                        return ProcessMessage::CONTINUE;
+                    }
+                    memset(mmbPartyChunks_, 0, MMB_PARTY_CHUNKS_BYTES);
+                }
                 uint8_t partIdx   = bp->payload[0];
                 uint8_t partTotal = bp->payload[1];
                 size_t  dataLen   = mp.decoded.payload.size -
@@ -536,7 +547,7 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 if (partTotal == 0 || partTotal > 8) return ProcessMessage::CONTINUE;
                 if (partIdx >= partTotal)            return ProcessMessage::CONTINUE;
                 size_t off = (size_t)partIdx * CHUNK;
-                if (off + dataLen > sizeof(mmbPartyChunks_))
+                if (off + dataLen > MMB_PARTY_CHUNKS_BYTES)
                     return ProcessMessage::CONTINUE;
                 memcpy(mmbPartyChunks_ + off, bp->payload + 2, dataLen);
                 mmbPartyTotal_     = partTotal;
@@ -546,7 +557,7 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 if ((mmbPartyChunkMask_ & fullMask) == fullMask) {
                     // All chunks in — parse into Gen1Party. Sender wrote
                     // it as raw memcpy(buf, &party, sizeof(Gen1Party)).
-                    if (sizeof(mmbOppParty_) <= sizeof(mmbPartyChunks_)) {
+                    if (sizeof(mmbOppParty_) <= MMB_PARTY_CHUNKS_BYTES) {
                         memcpy(&mmbOppParty_, mmbPartyChunks_,
                                sizeof(mmbOppParty_));
                         mmbOppPartyReady_ = true;
@@ -3950,21 +3961,44 @@ void MonsterMeshModule::launchROM(const char *path)
         }
     }
 
-    // Create emulator FreeRTOS task on Core 1 (high priority — never stalls)
+    // Create emulator FreeRTOS task on Core 1 (high priority — never stalls).
+    // Heap fragmentation has been observed killing this silently — if the
+    // task fails to spawn, ROM "loads" but the screen stays on the
+    // Loading... overlay because no frame ever blits. Log explicitly.
     if (!emuTaskHandle_) {
-        xTaskCreatePinnedToCore(
+        BaseType_t r = xTaskCreatePinnedToCore(
             emuTaskEntry, "monstermesh_emu",
             16384, this, 5, &emuTaskHandle_, 1
         );
+        if (r != pdPASS || !emuTaskHandle_) {
+            LOG_ERROR("[MonsterMesh] emu task spawn FAILED (r=%d handle=%p) "
+                      "free=%u largest=%u — heap too fragmented\n",
+                      (int)r, (void *)emuTaskHandle_,
+                      (unsigned)ESP.getFreeHeap(),
+                      (unsigned)ESP.getMaxAllocHeap());
+        } else {
+            LOG_INFO("[MonsterMesh] emu task spawned (handle=%p)\n",
+                     (void *)emuTaskHandle_);
+        }
     }
 
     // Create render task on Core 0 (lower priority — blits framebuffer to TFT
     // without blocking the emulator task, so audio stays smooth)
     if (!renderTaskHandle_) {
-        xTaskCreatePinnedToCore(
+        BaseType_t r = xTaskCreatePinnedToCore(
             renderTaskEntry, "monstermesh_render",
             4096, this, 2, &renderTaskHandle_, 0
         );
+        if (r != pdPASS || !renderTaskHandle_) {
+            LOG_ERROR("[MonsterMesh] render task spawn FAILED (r=%d handle=%p) "
+                      "free=%u largest=%u\n",
+                      (int)r, (void *)renderTaskHandle_,
+                      (unsigned)ESP.getFreeHeap(),
+                      (unsigned)ESP.getMaxAllocHeap());
+        } else {
+            LOG_INFO("[MonsterMesh] render task spawned (handle=%p)\n",
+                     (void *)renderTaskHandle_);
+        }
     }
 
     // Set up LGFX for emulator rendering (LVGL flush already suppressed)

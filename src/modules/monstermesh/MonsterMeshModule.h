@@ -421,9 +421,12 @@ private:
     volatile uint32_t mmbPartyRxFrom_    = 0;
     Gen1Party         mmbOppParty_       = {};
     volatile bool     mmbOppPartyReady_  = false;
-    // Chunk reassembly buffer — Gen1Party = 404 bytes, with 194 bytes per
-    // chunk that's 3 chunks. Reserve 8 chunks * 194 bytes = 1552 to be safe.
-    uint8_t           mmbPartyChunks_[1552] = {};
+    // Chunk reassembly buffer — Gen1Party = 404 bytes, with 100 bytes per
+    // chunk that's 5 chunks. 8 * 100 = 800 bytes max. Lazy-allocated in
+    // PSRAM on first incoming chunk so it doesn't take heap from the emu
+    // task stack alloc (16KB) when a ROM is launched.
+    uint8_t          *mmbPartyChunks_   = nullptr;
+    static constexpr size_t MMB_PARTY_CHUNKS_BYTES = 800;
     uint8_t           mmbPartyChunkMask_ = 0;
     uint8_t           mmbPartyTotal_     = 0;
 
