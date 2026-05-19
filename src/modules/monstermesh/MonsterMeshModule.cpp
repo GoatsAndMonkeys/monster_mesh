@@ -3676,10 +3676,15 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
 
         if (emulatorActive_) {
             // ── Exit emulator → Meshtastic UI ─────────────────────────────
+            LOG_INFO("[MonsterMesh] ALT-exit emu: step 1 — flipping emulatorActive_\n");
             emulatorActive_ = false;
+            LOG_INFO("[MonsterMesh] ALT-exit emu: step 2 — exitEmulatorMode()\n");
             exitEmulatorMode();
+            LOG_INFO("[MonsterMesh] ALT-exit emu: step 3 — emu_.isRunning()=%d\n",
+                     (int)emu_.isRunning());
             if (emu_.isRunning()) pendingSave_ = true;
 #if HAS_TFT
+            LOG_INFO("[MonsterMesh] ALT-exit emu: step 4 — fillScreen\n");
             lv_display_t *disp = lv_display_get_default();
             if (disp) {
                 lgfx::LGFX_Device *gfx = g_deviceUiLgfx;
@@ -3690,11 +3695,22 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
                     // LVGL's partial-region redraw.
                     gfx->fillScreen(0x0000);
                 }
+                LOG_INFO("[MonsterMesh] ALT-exit emu: step 5 — restore flush_cb (saved=%p)\n",
+                         savedFlushCb_);
                 if (savedFlushCb_) {
                     lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
                     savedFlushCb_ = nullptr;
                 }
+                LOG_INFO("[MonsterMesh] ALT-exit emu: step 6 — invalidate + force refresh\n");
                 lv_obj_invalidate(lv_screen_active());
+                // lv_obj_invalidate alone only marks the area dirty; the
+                // refresh timer normally picks it up on next tick. After
+                // emu mode that wasn't happening — screen stayed black
+                // until screen-sleep/wake forced a redraw. lv_refr_now
+                // pulls the timer's work forward so the chat panel paints
+                // immediately.
+                lv_refr_now(disp);
+                LOG_INFO("[MonsterMesh] ALT-exit emu: step 7 — done\n");
             }
 #endif
             return;
