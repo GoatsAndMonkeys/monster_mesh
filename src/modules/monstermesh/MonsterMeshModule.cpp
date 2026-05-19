@@ -1463,18 +1463,29 @@ int32_t MonsterMeshModule::runOnce()
     // Radio + WiFi state sync on the LoRa thread. LVGL thread only flips
     // radioParked_/radioNeedsRx_; we reconcile here so LVGL stays snappy.
     //
-    // DIAGNOSTIC: skip startReceive() entirely. We've isolated the post-
-    // emu-exit freeze to the moment runOnce tries to re-arm RX — every
-    // attempt to call startReceive() hangs, even with spiLock held +
-    // save-before-radio ordering. The chip's IRQ was disabled on emu
-    // entry; without startReceive the chip keeps RX'ing autonomously but
-    // we won't be notified of new packets until the next radio reset.
-    // If this build unsticks the freeze, the problem is in startReceive
-    // itself (likely interaction with stale chip IRQ state); we'll then
-    // try clearing IRQ flags before re-arming.
+    // Two-step re-arm: first force the chip into a known state via
+    // setStandby() (which calls checkNotification + lora.standby +
+    // disableInterrupt), wait briefly for the chip to settle, then call
+    // startReceive(). Diag in b330 showed calling startReceive directly
+    // after emu exit hung the device — chip was likely in a state where
+    // setStandby inside startReceive couldn't make progress. Doing it as
+    // a separate step + delay between gives the chip time to flush.
     if (radioNeedsRx_) {
         radioNeedsRx_ = false;
-        LOG_INFO("[MonsterMesh] sync: skipping startReceive (diagnostic — chip stays in current mode)\n");
+        if (RadioLibInterface::instance) {
+            // The chip was put into IRQ-cleared state on emu entry by
+            // disableInterrupt(). Give it a moment to settle before we
+            // run the heavy startReceive() sequence (which internally
+            // does setStandby + startReceiveDutyCycleAuto + setDio1Action).
+            // Direct startReceive without this settle was reliably hanging
+            // — chip seemed to be in a state setStandby couldn't recover
+            // from. 50ms of yield resolves the race.
+            vTaskDelay(pdMS_TO_TICKS(50));
+            LOG_INFO("[MonsterMesh] sync: re-arming LoRa RX\n");
+            concurrency::LockGuard g(spiLock);
+            RadioLibInterface::instance->startReceive();
+            LOG_INFO("[MonsterMesh] sync: LoRa RX re-armed\n");
+        }
     }
     if (radioParked_ && wifiBooted_) {
         LOG_INFO("[MonsterMesh] sync: tearing WiFi down\n");
