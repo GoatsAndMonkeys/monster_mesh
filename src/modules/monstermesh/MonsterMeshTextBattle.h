@@ -51,14 +51,22 @@ public:
     // If existingSeed != 0, use it and skip the internal sendStart (caller
     // already broadcast TEXT_BATTLE_START with the same seed). Otherwise
     // a seed is generated and the engine emits its own start packet.
+    // existingSession non-zero: set engine session_ to that value (must
+    // match the session_id the caller used in the START packet so the
+    // receiver's ACTION/HASH/FORFEIT packets pass our session check).
     void startNetworkedAsInitiator(uint32_t remoteId, const Gen1Party &myParty,
                                    const Gen1Party &oppParty,
-                                   uint32_t existingSeed = 0);
+                                   uint32_t existingSeed = 0,
+                                   uint16_t existingSession = 0);
 
     // Networked receiver. Called by handlePacket() on TEXT_BATTLE_START.
+    // existingSession is the session_id captured from the START packet —
+    // must be passed so our outgoing ACTION packets match the initiator's
+    // session check.
     void startNetworkedAsReceiver(uint32_t remoteId, const Gen1Party &myParty,
                                   uint32_t rngSeed,
-                                  const Gen1Party &oppParty);
+                                  const Gen1Party &oppParty,
+                                  uint16_t existingSession = 0);
 
     // Local roguelike battle. CPU runs side 1. trainerTags[2] are the short
     // names prepended to each pokemon's nickname so messages like

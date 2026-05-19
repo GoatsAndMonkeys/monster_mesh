@@ -817,7 +817,14 @@ void MonsterMeshModule::sendMmbBattleStart(uint32_t seed)
     BattlePacket *bp = (BattlePacket *)p->decoded.payload.bytes;
     memset(bp, 0, BATTLELINK_HDR_SIZE + 14);
     bp->type = (uint8_t)PktType::TEXT_BATTLE_START;
-    bp->setSessionId((uint16_t)(millis() & 0xFFFF));
+    // Record the session_id we use for THIS battle so the engine can use
+    // the same value when we later call startNetworkedAsInitiator —
+    // otherwise sender's outgoing ACTION packets (with engine session_)
+    // mismatch what the receiver captured from this START packet and get
+    // dropped on receipt. Same value flows: module session var → START
+    // packet → receiver captures from packet → both engines pin to it.
+    mmtBattleSession_ = (uint16_t)(millis() & 0xFFFF);
+    bp->setSessionId(mmtBattleSession_);
     bp->seq = 0;
     bp->payload[0] = (seed >> 24) & 0xFF;
     bp->payload[1] = (seed >> 16) & 0xFF;
@@ -827,8 +834,8 @@ void MonsterMeshModule::sendMmbBattleStart(uint32_t seed)
     bp->payload[5] = 0;  // party count placeholder; real party comes via chunks
     p->decoded.payload.size = BATTLELINK_HDR_SIZE + 14;
     service->sendToMesh(p);
-    LOG_INFO("[MonsterMesh] mmt: sent TEXT_BATTLE_START seed=0x%08X\n",
-             (unsigned)seed);
+    LOG_INFO("[MonsterMesh] mmt: sent TEXT_BATTLE_START seed=0x%08X session=0x%04X\n",
+             (unsigned)seed, (unsigned)mmtBattleSession_);
 }
 
 // Chunk and send our current party to a peer as TEXT_BATTLE_PARTY packets
@@ -1942,23 +1949,32 @@ int32_t MonsterMeshModule::runOnce()
                  "party (count=%u)\n", (unsigned)oppParty.count);
 
         if (asInitiator) {
-            // Pass the pre-computed seed — TEXT_BATTLE_START was already
-            // broadcast by sendMmbBattleStart() right when Y was received.
+            // Pass the pre-computed seed AND session — TEXT_BATTLE_START
+            // was already broadcast by sendMmbBattleStart() with that
+            // session_id. Engine's session_ must match so outgoing
+            // ACTION/HASH/FORFEIT packets pass the receiver's filter.
             textBattle_.startNetworkedAsInitiator(mmtBattlePeer_,
                                                    terminal_.getParty(),
                                                    oppParty,
-                                                   mmtBattleSeed_);
+                                                   mmtBattleSeed_,
+                                                   mmtBattleSession_);
             char hdr[40];
             snprintf(hdr, sizeof(hdr), "MMB vs %.4s",
                      mmtPeerShort_[0] ? mmtPeerShort_ : "Peer");
             textBattle_.setHeader(hdr);
-            LOG_INFO("[MonsterMesh] PvP: started as initiator vs 0x%08X opp=%u\n",
-                     (unsigned)mmtBattlePeer_, (unsigned)oppParty.count);
+            LOG_INFO("[MonsterMesh] PvP: started as initiator vs 0x%08X opp=%u session=0x%04X\n",
+                     (unsigned)mmtBattlePeer_, (unsigned)oppParty.count,
+                     (unsigned)mmtBattleSession_);
         } else {
+            // Pass the session_id captured from the incoming START packet
+            // (handleReceived stored it in mmtBattleSession_) so our
+            // outgoing ACTION packets match the initiator's session
+            // filter.
             textBattle_.startNetworkedAsReceiver(mmtBattlePeer_,
                                                   terminal_.getParty(),
                                                   mmtBattleSeed_,
-                                                  oppParty);
+                                                  oppParty,
+                                                  mmtBattleSession_);
             char hdr[40];
             snprintf(hdr, sizeof(hdr), "MMB incoming");
             textBattle_.setHeader(hdr);

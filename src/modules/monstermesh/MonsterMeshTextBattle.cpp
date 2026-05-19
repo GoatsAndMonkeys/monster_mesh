@@ -47,12 +47,17 @@ void MonsterMeshTextBattle::appendLog(const char *line)
 void MonsterMeshTextBattle::startNetworkedAsInitiator(uint32_t remoteId,
                                                      const Gen1Party &myParty,
                                                      const Gen1Party &oppParty,
-                                                     uint32_t existingSeed)
+                                                     uint32_t existingSeed,
+                                                     uint16_t existingSession)
 {
     mode_     = Mode::NETWORKED;
     phase_    = Phase::WAIT_REMOTE;
     remoteId_ = remoteId;
-    session_  = (uint16_t)(millis() & 0xFFFF);
+    // If the caller (module's sendMmbBattleStart) already broadcast START
+    // with a specific session_id, use it so our outgoing ACTION packets
+    // match what the receiver is filtering on. Otherwise pick a fresh one.
+    session_  = existingSession ? existingSession
+                                : (uint16_t)(millis() & 0xFFFF);
     cursor_   = 0; switchCursor_ = 0;
     pendingRemoteAction_ = false;
     logFill_ = logHead_ = 0; scrollPending_ = 0;
@@ -80,11 +85,16 @@ void MonsterMeshTextBattle::startNetworkedAsInitiator(uint32_t remoteId,
 void MonsterMeshTextBattle::startNetworkedAsReceiver(uint32_t remoteId,
                                                      const Gen1Party &myParty,
                                                      uint32_t rngSeed,
-                                                     const Gen1Party &oppParty)
+                                                     const Gen1Party &oppParty,
+                                                     uint16_t existingSession)
 {
     mode_     = Mode::NETWORKED;
     phase_    = Phase::WAIT_ACTION;
     remoteId_ = remoteId;
+    // Use the session_id we captured from the incoming START packet so
+    // ACTION packets we emit match the initiator's session filter — and
+    // ACTION packets the initiator sends pass our session filter.
+    session_  = existingSession;
     cursor_   = 0; switchCursor_ = 0;
     logFill_ = logHead_ = 0; scrollPending_ = 0;
 
