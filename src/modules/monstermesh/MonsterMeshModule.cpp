@@ -1050,6 +1050,41 @@ int32_t MonsterMeshModule::runOnce()
         // Register scanline callback (used once a ROM is loaded)
         emu_.setScanlineCallback(scanlineCallback, this);
 
+        // Pre-allocate emu + render task stacks NOW while the heap is fresh.
+        // If we wait until the first ROM launch (a few minutes in), heap
+        // fragmentation makes the 16KB emu stack alloc fail silently (we've
+        // seen free=28KB but largest=13KB) and the ROM "loads" with no task
+        // to blit frames. Tasks idle on emulatorActive_=false until needed.
+        if (!emuTaskHandle_) {
+            BaseType_t r = xTaskCreatePinnedToCore(
+                emuTaskEntry, "monstermesh_emu",
+                16384, this, 5, &emuTaskHandle_, 1
+            );
+            if (r != pdPASS || !emuTaskHandle_) {
+                LOG_ERROR("[MonsterMesh] boot emu task spawn FAILED (r=%d) "
+                          "free=%u largest=%u\n",
+                          (int)r,
+                          (unsigned)ESP.getFreeHeap(),
+                          (unsigned)ESP.getMaxAllocHeap());
+            } else {
+                LOG_INFO("[MonsterMesh] boot emu task spawned (handle=%p) "
+                         "free=%u largest=%u\n",
+                         (void *)emuTaskHandle_,
+                         (unsigned)ESP.getFreeHeap(),
+                         (unsigned)ESP.getMaxAllocHeap());
+            }
+        }
+        if (!renderTaskHandle_) {
+            BaseType_t r = xTaskCreatePinnedToCore(
+                renderTaskEntry, "monstermesh_render",
+                4096, this, 2, &renderTaskHandle_, 0
+            );
+            if (r == pdPASS && renderTaskHandle_) {
+                LOG_INFO("[MonsterMesh] boot render task spawned (handle=%p)\n",
+                         (void *)renderTaskHandle_);
+            }
+        }
+
         setupDone_ = true;
 
         // Keyboard hook installed early (at 1s) via kbObserverRegistered_ path above.
