@@ -3742,22 +3742,30 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
     if (ascii == 0x05) {
         if (browserActive_) {
             // ── Exit browser → Meshtastic UI ──────────────────────────────
+            // Same lessons as ALT-exit-emu (b339+): no fillScreen (would
+            // race with SD reads still in flight for the browser scan),
+            // walk the screen's children explicitly when invalidating so
+            // Meshtastic's panels actually repaint instead of filling in
+            // one widget at a time as the user taps.
+            LOG_INFO("[MonsterMesh] ALT-exit browser: returning to Meshtastic\n");
             browserActive_ = false;
             exitEmulatorMode();  // emulatorActive_ already false
 #if HAS_TFT
-            // Wipe the framebuffer to black BEFORE restoring LVGL's flush
-            // so the partial-region redraw doesn't leave stale browser
-            // pixels visible in areas LVGL doesn't invalidate.
-            if (g_deviceUiLgfx) {
-                concurrency::LockGuard g(spiLock);
-                g_deviceUiLgfx->clearClipRect();
-                g_deviceUiLgfx->fillScreen(0x0000);
-            }
             lv_display_t *disp = lv_display_get_default();
-            if (disp && savedFlushCb_) {
-                lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
-                savedFlushCb_ = nullptr;
-                lv_obj_invalidate(lv_screen_active());
+            if (disp) {
+                if (savedFlushCb_) {
+                    lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
+                    savedFlushCb_ = nullptr;
+                }
+                lv_obj_t *scr = lv_screen_active();
+                if (scr) {
+                    lv_obj_invalidate(scr);
+                    uint32_t n = lv_obj_get_child_count(scr);
+                    for (uint32_t i = 0; i < n; ++i) {
+                        lv_obj_t *child = lv_obj_get_child(scr, i);
+                        if (child) lv_obj_invalidate(child);
+                    }
+                }
             }
 #endif
             return;
