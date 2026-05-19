@@ -1462,20 +1462,19 @@ int32_t MonsterMeshModule::runOnce()
 
     // Radio + WiFi state sync on the LoRa thread. LVGL thread only flips
     // radioParked_/radioNeedsRx_; we reconcile here so LVGL stays snappy.
+    //
+    // DIAGNOSTIC: skip startReceive() entirely. We've isolated the post-
+    // emu-exit freeze to the moment runOnce tries to re-arm RX — every
+    // attempt to call startReceive() hangs, even with spiLock held +
+    // save-before-radio ordering. The chip's IRQ was disabled on emu
+    // entry; without startReceive the chip keeps RX'ing autonomously but
+    // we won't be notified of new packets until the next radio reset.
+    // If this build unsticks the freeze, the problem is in startReceive
+    // itself (likely interaction with stale chip IRQ state); we'll then
+    // try clearing IRQ flags before re-arming.
     if (radioNeedsRx_) {
         radioNeedsRx_ = false;
-        if (RadioLibInterface::instance) {
-            LOG_INFO("[MonsterMesh] sync: re-arming LoRa RX\n");
-            // startReceive() does SPI ops (setStandby + startReceiveDutyCycleAuto
-            // + setDio1Action) but doesn't take spiLock itself. The LVGL thread
-            // is concurrently running fillScreen+spiLock during ALT-exit, and
-            // the emu render task may still be mid-blit on Core 0. Bus
-            // collisions between LoRa SPI and TFT SPI froze the device. Hold
-            // spiLock here so SPI is serialized across all three users.
-            concurrency::LockGuard g(spiLock);
-            RadioLibInterface::instance->startReceive();
-            LOG_INFO("[MonsterMesh] sync: LoRa RX re-armed\n");
-        }
+        LOG_INFO("[MonsterMesh] sync: skipping startReceive (diagnostic — chip stays in current mode)\n");
     }
     if (radioParked_ && wifiBooted_) {
         LOG_INFO("[MonsterMesh] sync: tearing WiFi down\n");
