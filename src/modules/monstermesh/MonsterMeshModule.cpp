@@ -3711,10 +3711,12 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
             }
 
 #if HAS_TFT
-            // Stage 1 — screen first: restore LVGL flush_cb + full repaint.
-            // User sees Meshtastic instantly; SAV save is deferred so the
-            // SD write doesn't sit between the keypress and the visual
-            // transition.
+            // Stage 1 — screen first: restore LVGL flush_cb + invalidate.
+            // We're called from inside the LVGL keypad indev callback;
+            // calling lv_refr_now from there re-enters LVGL's refresh
+            // pipeline and was breaking the input task after the exit.
+            // Just mark the screen dirty — LVGL's refresh timer picks it
+            // up on the very next tick (within ~30ms).
             LOG_INFO("[MonsterMesh] ALT-exit: stage 1 — screen restore\n");
             lv_display_t *disp = lv_display_get_default();
             if (disp) {
@@ -3723,7 +3725,6 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
                     savedFlushCb_ = nullptr;
                 }
                 lv_obj_invalidate(lv_screen_active());
-                lv_refr_now(disp);
             }
             LOG_INFO("[MonsterMesh] ALT-exit: stage 1 done\n");
 #endif
