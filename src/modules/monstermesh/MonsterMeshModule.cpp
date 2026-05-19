@@ -214,7 +214,7 @@ int MonsterMeshModule::handleInputEvent(const InputEvent *event)
     // (which would enter ROM loader and immediately exit it back to chat).
     if (event->kbchar == 0x05) {  // Ctrl+E
         uint32_t now = millis();
-        if (now - g_lastAltFireMs > 1000) {
+        if (now - g_lastAltFireMs > 250) {
             g_lastAltFireMs = now;
             handleKeyPress(0x05);
         }
@@ -1334,7 +1334,7 @@ int32_t MonsterMeshModule::runOnce()
                 bool altNow = (b[0] & 0x10) != 0;
                 static bool altSeenLow = false;  // require a clean low baseline before firing
                 if (!altNow) altSeenLow = true;
-                if (altNow && !altWas && altSeenLow && (now - g_lastAltFireMs > 1000)) {
+                if (altNow && !altWas && altSeenLow && (now - g_lastAltFireMs > 250)) {
                     g_lastAltFireMs = now;
                     LOG_INFO("[MonsterMesh] ALT pressed (runOnce poll) → toggle\n");
                     handleKeyPress(0x05);
@@ -1547,7 +1547,11 @@ int32_t MonsterMeshModule::runOnce()
     // Deferred save — triggered on emulator exit, done here outside LVGL callback
     if (pendingSave_) {
         pendingSave_ = false;
+        uint32_t saveStart = millis();
+        LOG_INFO("[MonsterMesh] deferred SAV save: start\n");
         emu_.save();
+        LOG_INFO("[MonsterMesh] deferred SAV save: done (%ums)\n",
+                 (unsigned)(millis() - saveStart));
     }
 
     // Battle-XP write-back to /<rom>.sav. Gated on:
@@ -2674,7 +2678,7 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
         if (!altPressed) g_keyPeekAltSeenLow = true;
         if (altPressed && !g_keyPeekAltWasPressed && g_keyPeekAltSeenLow) {
             uint32_t now = millis();
-            if (now - g_lastAltFireMs > 1000) {
+            if (now - g_lastAltFireMs > 250) {
                 g_lastAltFireMs = now;
                 g_micLastToggleMs = now;
                 g_keyPeekAltWasPressed = true;
@@ -2737,7 +2741,7 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
         if (!altHeld) g_altSeenLowRaw = true;
         if (altHeld && !g_altWasHeldRaw && g_altSeenLowRaw) {
             uint32_t now = millis();
-            if (now - g_lastAltFireMs > 1000) {
+            if (now - g_lastAltFireMs > 250) {
                 g_lastAltFireMs = now;
                 g_micLastToggleMs = now;  // also gate mic so it doesn't bounce
                 if (monsterMeshModule) {
