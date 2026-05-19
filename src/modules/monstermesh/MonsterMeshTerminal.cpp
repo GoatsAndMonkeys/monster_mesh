@@ -215,6 +215,17 @@ void MonsterMeshTerminal::setParty(const Gen1Party &p)
     partyLoaded_ = (p.count > 0 && p.count <= 6);
 }
 
+void MonsterMeshTerminal::yieldFocus()
+{
+    if (!input_) return;
+    lv_obj_remove_state(input_, LV_STATE_FOCUSED);
+    lv_group_t *grp = (lv_group_t *)lv_obj_get_group(input_);
+    if (grp) {
+        lv_group_remove_obj(input_);
+        lv_group_focus_next(grp);
+    }
+}
+
 bool MonsterMeshTerminal::hasInputFocus() const
 {
     if (!input_ || !panel_) return false;

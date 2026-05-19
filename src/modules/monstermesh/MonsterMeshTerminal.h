@@ -54,6 +54,12 @@ class MonsterMeshTerminal {
     // LVGL state but reads only.
     bool hasInputFocus() const;
 
+    // Remove input_ from the LVGL focus group + clear LV_STATE_FOCUSED
+    // WITHOUT hiding the panel or losing scrollback. Used when entering
+    // ROM loader: the terminal panel stays alive, but LVGL's focus moves
+    // off our input field so chat/DM textareas can claim it on return.
+    void yieldFocus();
+
     // Callback used to fill `buf` with the current daycare status (multiline,
     // newline-separated). Invoked when the user types `daycare` in the
     // terminal. Set by the module so the terminal stays decoupled from
