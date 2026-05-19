@@ -3766,6 +3766,19 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
         // deadlock with in-progress DeviceUI rendering (e.g. during the
         // 250-node restore). Stage a flag and let runOnce handle the
         // expensive parts on the LoRa thread.
+        //
+        // Also: yield LVGL focus before we leave Meshtastic. If the
+        // terminal panel's input_ is in the focus group, after we ALT
+        // back from the emulator LVGL would still route keys to that
+        // hidden input — chat textarea would appear frozen even though
+        // the module is forwarding keys correctly. terminal_.close()
+        // removes input_ from the group (and clears LV_STATE_FOCUSED),
+        // letting Meshtastic's UI reclaim focus naturally on return.
+        if (terminalActive_) {
+            LOG_INFO("[MonsterMesh] ALT-enter ROM loader: closing terminal panel to free LVGL focus\n");
+            terminal_.close();
+            terminalActive_ = false;
+        }
         pendingBrowserActivate_ = true;
         return;
     }
