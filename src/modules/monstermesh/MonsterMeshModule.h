@@ -395,6 +395,13 @@ private:
     // (feedback_mm_no_boot_beacon). Periodic beacons take over from there.
     bool firstBeaconDone_ = false;
 
+    // ALT in Meshtastic with a ROM already loaded: jump straight back
+    // into the emulator (skip ROM loader). LVGL thread sets this from
+    // handleKeyPress; runOnce on LoRa thread does the swap (flush_cb,
+    // enterEmulatorMode, emulatorActive_=true) so the expensive bits
+    // happen off the LVGL thread.
+    volatile bool pendingEmuResume_ = false;
+
     // Reciprocal-beacon trigger: when handleReceived adds a NEW daycare
     // neighbor we set this. runOnce drains it on the LoRa thread and fires
     // a forceBeacon() so the peer learns about us within seconds instead

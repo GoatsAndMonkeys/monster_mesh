@@ -54,6 +54,9 @@ static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out,
                                  char *resolvedSavOut, size_t resolvedSavLen,
                                  char *trainerNameOut, size_t trainerNameLen);
 
+// Forward decl — direct emu resume in runOnce switches kb back to RAW mode.
+static void kbSetMode(bool raw);
+
 // Build a full Gen1Party from a daycare neighbor's beacon-broadcast summary.
 // The beacon carries only (dex, level, nickname, moves[4]) per mon; this
 // helper inflates that to a Gen1Pokemon with deterministic stats so a peer
@@ -1513,6 +1516,34 @@ int32_t MonsterMeshModule::runOnce()
     // here on the LoRa thread (spiLock-guarded fillScreen, flush_cb swap,
     // radio park) so the LVGL thread doesn't deadlock against in-progress
     // DeviceUI render work (250-node restore, chat-history flood).
+    // Direct emu resume — ALT in Meshtastic with a ROM already loaded.
+    // Skip the file browser entirely; just swap flush_cb to no-op,
+    // wipe screen, park radios via enterEmulatorMode, flip emulatorActive_
+    // so the pre-allocated emu task wakes from its idle loop.
+    if (pendingEmuResume_ && !emulatorActive_ && !browserActive_ &&
+        !textBattleActive_ && setupDone_ && emuInitialized_) {
+        pendingEmuResume_ = false;
+        LOG_INFO("[MonsterMesh] direct emu resume (ROM already loaded)\n");
+#if HAS_TFT
+        lv_display_t *disp = lv_display_get_default();
+        if (disp && !savedFlushCb_) {
+            savedFlushCb_ = (void *)disp->flush_cb;
+            lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
+                lv_display_flush_ready(d);
+            });
+        }
+        if (g_deviceUiLgfx) {
+            concurrency::LockGuard g(spiLock);
+            g_deviceUiLgfx->clearClipRect();
+            g_deviceUiLgfx->fillScreen(0x0000);
+        }
+#endif
+        enterEmulatorMode();
+        emulatorActive_ = true;
+        kbSetMode(true);
+        setupStatus_ = "Playing!";
+    }
+
     if (pendingBrowserActivate_ && !browserActive_ && !emulatorActive_ &&
         !textBattleActive_ && setupDone_) {
         pendingBrowserActivate_ = false;
@@ -3755,15 +3786,21 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
             }
 
 #if HAS_TFT
-            // Stage 1 — screen first: restore LVGL flush_cb + invalidate.
-            // We're called from inside the LVGL keypad indev callback;
-            // calling lv_refr_now from there re-enters LVGL's refresh
-            // pipeline and was breaking the input task after the exit.
-            // Just mark the screen dirty — LVGL's refresh timer picks it
-            // up on the very next tick (within ~30ms).
-            LOG_INFO("[MonsterMesh] ALT-exit: stage 1 — screen restore\n");
+            // Stage 1 — screen: wipe TFT to black, then restore LVGL
+            // flush_cb + invalidate. Without the wipe, LVGL's partial
+            // repaint only updates regions widgets ask for; left-over
+            // emulator pixels stay in untouched areas → user sees
+            // half-emu-half-chat artifacts. Safe to take spiLock here
+            // now that the emu task is parked (stage A polled
+            // emuTaskIdle_) and the SAV save is deferred to stage 3.
+            LOG_INFO("[MonsterMesh] ALT-exit: stage 1 — screen wipe + restore\n");
             lv_display_t *disp = lv_display_get_default();
             if (disp) {
+                if (g_deviceUiLgfx) {
+                    concurrency::LockGuard g(spiLock);
+                    g_deviceUiLgfx->clearClipRect();
+                    g_deviceUiLgfx->fillScreen(0x0000);
+                }
                 if (savedFlushCb_) {
                     lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
                     savedFlushCb_ = nullptr;
@@ -3801,9 +3838,10 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
             return;
         }
 
-        // ALT always opens the ROM loader (file browser), regardless of
-        // whether a cart was previously loaded. Emulator toggle is on
-        // SYM+E.
+        // ALT in Meshtastic: if a ROM is already loaded (cart inserted),
+        // jump straight back into the emulator. Otherwise open the ROM
+        // loader. Lets the user toggle emu ↔ Meshtastic without going
+        // through the file browser every time.
         //
         // CRITICAL: ALT can fire from the LVGL thread (KEY-mode peek,
         // input broker) AND the LoRa thread (runOnce I2C poll). LVGL
@@ -3818,7 +3856,12 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
         // chat/DM textareas can claim focus when the user ALT-exits the
         // emulator. Terminal scrollback is preserved.
         if (terminalActive_) terminal_.yieldFocus();
-        pendingBrowserActivate_ = true;
+        if (emuInitialized_) {
+            LOG_INFO("[MonsterMesh] ALT in Meshtastic: cart loaded — resuming emulator\n");
+            pendingEmuResume_ = true;
+        } else {
+            pendingBrowserActivate_ = true;
+        }
         return;
     }
 
