@@ -1412,6 +1412,19 @@ int32_t MonsterMeshModule::runOnce()
                  (int)emulatorActive_, (int)browserActive_);
     }
 
+    // Deferred SAV save FIRST, before we touch the radio. Saving uses SD
+    // (shared SPI bus) and we want it complete + spiLock released cleanly
+    // before startReceive starts driving the SX1262. Trying to re-arm the
+    // radio while a 32KB SD write is mid-flight was freezing the device.
+    if (pendingSave_) {
+        pendingSave_ = false;
+        uint32_t saveStart = millis();
+        LOG_INFO("[MonsterMesh] deferred SAV save: start\n");
+        emu_.save();
+        LOG_INFO("[MonsterMesh] deferred SAV save: done (%ums)\n",
+                 (unsigned)(millis() - saveStart));
+    }
+
     // Radio + WiFi state sync on the LoRa thread. LVGL thread only flips
     // radioParked_/radioNeedsRx_; we reconcile here so LVGL stays snappy.
     if (radioNeedsRx_) {
@@ -1544,15 +1557,9 @@ int32_t MonsterMeshModule::runOnce()
         renderBrowser();
     }
 
-    // Deferred save — triggered on emulator exit, done here outside LVGL callback
-    if (pendingSave_) {
-        pendingSave_ = false;
-        uint32_t saveStart = millis();
-        LOG_INFO("[MonsterMesh] deferred SAV save: start\n");
-        emu_.save();
-        LOG_INFO("[MonsterMesh] deferred SAV save: done (%ums)\n",
-                 (unsigned)(millis() - saveStart));
-    }
+    // (Deferred SAV save moved earlier in runOnce so it completes before
+    // the LoRa RX re-arm — bus contention between SD write and
+    // SX1262 startReceive was freezing the device on ALT-exit.)
 
     // Battle-XP write-back to /<rom>.sav. Gated on:
     //   - !emulatorActive_  (no emu owning the SD bus / WRAM mirror)
