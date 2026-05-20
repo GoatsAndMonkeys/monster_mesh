@@ -742,9 +742,16 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                     return ProcessMessage::CONTINUE;
                 memcpy(mmbPartyChunks_ + off, bp->payload + 2, dataLen);
                 mmbPartyTotal_     = partTotal;
+                uint8_t prevMask = mmbPartyChunkMask_;
                 mmbPartyChunkMask_ |= (uint8_t)(1u << partIdx);
 
                 uint8_t fullMask = (uint8_t)((1u << partTotal) - 1u);
+                LOG_INFO("[MonsterMesh] MMB chunk RX from 0x%08X "
+                         "idx=%u/%u len=%u mask=0x%02X->0x%02X full=0x%02X\n",
+                         (unsigned)mp.from, (unsigned)partIdx,
+                         (unsigned)partTotal, (unsigned)dataLen,
+                         (unsigned)prevMask, (unsigned)mmbPartyChunkMask_,
+                         (unsigned)fullMask);
                 if ((mmbPartyChunkMask_ & fullMask) == fullMask) {
                     // All chunks in — parse into Gen1Party. Sender wrote
                     // it as raw memcpy(buf, &party, sizeof(Gen1Party)).
