@@ -429,6 +429,26 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                          (unsigned)mp.from, (int)textBattleActive_,
                          (int)pendingMmtBattleAsReceiver_,
                          (int)pendingMmtBattleAsInitiator_);
+                // Already-armed receiver path (e.g. self-armed via Y press
+                // with fallback seed=1): UPDATE the seed/session from the
+                // real START so both engines run identical RNG. Without
+                // this the engines desync on the first turn.
+                if (pendingMmtBattleAsReceiver_ &&
+                    mp.from == mmtBattlePeer_ && !textBattleActive_) {
+                    uint32_t newSeed = ((uint32_t)bp->payload[0] << 24) |
+                                       ((uint32_t)bp->payload[1] << 16) |
+                                       ((uint32_t)bp->payload[2] <<  8) |
+                                                 bp->payload[3];
+                    if (newSeed != mmtBattleSeed_) {
+                        LOG_INFO("[MonsterMesh] PvP: receiver already armed; "
+                                 "updating seed 0x%08X->0x%08X session->0x%04X\n",
+                                 (unsigned)mmtBattleSeed_, (unsigned)newSeed,
+                                 (unsigned)bp->sessionId());
+                        mmtBattleSeed_    = newSeed;
+                        mmtBattleSession_ = bp->sessionId();
+                    }
+                    return ProcessMessage::CONTINUE;
+                }
                 if (!textBattleActive_ && !pendingMmtBattleAsReceiver_ &&
                     !pendingMmtBattleAsInitiator_) {
                     uint32_t seed = ((uint32_t)bp->payload[0] << 24) |
@@ -1119,9 +1139,20 @@ void MonsterMeshModule::sendMmbPartyChunks(uint32_t to, const Gen1Party &party)
     uint8_t total = (uint8_t)((totalBytes + CHUNK - 1) / CHUNK);
     if (total == 0) total = 1;
     if (total > 8) total = 8;  // RX gate rejects > 8
-    LOG_INFO("[MonsterMesh] MMB party TX → 0x%08X count=%u total=%u chunks\n",
-             (unsigned)to, (unsigned)party.count, (unsigned)total);
-    for (uint8_t i = 0; i < total; ++i) {
+    // Rotate the chunk send order on every attempt so each chunk gets a
+    // chance to be "first in the burst". Observed 2026-05-20 with deck-to-
+    // deck PKI/MQTT: the broker delivers the first chunk of a tight burst
+    // and drops the rest. With static ordering, only chunk 0 ever assembles
+    // on the receiver. Rotation = attempts modulo total — after `total`
+    // retransmits every chunk has been first at least once, so the receiver
+    // mask fills.
+    uint8_t rotation = (uint8_t)(mmbPartyTxAttempts_ % total);
+    LOG_INFO("[MonsterMesh] MMB party TX → 0x%08X count=%u total=%u chunks "
+             "(rotation=%u)\n",
+             (unsigned)to, (unsigned)party.count, (unsigned)total,
+             (unsigned)rotation);
+    for (uint8_t step = 0; step < total; ++step) {
+        uint8_t i = (uint8_t)((step + rotation) % total);
         size_t off = (size_t)i * CHUNK;
         size_t dataLen = (off + CHUNK <= totalBytes) ? CHUNK : totalBytes - off;
         meshtastic_MeshPacket *p = router->allocForSending();
@@ -1143,6 +1174,13 @@ void MonsterMeshModule::sendMmbPartyChunks(uint32_t to, const Gen1Party &party)
         memcpy(bp->payload + 2, src + off, dataLen);
         p->decoded.payload.size = BATTLELINK_HDR_SIZE + 2 + dataLen;
         service->sendToMesh(p);
+        // 200 ms gap between MQTT publishes so the broker doesn't coalesce-
+        // drop the burst. Without this, observed only the first chunk of
+        // each burst reaching the peer (mask stuck at 0x01). 5 * 200ms =
+        // 1s per attempt, well within the 5s retry interval.
+        if (step + 1 < total) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
     }
 }
 
