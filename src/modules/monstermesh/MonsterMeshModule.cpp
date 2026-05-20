@@ -854,7 +854,7 @@ void MonsterMeshModule::sendMmbBattleStart(uint32_t seed)
         return;
     }
     p->to = NODENUM_BROADCAST;  // BATTLE_START is broadcast on MM channel
-    p->channel = channels.getPrimaryIndex();
+    p->channel = mmChannel_;  // MonsterMesh channel — MQTT-bridged (b345)
     p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
     BattlePacket *bp = (BattlePacket *)p->decoded.payload.bytes;
     memset(bp, 0, BATTLELINK_HDR_SIZE + 14);
@@ -913,7 +913,7 @@ void MonsterMeshModule::sendMmbPartyChunks(uint32_t to, const Gen1Party &party)
             return;
         }
         p->to = to;
-        p->channel = channels.getPrimaryIndex();
+        p->channel = mmChannel_;  // MonsterMesh channel — MQTT-bridged (b345)
         p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
         BattlePacket *bp = (BattlePacket *)p->decoded.payload.bytes;
         memset(bp, 0, BATTLELINK_HDR_SIZE);
@@ -934,7 +934,7 @@ void MonsterMeshModule::sendTextDM(uint32_t to, const char *text)
     meshtastic_MeshPacket *p = router->allocForSending();
     if (!p) return;
     p->to = to;
-    p->channel = channels.getPrimaryIndex();
+    p->channel = mmChannel_;  // MonsterMesh channel — MQTT-bridged (b345)
     p->decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
     size_t len = strlen(text);
     if (len > sizeof(p->decoded.payload.bytes)) len = sizeof(p->decoded.payload.bytes);
@@ -2710,7 +2710,9 @@ void MonsterMeshModule::drainTxQueue()
 
         meshtastic_MeshPacket *p = router->allocForSending();
         p->to = NODENUM_BROADCAST;
-        p->channel = MONSTERMESH_CHANNEL;
+        // MMB engine traffic (TEXT_BATTLE_ACTION/HASH/FORFEIT) on the
+        // MonsterMesh channel so it MQTT-bridges across LoRa range.
+        p->channel = mmChannel_;
         p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
         p->decoded.payload.size = len;
         memcpy(p->decoded.payload.bytes, buf, len);
