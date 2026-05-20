@@ -1918,16 +1918,20 @@ int32_t MonsterMeshModule::runOnce()
         LOG_INFO("[MonsterMesh] first daycare beacon fired (30s gate)\n");
     }
 
-    // WiFi-connect announce: when WiFi transitions from disconnected to
-    // connected, fire a NodeInfo broadcast on the MonsterMesh channel +
-    // a daycare beacon. Gives the MQTT broker enough info to mark us as
-    // via_mqtt=true on every peer that subscribes — required for DMs to
-    // route across LoRa range. Waits 3s after the connect so MQTT has
-    // time to log in to the broker before we publish.
+    // NodeInfo on the MonsterMesh channel: once on MQTT connect, then
+    // every 15 minutes thereafter while WiFi stays up.
+    //
+    // Why: PKI-encrypted DMs only decrypt on the recipient if they have
+    // the sender's pubkey cached. The pubkey rides in NodeInfo packets.
+    // If we only emit NodeInfo on the primary (LongFast) channel, peers
+    // that only subscribe to MM never get it. Re-broadcast on mmChannel_
+    // so any peer that comes online within the next 15 min picks us up.
     {
         static bool wifiWasConnected = false;
         static uint32_t wifiConnectAt = 0;
         static bool announceFired = false;
+        static uint32_t lastPeriodicNodeInfoMs = 0;
+        static constexpr uint32_t PERIODIC_NODEINFO_MS = 15UL * 60UL * 1000UL;
 #if HAS_WIFI
         bool wifiNow = (WiFi.status() == WL_CONNECTED);
 #else
@@ -1936,22 +1940,29 @@ int32_t MonsterMeshModule::runOnce()
         if (wifiNow && !wifiWasConnected) {
             wifiConnectAt = millis();
             announceFired = false;
-            LOG_INFO("[MonsterMesh] WiFi connected — will announce on MM channel in 3s\n");
+            LOG_INFO("[MonsterMesh] WiFi connected — NodeInfo on MM channel in 3s\n");
         }
         if (!wifiNow) announceFired = false;
         wifiWasConnected = wifiNow;
-        if (wifiNow && !announceFired && wifiConnectAt &&
-            (millis() - wifiConnectAt) > 3000 &&
-            setupDone_ && !emulatorActive_ && !browserActive_) {
+        bool baseGate = wifiNow && setupDone_ &&
+                        !emulatorActive_ && !browserActive_;
+        if (baseGate && !announceFired && wifiConnectAt &&
+            (millis() - wifiConnectAt) > 3000) {
             announceFired = true;
+            lastPeriodicNodeInfoMs = millis();
             if (nodeInfoModule) {
                 nodeInfoModule->sendOurNodeInfo(NODENUM_BROADCAST, false, mmChannel_);
-                LOG_INFO("[MonsterMesh] MQTT-announce: sent NodeInfo on MM channel %u\n",
+                LOG_INFO("[MonsterMesh] MQTT-connect: sent NodeInfo on MM channel %u\n",
                          (unsigned)mmChannel_);
             }
-            if (daycare_.isActive()) {
-                daycare_.forceBeacon();
-                LOG_INFO("[MonsterMesh] MQTT-announce: forced daycare beacon\n");
+        }
+        if (baseGate && announceFired && lastPeriodicNodeInfoMs &&
+            (millis() - lastPeriodicNodeInfoMs) > PERIODIC_NODEINFO_MS) {
+            lastPeriodicNodeInfoMs = millis();
+            if (nodeInfoModule) {
+                nodeInfoModule->sendOurNodeInfo(NODENUM_BROADCAST, false, mmChannel_);
+                LOG_INFO("[MonsterMesh] periodic NodeInfo on MM channel %u (15min refresh)\n",
+                         (unsigned)mmChannel_);
             }
         }
     }
