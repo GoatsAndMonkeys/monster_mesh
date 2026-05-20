@@ -204,6 +204,12 @@ public:
     uint32_t lastKeyMs_ = 0;
     void handleKeyFromLVGL(uint8_t c);
     void handleKeyPress(uint8_t ascii);
+    // Called by the LVGL kb hook when the user types Y+Enter while an MMT
+    // challenger window is armed. Locks this device into the receiver
+    // ("slave") role so it doesn't need to wait for TEXT_BATTLE_START to
+    // know it's the challengee — needed because that START packet can be
+    // lost over MQTT QoS 0.
+    void onLocalYReply();
     void toggleSound();
     void adjustVolume(int8_t delta);
     void adjustBrightness(int8_t delta);

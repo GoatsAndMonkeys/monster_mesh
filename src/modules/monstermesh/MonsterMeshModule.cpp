@@ -649,12 +649,39 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             // daycare-beacon party data for the engine because identical SAVs
             // produce a self-fight and stale data can mismatch the current
             // party. Reassembled into mmbOppParty_.
-            // Accept chunks from either the formally-armed peer
-            // (mmbPartyRxFrom_, set on Y or START receipt) OR the still-armed
-            // mmtChallengerPeer_ (set the moment we saw their "battle in
-            // MonsterMesh" DM). The latter covers the race where the
-            // sender's chunks arrive before the TEXT_BATTLE_START packet
-            // does — same session, just timing.
+            //
+            // Self-arm path: TEXT_BATTLE_START is sent via channel encryption
+            // on MonsterMesh (broadcast) and can be lost by the MQTT broker at
+            // QoS 0. Chunks are PKI-DMs sent 5x and retransmitted, so they
+            // survive much better. If a chunk arrives from a peer that DM'd us
+            // a challenge in the last 10 minutes (mmtChallengerPeer_ used to
+            // be 60s, but real users take longer to reply Y), treat that as
+            // evidence the START was lost and AUTO-ARM the receiver path
+            // right now. Without this, a lost START silently drops the entire
+            // PvP attempt — the user sees nothing happen.
+            if ((PktType)bp->type == PktType::TEXT_BATTLE_PARTY &&
+                mmbPartyRxFrom_ == 0 && mmtChallengerPeer_ == mp.from &&
+                !textBattleActive_ && !pendingMmtBattleAsReceiver_ &&
+                !pendingMmtBattleAsInitiator_) {
+                LOG_WARN("[MonsterMesh] PvP: chunk from challenger 0x%08X with "
+                         "no armed session — assuming START was lost, "
+                         "auto-arming receiver\n", (unsigned)mp.from);
+                mmtBattlePeer_    = mp.from;
+                mmtBattleSeed_    = 1;  // fallback seed; engine will desync if
+                                        // real seed wasn't preserved, but
+                                        // launching is better than silence
+                mmtBattleSession_ = 0;
+                pendingMmtBattleAsReceiver_  = true;
+                mmtBattleReceivePendingMs_   = millis();
+                mmbPartyTxTarget_  = mp.from;
+                mmbPartyRxFrom_    = mp.from;
+                mmbOppPartyReady_  = false;
+                mmbPartyChunkMask_ = 0;
+                mmbPartyTotal_     = 0;
+                mmbPartyTxStartMs_ = millis();
+                mmbPartyTxLastMs_  = 0;
+                mmbPartyTxAttempts_ = 0;
+            }
             if ((PktType)bp->type == PktType::TEXT_BATTLE_PARTY &&
                 ((mmbPartyRxFrom_ != 0 && mp.from == mmbPartyRxFrom_) ||
                  (mmtChallengerPeer_ != 0 && mp.from == mmtChallengerPeer_))) {
@@ -807,8 +834,12 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             for (size_t i = 0; i + nlen <= len; ++i) {
                 if (memcmp(txt + i, needle, nlen) == 0) {
                     mmtChallengerPeer_     = mp.from;
-                    mmtChallengerExpireMs_ = millis() + 60000;
-                    LOG_INFO("[MonsterMesh] mmt: challenge DM from 0x%08X — armed 60s\n",
+                    // 10-minute window so user has reasonable time to type Y.
+                    // Originally 60s, but real chat reaction time + DeviceUI
+                    // input lag routinely exceeded that and the resulting
+                    // chunks were silently dropped (observed b358, 4+min Y).
+                    mmtChallengerExpireMs_ = millis() + 600000;
+                    LOG_INFO("[MonsterMesh] mmt: challenge DM from 0x%08X — armed 10min\n",
                              (unsigned)mp.from);
                     break;
                 }
@@ -882,6 +913,41 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
     // the standard chat / DeviceUI pipeline. STOP here would silently
     // drop incoming DMs and the user would never see them in chat.
     return ProcessMessage::CONTINUE;
+}
+
+void MonsterMeshModule::onLocalYReply()
+{
+    // Only react if a challenger window is armed AND we're not already in a
+    // PvP session. Either the user actually replied Y, or they typed a stray
+    // Y outside the challenge window (in which case mmtChallengerPeer_ is 0
+    // and we drop out silently).
+    if (mmtChallengerPeer_ == 0) return;
+    if (mmtChallengerExpireMs_ != 0 &&
+        (int32_t)(millis() - mmtChallengerExpireMs_) >= 0) {
+        LOG_INFO("[MonsterMesh] onLocalYReply: challenger window expired\n");
+        return;
+    }
+    if (textBattleActive_ || pendingMmtBattleAsReceiver_ ||
+        pendingMmtBattleAsInitiator_) {
+        return;  // already armed somehow
+    }
+    LOG_INFO("[MonsterMesh] onLocalYReply: arming as RECEIVER vs 0x%08X "
+             "(local Y detected before START arrives)\n",
+             (unsigned)mmtChallengerPeer_);
+    mmtBattlePeer_    = mmtChallengerPeer_;
+    mmtBattleSeed_    = 1;          // fallback seed; overwritten when real
+                                    // TEXT_BATTLE_START packet arrives
+    mmtBattleSession_ = 0;
+    pendingMmtBattleAsReceiver_  = true;
+    mmtBattleReceivePendingMs_   = millis();
+    mmbPartyTxTarget_  = mmtChallengerPeer_;
+    mmbPartyRxFrom_    = mmtChallengerPeer_;
+    mmbOppPartyReady_  = false;
+    mmbPartyChunkMask_ = 0;
+    mmbPartyTotal_     = 0;
+    mmbPartyTxStartMs_ = millis();
+    mmbPartyTxLastMs_  = 0;
+    mmbPartyTxAttempts_ = 0;
 }
 
 void MonsterMeshModule::challengePeerByShortName(const char *peerShort)
@@ -3229,6 +3295,28 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
     if (key == 0) return;
 
     LOG_DEBUG("[MonsterMesh] key=0x%02X emu=%d\n", key, monsterMeshModule ? (int)monsterMeshModule->isEmulatorActive() : -1);
+
+    // Preemptive receiver arm — when an MMT challenger is armed and the user
+    // types 'y'/'Y' followed by Enter, assume the user is replying Y to the
+    // challenge and arm the receiver path immediately. This makes the
+    // challengee deterministically the "slave" (receiver), so even if Red's
+    // TEXT_BATTLE_START packet is lost over MQTT, Blue is already in the
+    // right state when chunks arrive.
+    if (monsterMeshModule) {
+        static uint32_t yPressedAtMs = 0;
+        if (key == 'y' || key == 'Y') {
+            yPressedAtMs = millis();
+        } else if (key == 0x0D && yPressedAtMs != 0 &&
+                   (millis() - yPressedAtMs) < 5000) {
+            // 'y' then Enter within 5s → user is sending Y reply.
+            yPressedAtMs = 0;
+            monsterMeshModule->onLocalYReply();
+        } else if (key != 0 && key != 'y' && key != 'Y' && key != 0x0D) {
+            // any other character cancels the pending Y (user typed
+            // something other than a single Y before Enter).
+            yPressedAtMs = 0;
+        }
+    }
 
     // ── ALT+E (0x05 = Ctrl+E) toggles emulator on/off ───────────────────
     // On T-Deck, ALT+letter produces control codes (ALT+E = 0x05).
