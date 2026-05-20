@@ -424,6 +424,11 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             if ((PktType)bp->type == PktType::TEXT_BATTLE_START &&
                 mp.decoded.payload.size == BATTLELINK_HDR_SIZE + 14 &&
                 mp.from != nodeDB->getNodeNum()) {
+                LOG_INFO("[MonsterMesh] PvP: TEXT_BATTLE_START RX from 0x%08X "
+                         "(tb=%d recv=%d init=%d) — gate check\n",
+                         (unsigned)mp.from, (int)textBattleActive_,
+                         (int)pendingMmtBattleAsReceiver_,
+                         (int)pendingMmtBattleAsInitiator_);
                 if (!textBattleActive_ && !pendingMmtBattleAsReceiver_ &&
                     !pendingMmtBattleAsInitiator_) {
                     uint32_t seed = ((uint32_t)bp->payload[0] << 24) |
@@ -447,6 +452,50 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                     mmbPartyTxAttempts_ = 0;
                     LOG_INFO("[MonsterMesh] PvP: TEXT_BATTLE_START rx from 0x%08X seed=0x%08X (party exchange armed)\n",
                              (unsigned)mp.from, (unsigned)seed);
+                } else {
+                    // Stale receiver state from a prior failed attempt can wedge
+                    // us into permanently ignoring new STARTs. If we have a
+                    // pending receiver flag older than 45s and no chunks have
+                    // arrived, reset and re-arm with this new START.
+                    bool staleReceiver = pendingMmtBattleAsReceiver_ &&
+                        mmtBattleReceivePendingMs_ != 0 &&
+                        (millis() - mmtBattleReceivePendingMs_) > 45000 &&
+                        !mmbOppPartyReady_;
+                    if (staleReceiver) {
+                        LOG_WARN("[MonsterMesh] PvP: clearing stale receiver "
+                                 "state (%ums old), re-arming from new START\n",
+                                 (unsigned)(millis() - mmtBattleReceivePendingMs_));
+                        pendingMmtBattleAsReceiver_  = false;
+                        pendingMmtBattleAsInitiator_ = false;
+                        mmbPartyTxTarget_  = 0;
+                        mmbPartyRxFrom_    = 0;
+                        mmbOppPartyReady_  = false;
+                        mmbPartyChunkMask_ = 0;
+                        mmbPartyTotal_     = 0;
+                        // Re-fire the arm path with this packet's seed/session.
+                        uint32_t seed2 = ((uint32_t)bp->payload[0] << 24) |
+                                         ((uint32_t)bp->payload[1] << 16) |
+                                         ((uint32_t)bp->payload[2] <<  8) |
+                                                   bp->payload[3];
+                        mmtBattlePeer_    = mp.from;
+                        mmtBattleSeed_    = seed2;
+                        mmtBattleSession_ = bp->sessionId();
+                        pendingMmtBattleAsReceiver_  = true;
+                        mmtBattleReceivePendingMs_   = millis();
+                        mmbPartyTxTarget_  = mp.from;
+                        mmbPartyRxFrom_    = mp.from;
+                        mmbPartyTxStartMs_ = millis();
+                        mmbPartyTxLastMs_  = 0;
+                        mmbPartyTxAttempts_ = 0;
+                        LOG_INFO("[MonsterMesh] PvP: re-armed from new START "
+                                 "seed=0x%08X\n", (unsigned)seed2);
+                    } else {
+                        LOG_WARN("[MonsterMesh] PvP: START gate BLOCKED "
+                                 "tb=%d recv=%d init=%d — dropping\n",
+                                 (int)textBattleActive_,
+                                 (int)pendingMmtBattleAsReceiver_,
+                                 (int)pendingMmtBattleAsInitiator_);
+                    }
                 }
                 return ProcessMessage::CONTINUE;
             }
@@ -840,6 +889,29 @@ void MonsterMeshModule::challengePeerByShortName(const char *peerShort)
     if (!nodeDB || !peerShort || !peerShort[0]) {
         terminal_.printLine("mmb: empty target");
         return;
+    }
+    // Nuke any stuck PvP state from a prior failed handshake so a fresh
+    // `mmb <peer>` always restarts cleanly. Without this, a stale
+    // pendingMmtBattleAsInitiator_ from a previous attempt blocks the new
+    // session and the user has no way to recover short of a reboot.
+    if (pendingMmtBattleAsInitiator_ || pendingMmtBattleAsReceiver_ ||
+        mmbPartyTxTarget_ || mmbPartyRxFrom_) {
+        LOG_INFO("[MonsterMesh] mmb: clearing prior PvP state before new challenge "
+                 "(init=%d recv=%d txTgt=0x%08X)\n",
+                 (int)pendingMmtBattleAsInitiator_,
+                 (int)pendingMmtBattleAsReceiver_,
+                 (unsigned)mmbPartyTxTarget_);
+        pendingMmtBattleAsInitiator_ = false;
+        pendingMmtBattleAsReceiver_  = false;
+        mmbPartyTxTarget_   = 0;
+        mmbPartyRxFrom_     = 0;
+        mmbOppPartyReady_   = false;
+        mmbPartyChunkMask_  = 0;
+        mmbPartyTotal_      = 0;
+        mmbPartyTxStartMs_  = 0;
+        mmbPartyTxLastMs_   = 0;
+        mmbPartyTxAttempts_ = 0;
+        mmtBattleReceivePendingMs_ = 0;
     }
     size_t total = nodeDB->getNumMeshNodes();
     uint32_t resolved = 0;
@@ -2020,6 +2092,56 @@ int32_t MonsterMeshModule::runOnce()
                 LOG_INFO("[MonsterMesh] periodic NodeInfo on MM channel %u (15min refresh)\n",
                          (unsigned)mmChannel_);
             }
+        }
+    }
+
+    // Stuck PvP state janitor — if either pendingMmt* flag has been set for
+    // longer than MMT_PENDING_TIMEOUT_MS without progress (oppParty never
+    // assembled, textBattle never launched), the prior session is dead and
+    // is blocking new challenges. Observed 2026-05-20: Blue stayed init=1
+    // for 1100+ seconds after a partial handshake, refusing every fresh
+    // mmb challenge. Reset all the related state so a new round can land.
+    {
+        static constexpr uint32_t MMT_PENDING_TIMEOUT_MS = 60000;
+        uint32_t now = millis();
+        bool stale = false;
+        if (pendingMmtBattleAsReceiver_ && mmtBattleReceivePendingMs_ != 0 &&
+            (now - mmtBattleReceivePendingMs_) > MMT_PENDING_TIMEOUT_MS &&
+            !mmbOppPartyReady_ && !textBattleActive_) {
+            stale = true;
+        }
+        if (pendingMmtBattleAsInitiator_ && mmbPartyTxStartMs_ != 0 &&
+            (now - mmbPartyTxStartMs_) > MMT_PENDING_TIMEOUT_MS &&
+            !mmbOppPartyReady_ && !textBattleActive_) {
+            stale = true;
+        }
+        // Also catch the case where an initiator flag is set but no timer
+        // ever started (corruption from prior firmware revs).
+        if ((pendingMmtBattleAsInitiator_ || pendingMmtBattleAsReceiver_) &&
+            mmtBattleReceivePendingMs_ == 0 && mmbPartyTxStartMs_ == 0 &&
+            !mmbOppPartyReady_ && !textBattleActive_) {
+            // Stamp the receiver timer so we time out one cycle from now.
+            mmtBattleReceivePendingMs_ = now;
+        }
+        if (stale) {
+            LOG_WARN("[MonsterMesh] PvP janitor: clearing stuck pending state "
+                     "(init=%d recv=%d age=%ums)\n",
+                     (int)pendingMmtBattleAsInitiator_,
+                     (int)pendingMmtBattleAsReceiver_,
+                     (unsigned)(now -
+                        (mmtBattleReceivePendingMs_ ? mmtBattleReceivePendingMs_
+                                                    : mmbPartyTxStartMs_)));
+            pendingMmtBattleAsInitiator_ = false;
+            pendingMmtBattleAsReceiver_  = false;
+            mmbPartyTxTarget_   = 0;
+            mmbPartyRxFrom_     = 0;
+            mmbOppPartyReady_   = false;
+            mmbPartyChunkMask_  = 0;
+            mmbPartyTotal_      = 0;
+            mmbPartyTxStartMs_  = 0;
+            mmbPartyTxLastMs_   = 0;
+            mmbPartyTxAttempts_ = 0;
+            mmtBattleReceivePendingMs_ = 0;
         }
     }
 
