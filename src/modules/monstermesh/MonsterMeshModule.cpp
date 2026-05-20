@@ -2241,7 +2241,9 @@ int32_t MonsterMeshModule::runOnce()
     // for 1100+ seconds after a partial handshake, refusing every fresh
     // mmb challenge. Reset all the related state so a new round can land.
     {
-        static constexpr uint32_t MMT_PENDING_TIMEOUT_MS = 60000;
+        // Must exceed MMB_PARTY_RETRY_TIMEOUT_MS so the janitor doesn't wipe
+        // state mid-assembly when chunks are still arriving stochastically.
+        static constexpr uint32_t MMT_PENDING_TIMEOUT_MS = 120000;
         uint32_t now = millis();
         bool stale = false;
         if (pendingMmtBattleAsReceiver_ && mmtBattleReceivePendingMs_ != 0 &&

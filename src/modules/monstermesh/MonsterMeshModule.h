@@ -450,7 +450,12 @@ private:
     uint32_t          mmbPartyTxStartMs_ = 0;
     uint8_t           mmbPartyTxAttempts_ = 0;
     static constexpr uint32_t MMB_PARTY_RETRY_INTERVAL_MS = 5000;
-    static constexpr uint32_t MMB_PARTY_RETRY_TIMEOUT_MS  = 30000;
+    // Bumped from 30s to 90s on 2026-05-20: deck-to-deck testing showed
+    // 6 retransmits (= 30s) wasn't enough — observed mask=0x1D (4 of 5
+    // chunks) after 6 attempts, missing one specific chunk. Broker drops
+    // are stochastic so we need more attempts (18 = 90s) to fill 5 slots
+    // with high probability.
+    static constexpr uint32_t MMB_PARTY_RETRY_TIMEOUT_MS  = 90000;
     // Chunk reassembly buffer — Gen1Party = 404 bytes, with 100 bytes per
     // chunk that's 5 chunks. 8 * 100 = 800 bytes max. Lazy-allocated in
     // PSRAM on first incoming chunk so it doesn't take heap from the emu
