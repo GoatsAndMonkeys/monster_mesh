@@ -283,6 +283,20 @@ void MonsterMeshModule::ensureMonsterMeshChannel()
         'M', 'o', 'n', 's', 't', 'e', 'r', 'M',
         'e', 's', 'h', '!', '2', '0', '2', '4'
     };
+    // Bump channels_count to 8 if needed so the auto-provision slot is a
+    // real channelFile entry, not the malloc'd stub channels::getByIndex
+    // returns for out-of-range indices. Without this, fresh devices whose
+    // NVS only has 1 channel (LongFast) get their auto-provision silently
+    // dropped, leaving anyMqttEnabled() false and MQTT never connecting.
+    if (channelFile.channels_count < 8) {
+        for (uint32_t i = channelFile.channels_count; i < 8; ++i) {
+            memset(&channelFile.channels[i], 0, sizeof(channelFile.channels[i]));
+            channelFile.channels[i].index = i;
+            channelFile.channels[i].role = meshtastic_Channel_Role_DISABLED;
+        }
+        channelFile.channels_count = 8;
+        LOG_INFO("[MonsterMesh] extended channelFile.channels_count to 8\n");
+    }
     int existingIdx = -1;
     int freeIdx = -1;
     for (int i = 0; i < 8; ++i) {
@@ -305,8 +319,14 @@ void MonsterMeshModule::ensureMonsterMeshChannel()
     } else if (freeIdx < 0) {
         Serial.println("[MonsterMesh] no free channel slot — MonsterMesh channel not provisioned");
     } else {
+        // Modify channelFile.channels[freeIdx] directly. setChannel() copies
+        // a meshtastic_Channel into channelFile.channels[c.index] — so c.index
+        // MUST equal freeIdx, otherwise setChannel writes into the wrong slot
+        // and the auto-provision is silently lost.
         auto &ch = channels.getByIndex(freeIdx);
+        ch.index = freeIdx;
         ch.role = meshtastic_Channel_Role_SECONDARY;
+        ch.has_settings = true;  // anyMqttEnabled() ignores channels without this
         snprintf(ch.settings.name, sizeof(ch.settings.name), "MonsterMesh");
         ch.settings.psk.size = sizeof(MM_PSK);
         memcpy(ch.settings.psk.bytes, MM_PSK, sizeof(MM_PSK));
@@ -314,6 +334,9 @@ void MonsterMeshModule::ensureMonsterMeshChannel()
         ch.settings.downlink_enabled = true;
         channels.setChannel(ch);
         mmChannel_ = (uint8_t)freeIdx;
+        // Persist channelFile so anyMqttEnabled() is consistent across reboots
+        // and the MQTT module sees the bridge as enabled on first runOnce.
+        nodeDB->saveToDisk(SEGMENT_CHANNELS);
         Serial.printf("[MonsterMesh] auto-provisioned MonsterMesh channel at index %d "
                       "(+ PSK + MQTT bridge)\n", freeIdx);
     }
