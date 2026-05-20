@@ -302,23 +302,41 @@ void MonsterMeshModule::ensureMonsterMeshChannel()
         mmChannel_ = (uint8_t)existingIdx;
         Serial.printf("[MonsterMesh] reusing existing MonsterMesh channel at index %d\n",
                       existingIdx);
-        return;
-    }
-    if (freeIdx < 0) {
+    } else if (freeIdx < 0) {
         Serial.println("[MonsterMesh] no free channel slot — MonsterMesh channel not provisioned");
-        return;
+    } else {
+        auto &ch = channels.getByIndex(freeIdx);
+        ch.role = meshtastic_Channel_Role_SECONDARY;
+        snprintf(ch.settings.name, sizeof(ch.settings.name), "MonsterMesh");
+        ch.settings.psk.size = sizeof(MM_PSK);
+        memcpy(ch.settings.psk.bytes, MM_PSK, sizeof(MM_PSK));
+        ch.settings.uplink_enabled   = true;
+        ch.settings.downlink_enabled = true;
+        channels.setChannel(ch);
+        mmChannel_ = (uint8_t)freeIdx;
+        Serial.printf("[MonsterMesh] auto-provisioned MonsterMesh channel at index %d "
+                      "(+ PSK + MQTT bridge)\n", freeIdx);
     }
-    auto &ch = channels.getByIndex(freeIdx);
-    ch.role = meshtastic_Channel_Role_SECONDARY;
-    snprintf(ch.settings.name, sizeof(ch.settings.name), "MonsterMesh");
-    ch.settings.psk.size = sizeof(MM_PSK);
-    memcpy(ch.settings.psk.bytes, MM_PSK, sizeof(MM_PSK));
-    ch.settings.uplink_enabled   = true;
-    ch.settings.downlink_enabled = true;
-    channels.setChannel(ch);
-    mmChannel_ = (uint8_t)freeIdx;
-    Serial.printf("[MonsterMesh] auto-provisioned MonsterMesh channel at index %d "
-                  "(+ PSK + MQTT bridge)\n", freeIdx);
+
+    // Silo MQTT traffic onto our private subtree: msh/US/MonsterMesh.
+    // Stops the firmware from delivering the public broker's PKI flood
+    // (every stranger's PKI DM at msh/US/2/e/PKI/+) to us, and keeps our
+    // PvP chunk exchange away from other regions' channel traffic.
+    // We also have to clear any "msh/US" or "msh/US/US" stuck in NVS
+    // from earlier firmware builds — the MenuHandler/AdminModule auto-
+    // append logic in stock Meshtastic produces the doubled /US when
+    // default_mqtt_root contains a region. Forcing the canonical value
+    // here at boot makes the topic deterministic regardless of NVS
+    // history. Runs unconditionally regardless of whether the channel
+    // already existed.
+    const char *desiredRoot = "msh/US/MonsterMesh";
+    if (strcmp(moduleConfig.mqtt.root, desiredRoot) != 0) {
+        Serial.printf("[MonsterMesh] mqtt.root canonicalized: '%s' -> '%s'\n",
+                      moduleConfig.mqtt.root, desiredRoot);
+        strncpy(moduleConfig.mqtt.root, desiredRoot, sizeof(moduleConfig.mqtt.root) - 1);
+        moduleConfig.mqtt.root[sizeof(moduleConfig.mqtt.root) - 1] = '\0';
+        nodeDB->saveToDisk(SEGMENT_MODULECONFIG);
+    }
 }
 
 // ── wantPacket() — filter incoming packets ──────────────────────────────────
