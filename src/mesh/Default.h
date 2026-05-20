@@ -34,7 +34,11 @@
 #define default_mqtt_address "mqtt.meshtastic.org"
 #define default_mqtt_username "meshdev"
 #define default_mqtt_password "large4cats"
-#define default_mqtt_root "msh"
+// MonsterMesh fork: scope the default MQTT root to the US region.
+// Stock Meshtastic uses "msh" which puts traffic on the broker's busiest
+// global subtree. "msh/US" narrows the channel to US-region nodes only,
+// reducing noise from other regions on the public broker.
+#define default_mqtt_root "msh/US"
 #define default_mqtt_encryption_enabled true
 #define default_mqtt_tls_enabled false
 

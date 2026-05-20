@@ -27,6 +27,7 @@
 #include "gauntlet/Gen1MinimalStats.h"
 #include "showdown_gen1_moves.h"
 #include "RadioLibInterface.h"
+#include "modules/NodeInfoModule.h"  // for periodic NodeInfo on MM channel
 #if HAS_TFT
 #include "graphics/view/TFT/Themes.h"
 #endif
@@ -1708,6 +1709,12 @@ int32_t MonsterMeshModule::runOnce()
             // Plain Meshtastic DM — recipient sees this in their phone app
             // chat. No internal MMT: state machine; the receiver just
             // reads + replies normally. Battle-start trigger lands later.
+            //
+            // NOTE: DMs don't bridge over the Meshtastic public MQTT
+            // broker (only broadcasts on uplink-enabled channels do).
+            // So MMB across LoRa range needs a different design — see
+            // future PRIVATE_APP challenge protocol. For now MMB works
+            // within LoRa range only.
             sendTextDM(mmtOnTxTarget_,
                        "Do you want to battle in MonsterMesh? Reply Y or N.");
             LOG_INFO("[MonsterMesh] mmt challenge DM → 0x%08X\n",
@@ -1909,6 +1916,44 @@ int32_t MonsterMeshModule::runOnce()
         firstBeaconDone_ = true;
         daycare_.forceBeacon();
         LOG_INFO("[MonsterMesh] first daycare beacon fired (30s gate)\n");
+    }
+
+    // WiFi-connect announce: when WiFi transitions from disconnected to
+    // connected, fire a NodeInfo broadcast on the MonsterMesh channel +
+    // a daycare beacon. Gives the MQTT broker enough info to mark us as
+    // via_mqtt=true on every peer that subscribes — required for DMs to
+    // route across LoRa range. Waits 3s after the connect so MQTT has
+    // time to log in to the broker before we publish.
+    {
+        static bool wifiWasConnected = false;
+        static uint32_t wifiConnectAt = 0;
+        static bool announceFired = false;
+#if HAS_WIFI
+        bool wifiNow = (WiFi.status() == WL_CONNECTED);
+#else
+        bool wifiNow = false;
+#endif
+        if (wifiNow && !wifiWasConnected) {
+            wifiConnectAt = millis();
+            announceFired = false;
+            LOG_INFO("[MonsterMesh] WiFi connected — will announce on MM channel in 3s\n");
+        }
+        if (!wifiNow) announceFired = false;
+        wifiWasConnected = wifiNow;
+        if (wifiNow && !announceFired && wifiConnectAt &&
+            (millis() - wifiConnectAt) > 3000 &&
+            setupDone_ && !emulatorActive_ && !browserActive_) {
+            announceFired = true;
+            if (nodeInfoModule) {
+                nodeInfoModule->sendOurNodeInfo(NODENUM_BROADCAST, false, mmChannel_);
+                LOG_INFO("[MonsterMesh] MQTT-announce: sent NodeInfo on MM channel %u\n",
+                         (unsigned)mmChannel_);
+            }
+            if (daycare_.isActive()) {
+                daycare_.forceBeacon();
+                LOG_INFO("[MonsterMesh] MQTT-announce: forced daycare beacon\n");
+            }
+        }
     }
 
     // Reciprocal beacon: handleReceived set pendingReplyBeacon_ when a new
