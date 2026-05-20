@@ -682,6 +682,34 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 mmbPartyTxLastMs_  = 0;
                 mmbPartyTxAttempts_ = 0;
             }
+            // Mirror self-arm path: if we sent a challenge to this peer
+            // (mmtAwaitingReplyFrom_ matches) and now they're sending us
+            // chunks WITHOUT us ever receiving their Y, treat the chunks
+            // themselves as implicit acceptance. Y reply over PKI/MQTT is
+            // QoS 0 so it can be lost in transit — we observed exactly this
+            // on 2026-05-20 (Blue's Y was never ACKed but Blue still
+            // self-armed and started sending chunks). Symmetric to the
+            // receiver self-arm above.
+            if ((PktType)bp->type == PktType::TEXT_BATTLE_PARTY &&
+                mmbPartyRxFrom_ == 0 && mmtAwaitingReplyFrom_ == mp.from &&
+                !textBattleActive_ && !pendingMmtBattleAsReceiver_ &&
+                !pendingMmtBattleAsInitiator_ && terminal_.hasParty()) {
+                LOG_WARN("[MonsterMesh] PvP: chunk from awaited peer 0x%08X "
+                         "but Y reply was never received — assuming Y was "
+                         "lost, auto-arming initiator\n", (unsigned)mp.from);
+                pendingMmtAccepted_   = true;
+                pendingMmtAcceptedTx_ = true;
+                mmtAcceptedTxTarget_  = mp.from;
+                mmtAwaitingReplyFrom_ = 0;
+                mmbPartyTxTarget_   = mp.from;
+                mmbPartyRxFrom_     = mp.from;
+                mmbOppPartyReady_   = false;
+                mmbPartyChunkMask_  = 0;
+                mmbPartyTotal_      = 0;
+                mmbPartyTxStartMs_  = millis();
+                mmbPartyTxLastMs_   = 0;
+                mmbPartyTxAttempts_ = 0;
+            }
             if ((PktType)bp->type == PktType::TEXT_BATTLE_PARTY &&
                 ((mmbPartyRxFrom_ != 0 && mp.from == mmbPartyRxFrom_) ||
                  (mmtChallengerPeer_ != 0 && mp.from == mmtChallengerPeer_))) {
