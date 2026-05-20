@@ -318,18 +318,15 @@ void MonsterMeshModule::ensureMonsterMeshChannel()
                       "(+ PSK + MQTT bridge)\n", freeIdx);
     }
 
-    // Silo MQTT traffic onto our private subtree: msh/US/MonsterMesh.
-    // Stops the firmware from delivering the public broker's PKI flood
-    // (every stranger's PKI DM at msh/US/2/e/PKI/+) to us, and keeps our
-    // PvP chunk exchange away from other regions' channel traffic.
-    // We also have to clear any "msh/US" or "msh/US/US" stuck in NVS
-    // from earlier firmware builds — the MenuHandler/AdminModule auto-
-    // append logic in stock Meshtastic produces the doubled /US when
-    // default_mqtt_root contains a region. Forcing the canonical value
-    // here at boot makes the topic deterministic regardless of NVS
-    // history. Runs unconditionally regardless of whether the channel
-    // already existed.
-    const char *desiredRoot = "msh/US/MonsterMesh";
+    // Canonicalize moduleConfig.mqtt.root to "msh/US". Why not silo into
+    // msh/US/MonsterMesh? The public broker (mqtt.meshtastic.org) does
+    // not accept publishes/subscribes on arbitrary deeper subtrees — b354
+    // wedged and never connected. Stock Meshtastic clients all live on
+    // msh/<region>, so that's where the broker's ACL allows traffic.
+    // We override the NVS-stored root every boot so a stray menu/admin
+    // re-trigger of the auto-append (which would produce "msh/US/US") is
+    // healed automatically.
+    const char *desiredRoot = "msh/US";
     if (strcmp(moduleConfig.mqtt.root, desiredRoot) != 0) {
         Serial.printf("[MonsterMesh] mqtt.root canonicalized: '%s' -> '%s'\n",
                       moduleConfig.mqtt.root, desiredRoot);
