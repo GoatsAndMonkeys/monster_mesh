@@ -66,7 +66,15 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     virtual ~MonsterMeshModule() {}
 
     // Which channel we use for MonsterMesh traffic
+    // Channel index for MonsterMesh broadcasts. Default = 1, but
+    // ensureMonsterMeshChannel() may pick a different index at boot if
+    // channel 1 is already in use by a user-configured channel — we
+    // prefer to add MonsterMesh as an additional channel rather than
+    // overwrite anything. All TX/RX paths reference mmChannel_ at
+    // runtime; the static constant is preserved as a default literal
+    // for header-only consumers (none currently use it as a value).
     static constexpr uint8_t MONSTERMESH_CHANNEL = 1;
+    uint8_t mmChannel_ = MONSTERMESH_CHANNEL;
 
     // Is the emulator view currently active (vs Meshtastic UI)?
     bool isEmulatorActive()  const { return emulatorActive_; }

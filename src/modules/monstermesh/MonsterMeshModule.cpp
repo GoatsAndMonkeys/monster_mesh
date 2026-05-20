@@ -262,20 +262,62 @@ int MonsterMeshModule::handleInputEvent(const InputEvent *event)
 
 void MonsterMeshModule::ensureMonsterMeshChannel()
 {
-    // No-op if channel 1 already exists. The user owns the PSK setup —
-    // they configured it as the MonsterMesh chat channel and we just ride
-    // along (same path daycare beacons use).
-    auto &ch = channels.getByIndex(MONSTERMESH_CHANNEL);
-    if (ch.role == meshtastic_Channel_Role_DISABLED ||
-        strlen(ch.settings.name) == 0) {
-        // Only write if the slot is completely empty — first-boot setup.
-        ch.role = meshtastic_Channel_Role_SECONDARY;
-        snprintf(ch.settings.name, sizeof(ch.settings.name), "MonsterMesh");
-        ch.settings.psk.size = 1;
-        ch.settings.psk.bytes[0] = 0; // user-driven PSK setup expected
-        channels.setChannel(ch);
-        Serial.println("[MonsterMesh] channel 1 default-named 'MonsterMesh' (set PSK in app)");
+    // Auto-provision a "MonsterMesh" channel with a baked-in AES128 PSK +
+    // MQTT bridge so every node flashed with this firmware can talk to
+    // every other one without any phone-app setup. Privacy from accidental
+    // third parties only — anyone with the firmware binary can derive the
+    // PSK.
+    //
+    // Strategy:
+    //   1. If a channel named "MonsterMesh" already exists at any index,
+    //      use it as-is (user may have customized PSK / settings).
+    //   2. Else find the first DISABLED slot starting at index 1 and add
+    //      MonsterMesh there. We never overwrite a user-configured slot.
+    //   3. As a last resort if all 8 slots are taken, log a warning and
+    //      bail; user has to free a slot or merge manually.
+    // 16-byte AES128 PSK = ASCII "MonsterMesh!2024" — matches the PSK
+    // already configured on user's existing T-Decks so new flashes
+    // interop with the existing fleet without any phone-app setup.
+    static const uint8_t MM_PSK[16] = {
+        'M', 'o', 'n', 's', 't', 'e', 'r', 'M',
+        'e', 's', 'h', '!', '2', '0', '2', '4'
+    };
+    int existingIdx = -1;
+    int freeIdx = -1;
+    for (int i = 0; i < 8; ++i) {
+        auto &c = channels.getByIndex(i);
+        if (c.role != meshtastic_Channel_Role_DISABLED &&
+            strcmp(c.settings.name, "MonsterMesh") == 0) {
+            existingIdx = i;
+            break;
+        }
+        if (freeIdx < 0 && i >= 1 &&
+            (c.role == meshtastic_Channel_Role_DISABLED ||
+             strlen(c.settings.name) == 0)) {
+            freeIdx = i;
+        }
     }
+    if (existingIdx >= 0) {
+        mmChannel_ = (uint8_t)existingIdx;
+        Serial.printf("[MonsterMesh] reusing existing MonsterMesh channel at index %d\n",
+                      existingIdx);
+        return;
+    }
+    if (freeIdx < 0) {
+        Serial.println("[MonsterMesh] no free channel slot — MonsterMesh channel not provisioned");
+        return;
+    }
+    auto &ch = channels.getByIndex(freeIdx);
+    ch.role = meshtastic_Channel_Role_SECONDARY;
+    snprintf(ch.settings.name, sizeof(ch.settings.name), "MonsterMesh");
+    ch.settings.psk.size = sizeof(MM_PSK);
+    memcpy(ch.settings.psk.bytes, MM_PSK, sizeof(MM_PSK));
+    ch.settings.uplink_enabled   = true;
+    ch.settings.downlink_enabled = true;
+    channels.setChannel(ch);
+    mmChannel_ = (uint8_t)freeIdx;
+    Serial.printf("[MonsterMesh] auto-provisioned MonsterMesh channel at index %d "
+                  "(+ PSK + MQTT bridge)\n", freeIdx);
 }
 
 // ── wantPacket() — filter incoming packets ──────────────────────────────────
@@ -1304,7 +1346,6 @@ int32_t MonsterMeshModule::runOnce()
             LOG_INFO("[MonsterMesh] mm-ch broadcast: %s\n", msg);
         }, this);
         daycare_.setSendBeacon([](const DaycareBeacon &beaconIn, void *ctx) {
-            (void)ctx;
             DaycareBeacon beacon = beaconIn;
             beacon.nodeId     = nodeDB->getNodeNum();
             beacon.ngPlusTier = lordCurrentNgPlusTier();
@@ -1314,7 +1355,14 @@ int32_t MonsterMeshModule::runOnce()
                 return;
             }
             p->to = NODENUM_BROADCAST;
-            p->channel = channels.getPrimaryIndex();
+            // Beacons used to go on the primary channel (LongFast etc.)
+            // for visibility on the public mesh. That made them invisible
+            // between two decks whose primaries diverge. Send on the
+            // MonsterMesh channel instead — every node flashed with this
+            // firmware has it (b343 auto-provisions), so the daycare
+            // neighbor table actually populates.
+            MonsterMeshModule *self = static_cast<MonsterMeshModule *>(ctx);
+            p->channel = self ? self->mmChannel_ : MONSTERMESH_CHANNEL;
             p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
             size_t sz = sizeof(DaycareBeacon);
             if (sz > sizeof(p->decoded.payload.bytes)) sz = sizeof(p->decoded.payload.bytes);
@@ -1455,6 +1503,11 @@ int32_t MonsterMeshModule::runOnce()
         probeLogged = true;
         LOG_INFO("[MonsterMesh] boot complete — emu=%d browser=%d\n",
                  (int)emulatorActive_, (int)browserActive_);
+        // One-shot channel provision now that channels.* is fully ready.
+        // Adds "MonsterMesh" channel (PSK "MonsterMesh!2024", MQTT bridge
+        // on) to the first free slot if no channel by that name exists.
+        // Never overwrites a user-configured slot.
+        ensureMonsterMeshChannel();
     }
 
     // Deferred SAV save FIRST, before we touch the radio. Saving uses SD
