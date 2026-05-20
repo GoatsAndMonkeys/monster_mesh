@@ -404,6 +404,9 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                     mmbOppPartyReady_  = false;
                     mmbPartyChunkMask_ = 0;
                     mmbPartyTotal_     = 0;
+                    mmbPartyTxStartMs_ = millis();
+                    mmbPartyTxLastMs_  = 0;
+                    mmbPartyTxAttempts_ = 0;
                     LOG_INFO("[MonsterMesh] PvP: TEXT_BATTLE_START rx from 0x%08X seed=0x%08X (party exchange armed)\n",
                              (unsigned)mp.from, (unsigned)seed);
                 }
@@ -772,6 +775,9 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 mmbOppPartyReady_   = false;
                 mmbPartyChunkMask_  = 0;
                 mmbPartyTotal_      = 0;
+                mmbPartyTxStartMs_  = millis();
+                mmbPartyTxLastMs_   = 0;
+                mmbPartyTxAttempts_ = 0;
                 LOG_INFO("[MonsterMesh] mmt: ACCEPT staged from 0x%08X (party exchange armed)\n",
                          (unsigned)mp.from);
             } else if (first == 'N' || first == 'n') {
@@ -2008,13 +2014,40 @@ int32_t MonsterMeshModule::runOnce()
     // the sender's challenge DM lands), so stray TEXT_BATTLE_START packets
     // from other-agent code can't bounce us into spurious PvP.
     // Drain pending MMB party TX (point-to-point). Sender sets this on Y
-    // receipt; receiver sets it on TEXT_BATTLE_START receipt. Once chunks
-    // are emitted, we wait passively for the opponent's chunks in
-    // handleReceived; mmbOppPartyReady_ flips true when assembly completes.
+    // receipt; receiver sets it on TEXT_BATTLE_START receipt. We re-publish
+    // the chunk burst every MMB_PARTY_RETRY_INTERVAL_MS until either the
+    // engine launches (clears target below) or MMB_PARTY_RETRY_TIMEOUT_MS
+    // elapses — needed because the MQTT bridge is QoS 0 and a peer's WiFi
+    // outage drops chunks silently. mmbOppPartyReady_ is the *receive*
+    // signal; the opposite direction has no ACK, so we just keep firing.
     if (mmbPartyTxTarget_ != 0 && terminal_.hasParty()) {
-        uint32_t target = mmbPartyTxTarget_;
-        mmbPartyTxTarget_ = 0;
-        sendMmbPartyChunks(target, terminal_.getParty());
+        uint32_t now = millis();
+        if (mmbPartyTxStartMs_ != 0 &&
+            (now - mmbPartyTxStartMs_) >= MMB_PARTY_RETRY_TIMEOUT_MS) {
+            LOG_WARN("[MonsterMesh] MMB party TX retries timed out after %ums "
+                     "(attempts=%u oppReady=%d); abandoning\n",
+                     (unsigned)(now - mmbPartyTxStartMs_),
+                     (unsigned)mmbPartyTxAttempts_,
+                     (int)mmbOppPartyReady_);
+            mmbPartyTxTarget_   = 0;
+            mmbPartyTxLastMs_   = 0;
+            mmbPartyTxStartMs_  = 0;
+            mmbPartyTxAttempts_ = 0;
+        } else {
+            bool firstSend  = (mmbPartyTxLastMs_ == 0);
+            bool timeToRetry = !firstSend &&
+                (now - mmbPartyTxLastMs_) >= MMB_PARTY_RETRY_INTERVAL_MS;
+            if (firstSend || timeToRetry) {
+                mmbPartyTxLastMs_ = now;
+                mmbPartyTxAttempts_++;
+                LOG_INFO("[MonsterMesh] MMB party TX attempt %u → 0x%08X "
+                         "(oppReady=%d)\n",
+                         (unsigned)mmbPartyTxAttempts_,
+                         (unsigned)mmbPartyTxTarget_,
+                         (int)mmbOppPartyReady_);
+                sendMmbPartyChunks(mmbPartyTxTarget_, terminal_.getParty());
+            }
+        }
     }
 
     // Log every tick where launch flag is set but a gate blocks. Throttled
@@ -2046,6 +2079,11 @@ int32_t MonsterMeshModule::runOnce()
         // Consume the just-arrived opponent party for the launch below; clear
         // the ready flag so a fresh exchange is required for the next fight.
         mmbOppPartyReady_ = false;
+        // Stop retransmitting our party — both engines are about to run.
+        mmbPartyTxTarget_   = 0;
+        mmbPartyTxLastMs_   = 0;
+        mmbPartyTxStartMs_  = 0;
+        mmbPartyTxAttempts_ = 0;
 #if HAS_TFT
         lv_display_t *disp = lv_display_get_default();
         if (disp && !savedFlushCb_) {

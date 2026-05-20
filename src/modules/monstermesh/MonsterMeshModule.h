@@ -436,6 +436,15 @@ private:
     volatile uint32_t mmbPartyRxFrom_    = 0;
     Gen1Party         mmbOppParty_       = {};
     volatile bool     mmbOppPartyReady_  = false;
+    // Retransmit state: keeps party chunks publishing every ~5 s until the
+    // peer signals receipt (mmbOppPartyReady_ or battle launch) or the
+    // overall window elapses. Needed because the MQTT bridge is QoS 0 and
+    // a peer's brief WiFi outage drops chunks silently.
+    uint32_t          mmbPartyTxLastMs_  = 0;
+    uint32_t          mmbPartyTxStartMs_ = 0;
+    uint8_t           mmbPartyTxAttempts_ = 0;
+    static constexpr uint32_t MMB_PARTY_RETRY_INTERVAL_MS = 5000;
+    static constexpr uint32_t MMB_PARTY_RETRY_TIMEOUT_MS  = 30000;
     // Chunk reassembly buffer — Gen1Party = 404 bytes, with 100 bytes per
     // chunk that's 5 chunks. 8 * 100 = 800 bytes max. Lazy-allocated in
     // PSRAM on first incoming chunk so it doesn't take heap from the emu
