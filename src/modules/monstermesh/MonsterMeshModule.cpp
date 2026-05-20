@@ -1169,7 +1169,19 @@ int32_t MonsterMeshModule::runOnce()
             }, this);
         terminal_.setBeaconFn(
             [](void *ctx) {
-                static_cast<MonsterMeshModule *>(ctx)->daycare_.forceBeacon();
+                auto *self = static_cast<MonsterMeshModule *>(ctx);
+                self->daycare_.forceBeacon();
+                // Also re-emit NodeInfo on the MM channel so peers across
+                // MQTT pick up our pubkey + short_name without waiting
+                // for the 15-min periodic refresh. User-triggered
+                // beacon → user expects immediate visibility.
+                if (nodeInfoModule) {
+                    nodeInfoModule->sendOurNodeInfo(NODENUM_BROADCAST,
+                                                     false,
+                                                     self->mmChannel_);
+                    LOG_INFO("[MonsterMesh] beacon cmd: also sent NodeInfo on MM ch %u\n",
+                             (unsigned)self->mmChannel_);
+                }
             }, this);
         terminal_.setMmtListFn(
             [](void *ctx, char *buf, size_t n) {
