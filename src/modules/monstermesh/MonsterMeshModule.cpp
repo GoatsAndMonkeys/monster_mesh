@@ -421,15 +421,21 @@ bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
     if (p->decoded.portnum == meshtastic_PortNum_PRIVATE_APP) {
         return true;
     }
-    // T4: peek at every TEXT_MESSAGE_APP DM addressed to us.
-    //   - sender path: parse Y/N reply to our outstanding mmt challenge.
-    //   - receiver path: detect incoming "Wanna battle?" DM and arm the
-    //     mmtChallengerPeer_ window so a matching TEXT_BATTLE_START
-    //     can auto-launch the receiver-side battle.
+    // T4: peek at every TEXT_MESSAGE_APP DM addressed to us OR sent BY us.
+    //   - inbound DM to us: parse Y/N reply to our outstanding mmt challenge,
+    //     or detect an "MMB ON" / "battle in MonsterMesh" challenge phrase
+    //     and arm the mmtChallengerPeer_ window so a matching
+    //     TEXT_BATTLE_START can auto-launch the receiver-side battle.
+    //   - outbound DM from us: if the user types "MMB ON" in their phone
+    //     to a peer, arm mmtAwaitingReplyFrom_ so the peer's Y reply
+    //     actually kicks off our side of the PvP. Without this hook, an
+    //     "MMB ON" challenge sent from the phone (instead of the terminal
+    //     `mmt @peer` command) silently went nowhere on the sender side.
     // handleReceived always returns CONTINUE so the standard text
     // pipeline still delivers the DM to the user's phone client.
     if (p->decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
-        nodeDB && p->to == nodeDB->getNodeNum() && !isBroadcast(p->to)) {
+        nodeDB && !isBroadcast(p->to) &&
+        (p->to == nodeDB->getNodeNum() || p->from == nodeDB->getNodeNum())) {
         return true;
     }
     // (BBS_REPLY arrives via PRIVATE_APP, already accepted above.)
@@ -932,34 +938,67 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
     // BattlePackets — handled in the PRIVATE_APP block above. Nothing to
     // do here for BBS in the text-message path.)
 
-    // T4: detect an INCOMING MMT challenge DM ("Do you want to battle in
-    // MonsterMesh? Reply Y or N.") and arm a 60 s window for the
-    // matching TEXT_BATTLE_START to auto-launch the receiver-side
-    // battle. Without this gate we'd take any 0x60 packet of the right
-    // size as a battle invite (and other-agent gauntlet/dungeon code
-    // emits stray ones).
+    // T4: detect an INCOMING MMT challenge DM. Two phrases accepted:
+    //   1. "battle in MonsterMesh"  — sent by the terminal `mmt @peer` command
+    //      via sendTextDM ("Do you want to battle in MonsterMesh? Reply Y or N.")
+    //   2. "MMB ON"  (case-insensitive) — user-friendly shorthand typed
+    //      directly into the phone DM chat. Lets you initiate a fight
+    //      without opening the on-deck terminal.
+    // Either phrase arms a 10-minute window for the matching TEXT_BATTLE_START
+    // to auto-launch the receiver-side battle. Without this gate we'd take
+    // any 0x60 packet of the right size as a battle invite (and other-agent
+    // gauntlet/dungeon code emits stray ones).
+    auto containsIgnoreCase = [](const char *hay, size_t hlen,
+                                 const char *ndl, size_t nlen) -> bool {
+        if (nlen == 0 || hlen < nlen) return false;
+        for (size_t i = 0; i + nlen <= hlen; ++i) {
+            size_t j = 0;
+            for (; j < nlen; ++j) {
+                char a = hay[i + j];
+                char b = ndl[j];
+                if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
+                if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
+                if (a != b) break;
+            }
+            if (j == nlen) return true;
+        }
+        return false;
+    };
     if (mp.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
         mp.from != 0 && mp.from != nodeDB->getNodeNum()) {
         const char *txt = (const char *)mp.decoded.payload.bytes;
         size_t      len = mp.decoded.payload.size;
-        // Quick substring match for the well-known challenge phrase.
-        // "battle in MonsterMesh" is unique enough for our purposes.
-        const char *needle = "battle in MonsterMesh";
-        size_t nlen = 21;
-        if (len >= nlen) {
-            for (size_t i = 0; i + nlen <= len; ++i) {
-                if (memcmp(txt + i, needle, nlen) == 0) {
-                    mmtChallengerPeer_     = mp.from;
-                    // 10-minute window so user has reasonable time to type Y.
-                    // Originally 60s, but real chat reaction time + DeviceUI
-                    // input lag routinely exceeded that and the resulting
-                    // chunks were silently dropped (observed b358, 4+min Y).
-                    mmtChallengerExpireMs_ = millis() + 600000;
-                    LOG_INFO("[MonsterMesh] mmt: challenge DM from 0x%08X — armed 10min\n",
-                             (unsigned)mp.from);
-                    break;
-                }
-            }
+        bool isChallenge =
+            containsIgnoreCase(txt, len, "battle in MonsterMesh", 21) ||
+            containsIgnoreCase(txt, len, "MMB ON", 6);
+        if (isChallenge) {
+            mmtChallengerPeer_     = mp.from;
+            // 10-minute window so user has reasonable time to type Y.
+            // Originally 60s, but real chat reaction time + DeviceUI
+            // input lag routinely exceeded that and the resulting
+            // chunks were silently dropped (observed b358, 4+min Y).
+            mmtChallengerExpireMs_ = millis() + 600000;
+            LOG_INFO("[MonsterMesh] mmt: challenge DM from 0x%08X — armed 10min\n",
+                     (unsigned)mp.from);
+        }
+    }
+    // Outbound "MMB ON" DM hook: when the user types "MMB ON" (any case)
+    // in their phone DM chat to a peer, arm our reply-awaiting state so
+    // the peer's Y answer is actually recognized as an accept. Without
+    // this, the OUT DM goes over the air fine, the peer's device arms
+    // its challenger window from the inbound match above, the peer types
+    // Y — but our side has mmtAwaitingReplyFrom_ == 0 and silently
+    // drops the Y. wantPacket() above was widened to let outbound DMs
+    // flow through so this hook can see them.
+    if (mp.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
+        mp.from == nodeDB->getNodeNum() && !isBroadcast(mp.to) && mp.to != 0) {
+        const char *txt = (const char *)mp.decoded.payload.bytes;
+        size_t      len = mp.decoded.payload.size;
+        if (containsIgnoreCase(txt, len, "MMB ON", 6)) {
+            mmtAwaitingReplyFrom_ = mp.to;
+            mmtOnTxTarget_        = mp.to;  // for downstream record-keeping
+            LOG_INFO("[MonsterMesh] mmt: outbound MMB ON to 0x%08X — armed awaiting reply\n",
+                     (unsigned)mp.to);
         }
     }
 
