@@ -434,9 +434,14 @@ bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
     // handleReceived always returns CONTINUE so the standard text
     // pipeline still delivers the DM to the user's phone client.
     if (p->decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
-        nodeDB && !isBroadcast(p->to) &&
-        (p->to == nodeDB->getNodeNum() || p->from == nodeDB->getNodeNum())) {
-        return true;
+        nodeDB && !isBroadcast(p->to)) {
+        // Inbound DM to us.
+        if (p->to == nodeDB->getNodeNum()) return true;
+        // Outbound DM from us. Phone-originated packets arrive at
+        // handleReceived with from=0 (not yet stamped to our node ID); by
+        // the time they reach the router rebroadcast they have from=self.
+        // Accept both so the "MMB ON" hook can see phone-typed DMs.
+        if (p->from == 0 || p->from == nodeDB->getNodeNum()) return true;
     }
     // (BBS_REPLY arrives via PRIVATE_APP, already accepted above.)
     return false;
@@ -988,10 +993,13 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
     // this, the OUT DM goes over the air fine, the peer's device arms
     // its challenger window from the inbound match above, the peer types
     // Y — but our side has mmtAwaitingReplyFrom_ == 0 and silently
-    // drops the Y. wantPacket() above was widened to let outbound DMs
-    // flow through so this hook can see them.
+    // drops the Y. Phone-originated DMs first arrive with from=0 (the
+    // PacketAPI USER path before stamping); the router stamps to=self
+    // on the subsequent REMOTE rebroadcast. Both paths look like
+    // outbound DMs to us, so accept either.
     if (mp.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
-        mp.from == nodeDB->getNodeNum() && !isBroadcast(mp.to) && mp.to != 0) {
+        (mp.from == 0 || mp.from == nodeDB->getNodeNum()) &&
+        !isBroadcast(mp.to) && mp.to != 0 && mp.to != nodeDB->getNodeNum()) {
         const char *txt = (const char *)mp.decoded.payload.bytes;
         size_t      len = mp.decoded.payload.size;
         if (containsIgnoreCase(txt, len, "MMB ON", 6)) {

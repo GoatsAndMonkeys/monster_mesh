@@ -340,8 +340,49 @@ bool MonsterMeshTextBattle::handlePacket(uint32_t fromId,
             return true;
         case PktType::TEXT_BATTLE_HASH: {
             if (len < BATTLELINK_HDR_SIZE + 10) return true;
+            uint16_t pktTurn = ((uint16_t)pkt->payload[0] << 8) | pkt->payload[1];
+            // Drop hashes from a different turn than we're currently at.
+            // The hash includes the turn counter, so comparing a peer's
+            // turn-N hash against our (advanced) turn-N+k local state
+            // would false-positive as a desync. The protocol resends a
+            // hash every HASH_INTERVAL turns, so dropping one stale one
+            // is harmless — the next aligned hash will catch any real
+            // divergence. Observed live: turn race between the two decks
+            // (peer's hash arrives after we've already advanced past
+            // that turn over MQTT).
+            if (pktTurn != engine_.turn()) return true;
             uint8_t mine[8]; engine_.hashState(mine);
-            if (memcmp(mine, pkt->payload + 2, 8) != 0) {
+            const uint8_t *theirs = pkt->payload + 2;
+            if (memcmp(mine, theirs, 8) != 0) {
+                // Diagnostic log so future desyncs are decodable: show both
+                // hashes + the turn the peer's hash was computed at vs our
+                // current turn. Use Serial directly (not LOG_INFO) to keep
+                // the line easy to grep for.
+                Serial.printf("[MMB] DESYNC hash mismatch peerTurn=%u myTurn=%u "
+                              "mine=%02x%02x%02x%02x%02x%02x%02x%02x "
+                              "theirs=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+                              (unsigned)pktTurn, (unsigned)engine_.turn(),
+                              mine[0], mine[1], mine[2], mine[3],
+                              mine[4], mine[5], mine[6], mine[7],
+                              theirs[0], theirs[1], theirs[2], theirs[3],
+                              theirs[4], theirs[5], theirs[6], theirs[7]);
+                // Also dump the per-side state so we can see WHICH fields
+                // diverged. p0/p1 are local labels — initiator/receiver
+                // have these flipped, but the dump lets us see absolute
+                // HP/PP/status/active values to compare both decks.
+                for (int s = 0; s < 2; ++s) {
+                    const auto &party = engine_.party(s);
+                    Serial.printf("[MMB]  side%d active=%u count=%u:",
+                                  s, (unsigned)party.active,
+                                  (unsigned)party.count);
+                    for (uint8_t i = 0; i < party.count && i < 6; ++i) {
+                        const auto &m = party.mons[i];
+                        Serial.printf(" m%u(sp=%u hp=%u/%u st=%02x pp=%u,%u,%u,%u)",
+                                      i, m.species, m.hp, m.maxHp, m.status,
+                                      m.pp[0], m.pp[1], m.pp[2], m.pp[3]);
+                    }
+                    Serial.println();
+                }
                 appendLog("Desync detected — match aborted.");
                 engine_.forfeit(0, engineLogCb, this);
                 phase_ = Phase::FINISHED;
