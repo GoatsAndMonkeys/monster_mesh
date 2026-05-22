@@ -1585,6 +1585,43 @@ int32_t MonsterMeshModule::runOnce()
                              (unsigned)self->mmChannel_);
                 }
             }, this);
+        terminal_.setForgetFn(
+            [](void *ctx) {
+                auto *self = static_cast<MonsterMeshModule *>(ctx);
+                if (!nodeDB) return;
+                NodeNum me = nodeDB->getNodeNum();
+                int purged = 0;
+                // removeNodeByNum compacts the array in place, so snapshot
+                // the nums first to avoid index shifting during iteration.
+                NodeNum victims[64];
+                int     n = 0;
+                int nodes = nodeDB->getNumMeshNodes();
+                for (int i = 0; i < nodes && n < 64; ++i) {
+                    auto *info = nodeDB->getMeshNodeByIndex(i);
+                    if (info && info->num != 0 && info->num != me) {
+                        victims[n++] = info->num;
+                    }
+                }
+                for (int i = 0; i < n; ++i) {
+                    nodeDB->removeNodeByNum(victims[i]);
+                    ++purged;
+                }
+                LOG_WARN("[MonsterMesh] forget: purged %d nodes from NodeDB\n", purged);
+                // Daycare neighbor table is keyed on node nums too — clear
+                // local PvP/handshake refs so a future beacon from a "forgotten"
+                // peer arrives clean.
+                self->mmtAwaitingReplyFrom_  = 0;
+                self->mmtChallengerPeer_     = 0;
+                self->mmtChallengerExpireMs_ = 0;
+                self->mmbPartyRxFrom_        = 0;
+                self->mmbPartyTxTarget_      = 0;
+                // Re-emit NodeInfo so peers immediately repopulate us with
+                // a fresh PKI pubkey from our side.
+                if (nodeInfoModule) {
+                    nodeInfoModule->sendOurNodeInfo(NODENUM_BROADCAST, false,
+                                                     self->mmChannel_);
+                }
+            }, this);
         terminal_.setMmtListFn(
             [](void *ctx, char *buf, size_t n) {
                 auto *self = static_cast<MonsterMeshModule *>(ctx);

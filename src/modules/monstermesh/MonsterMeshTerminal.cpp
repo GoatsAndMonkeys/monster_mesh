@@ -525,6 +525,15 @@ void MonsterMeshTerminal::executeLine(const char *line)
         }
         return;
     }
+    if (strcmp(line, "forget") == 0) {
+        if (!forgetFn_) {
+            println("forget not wired.");
+            return;
+        }
+        forgetFn_(forgetCtx_);
+        println("NodeDB purged. Re-beacon on both decks.");
+        return;
+    }
     if (strncmp(line, "version", 7) == 0) {
         char buf[64];
 #ifdef MONSTERMESH_BUILD
