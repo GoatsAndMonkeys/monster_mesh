@@ -73,6 +73,8 @@ void MonsterMeshTextBattle::startNetworkedAsInitiator(uint32_t remoteId,
     engine_.start(myParty, opp, rngSeed);
 
     if (!existingSeed) sendStart(rngSeed, myParty);
+    Serial.printf("[MMB] init startNetworked: session=0x%04X seed=0x%08X peer=0x%08X\n",
+                  (unsigned)session_, (unsigned)rngSeed, (unsigned)remoteId);
     appendLog("Battle started!");
     appendLog("Waiting for opponent…");
     lastRecvMs_ = millis();
@@ -100,6 +102,8 @@ void MonsterMeshTextBattle::startNetworkedAsReceiver(uint32_t remoteId,
 
     Gen1Party opp = (oppParty.count > 0) ? oppParty : myParty;
     engine_.start(myParty, opp, rngSeed);
+    Serial.printf("[MMB] recv startNetworked: session=0x%04X seed=0x%08X peer=0x%08X\n",
+                  (unsigned)session_, (unsigned)rngSeed, (unsigned)remoteId);
     appendLog("Battle started!");
     lastRecvMs_ = millis();
     dirty_ = true;
@@ -320,7 +324,15 @@ bool MonsterMeshTextBattle::handlePacket(uint32_t fromId,
         return true;
     }
     if (mode_ == Mode::OFF) return false;
-    if (pkt->sessionId() != session_) return false;
+    if (pkt->sessionId() != session_) {
+        // Silent drop has bitten us in PvP debugging — log the mismatch
+        // so a stuck-waiting-for-opponent state is decodable.
+        Serial.printf("[MMB] pkt session mismatch from=0x%08X type=0x%02X "
+                      "pkt_session=0x%04X our_session=0x%04X — dropping\n",
+                      (unsigned)fromId, (unsigned)pkt->type,
+                      (unsigned)pkt->sessionId(), (unsigned)session_);
+        return false;
+    }
 
     switch (t) {
         case PktType::TEXT_BATTLE_ACTION: {
