@@ -352,6 +352,26 @@ void MonsterMeshModule::ensureMonsterMeshChannel()
     const char *desiredPass     = default_mqtt_password;
     const char *desiredRoot     = "kanto";
     const bool  desiredTls      = true;
+    // MQTT must be enabled on the device-side (not phone-proxy) so the deck
+    // connects to the EMQX broker directly via WiFi. The phone app's "Send
+    // via Phone" toggle silently flips proxy_to_client_enabled=true, after
+    // which the deck no longer attempts a direct broker connect and we see
+    // "MQTT not connected, queue packet" with zero [MQTT] logs. Heal both.
+    if (!moduleConfig.mqtt.enabled) {
+        Serial.printf("[MonsterMesh] mqtt.enabled canonicalized: 0 -> 1\n");
+        moduleConfig.mqtt.enabled = true;
+        mqttDirty = true;
+    }
+    if (moduleConfig.mqtt.proxy_to_client_enabled) {
+        Serial.printf("[MonsterMesh] mqtt.proxy_to_client_enabled canonicalized: 1 -> 0\n");
+        moduleConfig.mqtt.proxy_to_client_enabled = false;
+        mqttDirty = true;
+    }
+    if (!moduleConfig.mqtt.encryption_enabled) {
+        Serial.printf("[MonsterMesh] mqtt.encryption_enabled canonicalized: 0 -> 1\n");
+        moduleConfig.mqtt.encryption_enabled = true;
+        mqttDirty = true;
+    }
     if (strcmp(moduleConfig.mqtt.address, desiredAddr) != 0) {
         Serial.printf("[MonsterMesh] mqtt.address canonicalized: '%s' -> '%s'\n",
                       moduleConfig.mqtt.address, desiredAddr);
