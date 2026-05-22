@@ -1137,6 +1137,25 @@ void MonsterMeshModule::onLocalYReply()
     mmbPartyTxAttempts_ = 0;
 }
 
+// publishMqttOnlyBroadcast — publish a broadcast packet to the MQTT broker
+// ONLY. Does NOT touch the LoRa interface.
+//
+// CRITICAL — DO NOT REPLACE THIS WITH service->sendToMesh OR router->send.
+// Both of those go through Router::send → iface->send and fan the packet out
+// over LoRa airtime as well. The whole point of the beacon-response feature
+// is that N decks can quietly ack a remote beacon via the broker without
+// every one of them slamming the LoRa airwaves. Routing the response
+// through the normal mesh send path defeats the design and turns one
+// requester beacon into N×LoRa TX bursts — exactly what we're avoiding.
+//
+// Hot rules:
+//   - Anything that flows from a `requestResponse=1` daycare beacon MUST
+//     land here, never on service->sendToMesh / router->send.
+//   - If you need to send PvP or DM traffic that does require LoRa
+//     delivery, use the normal send path. That's a different design with
+//     different airtime semantics.
+//   - Keep the throttle at the call-site (currently 30 s/peer) so even a
+//     misbehaving peer flooding request beacons can't spam the broker.
 void MonsterMeshModule::publishMqttOnlyBroadcast(meshtastic_MeshPacket *p)
 {
 #if !MESHTASTIC_EXCLUDE_MQTT
@@ -1159,6 +1178,8 @@ void MonsterMeshModule::publishMqttOnlyBroadcast(meshtastic_MeshPacket *p)
         packetPool.release(p);
         return;
     }
+    // mqtt->onSend publishes to the broker only. We deliberately do NOT call
+    // iface->send / router->send here — see the function-level note above.
     mqtt->onSend(*p, *pDecoded, chIndex);
     LOG_INFO("[MonsterMesh] mqtt-only TX: portnum=%d ch=%u from=0x%08X to=0x%08X\n",
              (int)pDecoded->decoded.portnum, (unsigned)chIndex,
@@ -2492,6 +2513,13 @@ int32_t MonsterMeshModule::runOnce()
     // directly, skipping LoRa iface->send so we don't fan out the response
     // over the airwaves. Throttle to 30 s/peer so a rapid burst of request
     // beacons can't spam the broker.
+    //
+    // CRITICAL: the beacon below MUST go via publishMqttOnlyBroadcast.
+    // Do NOT switch this to service->sendToMesh / router->send — that path
+    // also LoRa-broadcasts, which would turn N decks all responding to one
+    // request beacon into N×LoRa TX bursts (exactly the airtime storm the
+    // MQTT-only design avoids). See the function header comment on
+    // publishMqttOnlyBroadcast for the full reasoning + invariants.
     if (pendingMqttResponseTo_ != 0 && setupDone_ &&
         !emulatorActive_ && !browserActive_) {
         uint32_t now = millis();

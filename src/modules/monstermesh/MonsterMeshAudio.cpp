@@ -32,9 +32,11 @@ bool MonsterMeshAudio::begin() {
     // driver before we get here; without uninstalling, our install returns
     // ESP_ERR_INVALID_STATE and emulator boots silently. The uninstall
     // returns an error when nothing is installed — ignore it.
-    i2s_stop(I2S_NUM_0);
+    // NOTE: do NOT add i2s_stop / vTaskDelay around this — that combo
+    // crashed the device on ROM-load-after-battle on b387 (see logs:
+    // device reset right after "save loaded" line, before any further
+    // emulator log). driver_uninstall is sufficient.
     i2s_driver_uninstall(I2S_NUM_0);
-    vTaskDelay(pdMS_TO_TICKS(20));
 
     // Configure I2S for audio output
     i2s_config_t i2s_config = {};
