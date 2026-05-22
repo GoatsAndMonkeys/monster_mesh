@@ -3096,6 +3096,32 @@ int32_t MonsterMeshModule::runOnce()
                 // flag so the next render shows the new opponent.
             } else {
                 textBattleActive_ = false;
+                // Clear ALL PvP-handshake state so a leftover chunk
+                // retransmit from the peer (their mmbPartyTxTarget_ keeps
+                // firing for the full 90s retry window) can't auto-arm a
+                // new receiver session and re-launch the battle the
+                // moment the user lands back in the terminal. Without
+                // this, the launch gate (pendingMmt* && mmbOppPartyReady_
+                // && !textBattleActive_) trips on the next chunk burst.
+                pendingMmtBattleAsInitiator_ = false;
+                pendingMmtBattleAsReceiver_  = false;
+                mmbOppPartyReady_            = false;
+                mmbPartyChunkMask_           = 0;
+                mmbPartyTotal_               = 0;
+                mmbPartyRxFrom_              = 0;
+                mmbPartyTxTarget_            = 0;
+                mmbPartyTxStartMs_           = 0;
+                mmbPartyTxLastMs_            = 0;
+                mmbPartyTxAttempts_          = 0;
+                mmtChallengerPeer_           = 0;
+                mmtChallengerExpireMs_       = 0;
+                mmtAwaitingReplyFrom_        = 0;
+                mmtBattlePeer_               = 0;
+                mmtBattleSeed_               = 0;
+                mmtBattleSession_            = 0;
+                mmtBattleReceivePendingMs_   = 0;
+                if (mmbPartyChunks_)
+                    memset(mmbPartyChunks_, 0, MMB_PARTY_CHUNKS_BYTES);
 #if HAS_TFT
                 // Wipe the lgfx-rendered battle frame so the terminal doesn't
                 // have to fight through press-any-key pixels. lgfx ops are
