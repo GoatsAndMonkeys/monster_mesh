@@ -429,12 +429,6 @@ private:
     volatile bool pendingReplyBeacon_ = false;
     uint32_t lastReplyBeaconMs_ = 0;
 
-    // `forget` terminal command stages this flag (LVGL thread); runOnce on
-    // the LoRa thread drains it. NodeDB::removeNodeByNum saves the whole
-    // node database to LittleFS per call — running that from the LVGL
-    // callback context for N nodes wedges the UI thread.
-    volatile bool pendingForgetNodes_ = false;
-
     // ── MMB direct-party-exchange protocol ──────────────────────────────
     // Beacon-derived opponent parties were producing self-fights when both
     // T-Decks ran the same SAV (or when the neighbor table had stale data).

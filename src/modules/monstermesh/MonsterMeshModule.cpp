@@ -1574,14 +1574,6 @@ int32_t MonsterMeshModule::runOnce()
                              (unsigned)self->mmChannel_);
                 }
             }, this);
-        terminal_.setForgetFn(
-            [](void *ctx) {
-                // Defer everything to runOnce — removeNodeByNum calls
-                // saveNodeDatabaseToDisk per node, which would freeze the
-                // LVGL thread for N×LittleFS-write durations.
-                auto *self = static_cast<MonsterMeshModule *>(ctx);
-                self->pendingForgetNodes_ = true;
-            }, this);
         terminal_.setMmtListFn(
             [](void *ctx, char *buf, size_t n) {
                 auto *self = static_cast<MonsterMeshModule *>(ctx);
@@ -2436,40 +2428,6 @@ int32_t MonsterMeshModule::runOnce()
             mmbPartyTxLastMs_   = 0;
             mmbPartyTxAttempts_ = 0;
             mmtBattleReceivePendingMs_ = 0;
-        }
-    }
-
-    // Drain pendingForgetNodes_ — purge non-self NodeDB entries, clear
-    // local PvP refs, re-emit our NodeInfo. Heavy because removeNodeByNum
-    // saves NodeDB to LittleFS once per call; deferring keeps it off the
-    // LVGL thread.
-    if (pendingForgetNodes_) {
-        pendingForgetNodes_ = false;
-        if (nodeDB) {
-            NodeNum me = nodeDB->getNodeNum();
-            NodeNum victims[64];
-            int     n = 0;
-            size_t  nodes = nodeDB->getNumMeshNodes();
-            for (size_t i = 0; i < nodes && n < 64; ++i) {
-                auto *info = nodeDB->getMeshNodeByIndex(i);
-                if (info && info->num != 0 && info->num != me) {
-                    victims[n++] = info->num;
-                }
-            }
-            for (int i = 0; i < n; ++i) {
-                nodeDB->removeNodeByNum(victims[i]);
-            }
-            LOG_WARN("[MonsterMesh] forget: purged %d nodes from NodeDB — rebooting in 3s\n", n);
-            mmtAwaitingReplyFrom_  = 0;
-            mmtChallengerPeer_     = 0;
-            mmtChallengerExpireMs_ = 0;
-            mmbPartyRxFrom_        = 0;
-            mmbPartyTxTarget_      = 0;
-            // Reboot after the purge — gives the user a clean radio + UI
-            // state, and the NodeInfo broadcast happens naturally at boot.
-            // 3-second window lets the LittleFS save finish flushing.
-            extern uint32_t rebootAtMsec;
-            rebootAtMsec = millis() + 3000;
         }
     }
 

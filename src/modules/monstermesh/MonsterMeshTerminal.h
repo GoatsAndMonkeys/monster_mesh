@@ -95,15 +95,6 @@ class MonsterMeshTerminal {
         beaconCtx_ = ctx;
     }
 
-    // `forget` command — purge every non-self entry from NodeDB so peers
-    // re-exchange NodeInfo (and PKI pubkeys) from scratch on the next beacon.
-    // Recovery path when DM PKI keys have diverged ("ack by another node
-    // but no channel").
-    typedef void (*ForgetFn)(void *ctx);
-    void setForgetFn(ForgetFn fn, void *ctx) {
-        forgetFn_ = fn;
-        forgetCtx_ = ctx;
-    }
 
     // `mmt` (no args) lists peers we've recently heard a daycare beacon
     // from. Module fills the buffer with newline-separated lines.
@@ -264,8 +255,6 @@ class MonsterMeshTerminal {
     void               *mmtListCtx_     = nullptr;
     BeaconFn            beaconFn_       = nullptr;
     void               *beaconCtx_      = nullptr;
-    ForgetFn            forgetFn_       = nullptr;
-    void               *forgetCtx_      = nullptr;
     FightFn             fightFn_       = nullptr;
     void               *fightCtx_      = nullptr;
     GymFightFn          gymFightFn_    = nullptr;
