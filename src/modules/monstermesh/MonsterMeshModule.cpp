@@ -5,6 +5,7 @@
 #include "MeshService.h"
 #include "Router.h"
 #include "NodeDB.h"
+#include "mesh/Default.h"
 #include "mesh/Channels.h"
 #include "mesh/generated/meshtastic/portnums.pb.h"
 #include "input/InputBroker.h"
@@ -341,20 +342,50 @@ void MonsterMeshModule::ensureMonsterMeshChannel()
                       "(+ PSK + MQTT bridge)\n", freeIdx);
     }
 
-    // Canonicalize moduleConfig.mqtt.root to "msh/US". Why not silo into
-    // msh/US/MonsterMesh? The public broker (mqtt.meshtastic.org) does
-    // not accept publishes/subscribes on arbitrary deeper subtrees — b354
-    // wedged and never connected. Stock Meshtastic clients all live on
-    // msh/<region>, so that's where the broker's ACL allows traffic.
-    // We override the NVS-stored root every boot so a stray menu/admin
-    // re-trigger of the auto-append (which would produce "msh/US/US") is
-    // healed automatically.
-    const char *desiredRoot = "msh/US";
+    // Canonicalize moduleConfig.mqtt — force the MonsterMesh private EMQX
+    // broker on every boot so devices that came from earlier firmware with
+    // mqtt.meshtastic.org credentials auto-migrate without the user touching
+    // the phone app. Anything stuck in NVS gets healed in one cycle.
+    bool mqttDirty = false;
+    const char *desiredAddr     = default_mqtt_address;
+    const char *desiredUser     = default_mqtt_username;
+    const char *desiredPass     = default_mqtt_password;
+    const char *desiredRoot     = "kanto";
+    const bool  desiredTls      = true;
+    if (strcmp(moduleConfig.mqtt.address, desiredAddr) != 0) {
+        Serial.printf("[MonsterMesh] mqtt.address canonicalized: '%s' -> '%s'\n",
+                      moduleConfig.mqtt.address, desiredAddr);
+        strncpy(moduleConfig.mqtt.address, desiredAddr,
+                sizeof(moduleConfig.mqtt.address) - 1);
+        moduleConfig.mqtt.address[sizeof(moduleConfig.mqtt.address) - 1] = '\0';
+        mqttDirty = true;
+    }
+    if (strcmp(moduleConfig.mqtt.username, desiredUser) != 0) {
+        strncpy(moduleConfig.mqtt.username, desiredUser,
+                sizeof(moduleConfig.mqtt.username) - 1);
+        moduleConfig.mqtt.username[sizeof(moduleConfig.mqtt.username) - 1] = '\0';
+        mqttDirty = true;
+    }
+    if (strcmp(moduleConfig.mqtt.password, desiredPass) != 0) {
+        strncpy(moduleConfig.mqtt.password, desiredPass,
+                sizeof(moduleConfig.mqtt.password) - 1);
+        moduleConfig.mqtt.password[sizeof(moduleConfig.mqtt.password) - 1] = '\0';
+        mqttDirty = true;
+    }
+    if (moduleConfig.mqtt.tls_enabled != desiredTls) {
+        Serial.printf("[MonsterMesh] mqtt.tls_enabled canonicalized: %d -> %d\n",
+                      (int)moduleConfig.mqtt.tls_enabled, (int)desiredTls);
+        moduleConfig.mqtt.tls_enabled = desiredTls;
+        mqttDirty = true;
+    }
     if (strcmp(moduleConfig.mqtt.root, desiredRoot) != 0) {
         Serial.printf("[MonsterMesh] mqtt.root canonicalized: '%s' -> '%s'\n",
                       moduleConfig.mqtt.root, desiredRoot);
         strncpy(moduleConfig.mqtt.root, desiredRoot, sizeof(moduleConfig.mqtt.root) - 1);
         moduleConfig.mqtt.root[sizeof(moduleConfig.mqtt.root) - 1] = '\0';
+        mqttDirty = true;
+    }
+    if (mqttDirty) {
         nodeDB->saveToDisk(SEGMENT_MODULECONFIG);
     }
 }
@@ -785,6 +816,16 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                                  (unsigned)partTotal);
                     }
                     mmbPartyRxFrom_ = 0;  // done collecting
+                    // Reset the chunk-assembly buffer so the NEXT session starts
+                    // clean. Without this, mmbPartyChunkMask_ stays at fullMask
+                    // and the first chunk of the next battle short-circuits the
+                    // gate, memcpy'ing 4/5ths of the prior opponent's party
+                    // into mmbOppParty_ — symptom: PvP fights launch with
+                    // "wrong" or "missing" pokemon from the previous fight.
+                    mmbPartyChunkMask_ = 0;
+                    mmbPartyTotal_     = 0;
+                    if (mmbPartyChunks_)
+                        memset(mmbPartyChunks_, 0, MMB_PARTY_CHUNKS_BYTES);
                 }
                 return ProcessMessage::CONTINUE;
             }
@@ -2385,6 +2426,14 @@ int32_t MonsterMeshModule::runOnce()
         mmbPartyTxLastMs_   = 0;
         mmbPartyTxStartMs_  = 0;
         mmbPartyTxAttempts_ = 0;
+        // Belt + suspenders: clear chunk-assembly state at launch too so a
+        // post-engine straggler chunk can't be ORed into a stale mask and
+        // cause the NEXT session to launch with the previous opponent's
+        // pokemon partially overwritten.
+        mmbPartyChunkMask_ = 0;
+        mmbPartyTotal_     = 0;
+        if (mmbPartyChunks_)
+            memset(mmbPartyChunks_, 0, MMB_PARTY_CHUNKS_BYTES);
 #if HAS_TFT
         lv_display_t *disp = lv_display_get_default();
         if (disp && !savedFlushCb_) {
