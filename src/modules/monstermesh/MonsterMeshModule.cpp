@@ -1801,6 +1801,15 @@ int32_t MonsterMeshModule::runOnce()
             DaycareBeacon beacon = beaconIn;
             beacon.nodeId     = nodeDB->getNodeNum();
             beacon.ngPlusTier = lordCurrentNgPlusTier();
+            // Short-name fallback: if owner.short_name isn't customized
+            // (factory-fresh deck), derive a name from the NodeNum so the
+            // receiver still has a human-readable handle to use in the
+            // neighbor list. Format "T-XX" where XX = last 2 hex digits of
+            // NodeNum, leaves room for the null terminator in [5].
+            if (beacon.shortName[0] == '\0') {
+                snprintf(beacon.shortName, sizeof(beacon.shortName),
+                         "T-%02X", (unsigned)(beacon.nodeId & 0xFFu));
+            }
             // User-triggered beacons (boot, manual `beacon`/`bc`) ask peers
             // to reply MQTT-only. Cleared after one beacon goes out so the
             // next periodic auto-beacon doesn't carry the request flag.

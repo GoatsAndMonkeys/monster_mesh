@@ -32,7 +32,9 @@ bool MonsterMeshAudio::begin() {
     // driver before we get here; without uninstalling, our install returns
     // ESP_ERR_INVALID_STATE and emulator boots silently. The uninstall
     // returns an error when nothing is installed — ignore it.
+    i2s_stop(I2S_NUM_0);
     i2s_driver_uninstall(I2S_NUM_0);
+    vTaskDelay(pdMS_TO_TICKS(20));
 
     // Configure I2S for audio output
     i2s_config_t i2s_config = {};
@@ -72,7 +74,13 @@ bool MonsterMeshAudio::begin() {
     i2s_zero_dma_buffer(I2S_NUM_0);
 
     running_ = true;
-    Serial.printf("[AUDIO] started: %dHz, 16-bit stereo\n", AUDIO_SAMPLE_RATE);
+    // Defensive: ensure the freshly-started audio is unmuted. The mic-button
+    // toggleMute() path (RAW-mode kb poll) can fire on an early bus glitch
+    // right at emulator start, which used to leave the player muted with no
+    // obvious indication.
+    muted_ = false;
+    Serial.printf("[AUDIO] started: %dHz, 16-bit stereo, vol=%u mute=0\n",
+                  AUDIO_SAMPLE_RATE, (unsigned)volume_);
     return true;
 }
 
