@@ -907,7 +907,10 @@ void MonsterMeshTerminal::executeLine(const char *line)
     }
 
     // Indigo Plateau is reached via `gym fight 9`, no standalone command.
-    if (strncmp(line, "beacon", 6) == 0) {
+    // `beacon` or `bc` shortcut. Both broadcast our daycare beacon + ask
+    // peers to respond via MQTT-only so the requesting deck gets a full
+    // neighbor list without N×LoRa fan-out.
+    if (strcmp(line, "beacon") == 0 || strcmp(line, "bc") == 0) {
         if (!beaconFn_) { println("beacon not wired"); return; }
         beaconFn_(beaconCtx_);
         println("Beacon broadcast — peers should pick you up shortly.");

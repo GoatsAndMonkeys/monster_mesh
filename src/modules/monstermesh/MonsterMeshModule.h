@@ -292,6 +292,16 @@ public:
     // the only place we can intercept a "MMB ON" typed in the phone DM chat.
     void sniffPhoneOutboundDM(meshtastic_MeshPacket *p);
 private:
+    // Publish a broadcast packet to MQTT only (skip LoRa iface->send). Used
+    // by the beacon-response feature: a remote deck triggers reply with
+    // DaycareBeacon.requestResponse=1; we echo back beacon + NodeInfo via
+    // the broker without consuming LoRa airtime on every deck.
+    // p is a router-allocated packet with decoded payload + portnum + channel
+    // already set. This helper encrypts in place, calls mqtt->onSend with
+    // both versions, and releases both copies.
+    void publishMqttOnlyBroadcast(meshtastic_MeshPacket *p);
+
+public:
 
     // Joypad state
     volatile uint8_t joypadState_ = 0;
@@ -428,6 +438,19 @@ private:
     // Throttled so a burst of new neighbors only triggers one reply beacon.
     volatile bool pendingReplyBeacon_ = false;
     uint32_t lastReplyBeaconMs_ = 0;
+
+    // Set true just before forceBeacon() when the beacon is user-triggered
+    // (boot, manual `beacon`/`bc`). The setSendBeacon callback reads this
+    // and stuffs DaycareBeacon::requestResponse so peers know to reply
+    // MQTT-only. Cleared after one beacon goes out.
+    volatile bool nextBeaconRequestsResponse_ = false;
+
+    // Set in handleReceived when an incoming beacon's requestResponse flag
+    // is true. runOnce on the LoRa thread builds + publishes our reciprocal
+    // beacon and NodeInfo via MQTT only — no LoRa fan-out. Stores the
+    // requesting peer's node id so we can rate-limit per-peer if needed.
+    volatile uint32_t pendingMqttResponseTo_ = 0;
+    uint32_t lastMqttResponseMs_ = 0;
 
     // ── MMB direct-party-exchange protocol ──────────────────────────────
     // Beacon-derived opponent parties were producing self-fights when both

@@ -17,6 +17,10 @@
 
 #include "PowerFSM.h"
 #include "MonsterMeshAudio.h"
+#if !MESHTASTIC_EXCLUDE_MQTT
+#include "mqtt/MQTT.h"
+#endif
+#include "modules/NodeInfoModule.h"
 #include "PokemonData.h"
 #include "Gen1Species.h"
 #include "LordRoutes.h"
@@ -960,6 +964,15 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                     // BEACON_INTERVAL_MS broadcast.
                     pendingReplyBeacon_ = true;
                 }
+                // MQTT-only response: if this is a user-triggered beacon
+                // (boot/manual), echo a beacon + NodeInfo back via MQTT
+                // only so the requester populates their neighbor list
+                // without every deck slamming LoRa.
+                if (beacon->requestResponse) {
+                    pendingMqttResponseTo_ = beacon->nodeId;
+                    LOG_INFO("[MonsterMesh] beacon requestResponse=1 → queueing MQTT-only reply to 0x%08X\n",
+                             (unsigned)beacon->nodeId);
+                }
             } else {
                 LOG_INFO("[MonsterMesh] PRIVATE_APP not daycare beacon (type=0x%02X self=%d)\n",
                          (unsigned)beacon->type,
@@ -1122,6 +1135,39 @@ void MonsterMeshModule::onLocalYReply()
     mmbPartyTxStartMs_ = millis();
     mmbPartyTxLastMs_  = 0;
     mmbPartyTxAttempts_ = 0;
+}
+
+void MonsterMeshModule::publishMqttOnlyBroadcast(meshtastic_MeshPacket *p)
+{
+#if !MESHTASTIC_EXCLUDE_MQTT
+    if (!p) return;
+    if (!mqtt || !moduleConfig.mqtt.enabled) {
+        LOG_WARN("[MonsterMesh] mqtt-only TX: MQTT disabled — dropping pkt portnum=%d\n",
+                 (int)p->decoded.portnum);
+        packetPool.release(p);
+        return;
+    }
+    if (p->from == 0) p->from = nodeDB->getNodeNum();
+    ChannelIndex chIndex = p->channel;
+    // perhapsEncode mutates p (decoded → encrypted), so snapshot a decoded
+    // copy first for mqtt->onSend which wants both.
+    meshtastic_MeshPacket *pDecoded = packetPool.allocCopy(*p);
+    auto encResult = perhapsEncode(p);
+    if (encResult != meshtastic_Routing_Error_NONE) {
+        LOG_WARN("[MonsterMesh] mqtt-only encode failed: %d\n", (int)encResult);
+        packetPool.release(pDecoded);
+        packetPool.release(p);
+        return;
+    }
+    mqtt->onSend(*p, *pDecoded, chIndex);
+    LOG_INFO("[MonsterMesh] mqtt-only TX: portnum=%d ch=%u from=0x%08X to=0x%08X\n",
+             (int)pDecoded->decoded.portnum, (unsigned)chIndex,
+             (unsigned)p->from, (unsigned)p->to);
+    packetPool.release(pDecoded);
+    packetPool.release(p);
+#else
+    if (p) packetPool.release(p);
+#endif
 }
 
 void MonsterMeshModule::sniffPhoneOutboundDM(meshtastic_MeshPacket *p)
@@ -1561,6 +1607,8 @@ int32_t MonsterMeshModule::runOnce()
         terminal_.setBeaconFn(
             [](void *ctx) {
                 auto *self = static_cast<MonsterMeshModule *>(ctx);
+                // Manual beacon → ask peers to respond MQTT-only.
+                self->nextBeaconRequestsResponse_ = true;
                 self->daycare_.forceBeacon();
                 // Also re-emit NodeInfo on the MM channel so peers across
                 // MQTT pick up our pubkey + short_name without waiting
@@ -1753,6 +1801,12 @@ int32_t MonsterMeshModule::runOnce()
             DaycareBeacon beacon = beaconIn;
             beacon.nodeId     = nodeDB->getNodeNum();
             beacon.ngPlusTier = lordCurrentNgPlusTier();
+            // User-triggered beacons (boot, manual `beacon`/`bc`) ask peers
+            // to reply MQTT-only. Cleared after one beacon goes out so the
+            // next periodic auto-beacon doesn't carry the request flag.
+            MonsterMeshModule *mod = static_cast<MonsterMeshModule *>(ctx);
+            beacon.requestResponse = (mod && mod->nextBeaconRequestsResponse_) ? 1 : 0;
+            if (mod) mod->nextBeaconRequestsResponse_ = false;
             meshtastic_MeshPacket *p = router->allocForSending();
             if (!p) {
                 LOG_WARN("[MonsterMesh] daycare beacon: packet alloc failed\n");
@@ -2317,8 +2371,9 @@ int32_t MonsterMeshModule::runOnce()
     if (setupDone_ && !firstBeaconDone_ && daycare_.isActive() &&
         !emulatorActive_ && !browserActive_ && millis() > 30000) {
         firstBeaconDone_ = true;
+        nextBeaconRequestsResponse_ = true; // boot beacon asks for MQTT replies
         daycare_.forceBeacon();
-        LOG_INFO("[MonsterMesh] first daycare beacon fired (30s gate)\n");
+        LOG_INFO("[MonsterMesh] first daycare beacon fired (30s gate, requestResponse=1)\n");
     }
 
     // NodeInfo on the MonsterMesh channel: once on MQTT connect, then
@@ -2419,6 +2474,57 @@ int32_t MonsterMeshModule::runOnce()
             mmbPartyTxLastMs_   = 0;
             mmbPartyTxAttempts_ = 0;
             mmtBattleReceivePendingMs_ = 0;
+        }
+    }
+
+    // MQTT-only beacon response: handleReceived set pendingMqttResponseTo_
+    // when a peer sent us a beacon with requestResponse=1. Build a beacon
+    // + NodeInfo packet on the MM channel and publish via mqtt->onSend
+    // directly, skipping LoRa iface->send so we don't fan out the response
+    // over the airwaves. Throttle to 30 s/peer so a rapid burst of request
+    // beacons can't spam the broker.
+    if (pendingMqttResponseTo_ != 0 && setupDone_ &&
+        !emulatorActive_ && !browserActive_) {
+        uint32_t now = millis();
+        if (lastMqttResponseMs_ == 0 || now - lastMqttResponseMs_ > 30000) {
+            uint32_t target = pendingMqttResponseTo_;
+            pendingMqttResponseTo_ = 0;
+            lastMqttResponseMs_ = now;
+            // 1) Beacon — build the same packet the daycare's setSendBeacon
+            //    callback emits, but go straight to MQTT.
+            DaycareBeacon b;
+            memset(&b, 0, sizeof(b));
+            b.type = 0x60;
+            b.nodeId = nodeDB->getNodeNum();
+            const char *sn = owner.short_name;
+            if (sn) {
+                size_t n = strnlen(sn, sizeof(b.shortName) - 1);
+                memcpy(b.shortName, sn, n);
+            }
+            b.partyCount = 0; // server-side beacon, no party state to leak
+            b.ngPlusTier = lordCurrentNgPlusTier();
+            b.requestResponse = 0; // never request response on a response (no ping-pong)
+            meshtastic_MeshPacket *pb = router->allocForSending();
+            if (pb) {
+                pb->to = NODENUM_BROADCAST;
+                pb->channel = mmChannel_;
+                pb->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
+                size_t sz = sizeof(b);
+                if (sz > sizeof(pb->decoded.payload.bytes))
+                    sz = sizeof(pb->decoded.payload.bytes);
+                memcpy(pb->decoded.payload.bytes, &b, sz);
+                pb->decoded.payload.size = sz;
+                LOG_INFO("[MonsterMesh] MQTT-only beacon response → req 0x%08X\n",
+                         (unsigned)target);
+                publishMqttOnlyBroadcast(pb);
+            }
+            // 2) NodeInfo — sendOurNodeInfo also lands on LoRa, but it has
+            //    a 5-min cooldown so flooding is bounded. Calling it here
+            //    is the simplest way to broadcast our pubkey + short_name
+            //    via the broker. A pure-MQTT NodeInfo path could come later.
+            if (nodeInfoModule) {
+                nodeInfoModule->sendOurNodeInfo(NODENUM_BROADCAST, false, mmChannel_);
+            }
         }
     }
 
