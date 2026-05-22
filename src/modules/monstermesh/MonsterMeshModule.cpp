@@ -2067,20 +2067,20 @@ int32_t MonsterMeshModule::runOnce()
                     ejectFocused_ = true;
                     browser_.markDirty();
                     renderBrowser();
-                    return 100;
+                    return 10;
                 }
                 if (ejectFocused_) {
                     if (key == 's' || key == 'S') {
                         ejectFocused_ = false;
                         browser_.markDirty();
                         renderBrowser();
-                        return 100;
+                        return 10;
                     }
                     if (key == 'k' || key == 'K' || key == '\r' || key == '\n') {
                         ejectFocused_ = false;
                         clearCart();
                         renderBrowser();
-                        return 100;
+                        return 10;
                     }
                 }
             }
@@ -3283,6 +3283,10 @@ int32_t MonsterMeshModule::runOnce()
     }
 
     drainTxQueue();
+    // While the browser is open, run runOnce more often so the buffered
+    // key drain (pendingBrowserKey_ → browser_.handleKey) feels snappy
+    // instead of stacking up at the default 50 ms cadence.
+    if (browserActive_) return 10;
     return 50;
 }
 

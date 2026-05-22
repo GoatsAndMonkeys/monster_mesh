@@ -27,6 +27,13 @@ bool MonsterMeshAudio::begin() {
     memset(&apuCtx_, 0, sizeof(apuCtx_));
     minigb_apu_audio_init(&apuCtx_);
 
+    // Tear down any pre-existing I2S driver on I2S_NUM_0 first. Meshtastic's
+    // notification/ringtone path (and other modules) may install the I2S
+    // driver before we get here; without uninstalling, our install returns
+    // ESP_ERR_INVALID_STATE and emulator boots silently. The uninstall
+    // returns an error when nothing is installed — ignore it.
+    i2s_driver_uninstall(I2S_NUM_0);
+
     // Configure I2S for audio output
     i2s_config_t i2s_config = {};
     i2s_config.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
