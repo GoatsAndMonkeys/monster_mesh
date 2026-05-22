@@ -286,6 +286,11 @@ public:
     const char *getSetupStatus() const { return setupStatus_; }
     // RAW mode: set joypad directly from bitmask (bypasses press/release timer)
     void setJoypadDirect(uint8_t mask) { joypadState_ = mask; kbMask_ = 0; }
+    // Phone-originated outbound DM sniff: called from MeshService::handleToRadio
+    // BEFORE sendToMesh. Unicast outbound from phone never reaches MeshModule
+    // callModules (Router::sendLocal only re-dispatches broadcasts), so this is
+    // the only place we can intercept a "MMB ON" typed in the phone DM chat.
+    void sniffPhoneOutboundDM(meshtastic_MeshPacket *p);
 private:
 
     // Joypad state

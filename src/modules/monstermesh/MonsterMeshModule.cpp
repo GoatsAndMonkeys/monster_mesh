@@ -124,6 +124,34 @@ extern bool initWifi();
 
 MonsterMeshModule *monsterMeshModule = nullptr;
 
+// Called from MeshService::handleToRadio for every TEXT_MESSAGE_APP unicast
+// the phone hands us, BEFORE it's sent. This is the only place a phone-typed
+// "MMB ON" DM can be observed — Router::sendLocal only re-dispatches broadcasts
+// through the module pipeline, so unicast outbound DMs never reach
+// MeshModule::callModules / MonsterMeshModule::handleReceived.
+static bool mmContainsIgnoreCase(const char *hay, size_t hlen,
+                                 const char *ndl, size_t nlen)
+{
+    if (nlen == 0 || hlen < nlen) return false;
+    for (size_t i = 0; i + nlen <= hlen; ++i) {
+        size_t j = 0;
+        for (; j < nlen; ++j) {
+            char a = hay[i + j];
+            char b = ndl[j];
+            if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
+            if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
+            if (a != b) break;
+        }
+        if (j == nlen) return true;
+    }
+    return false;
+}
+
+void mmSniffPhoneOutboundDM(meshtastic_MeshPacket *p)
+{
+    if (monsterMeshModule && p) monsterMeshModule->sniffPhoneOutboundDM(p);
+}
+
 // Weak default — device-ui provides the real implementation when present
 extern "C" __attribute__((weak)) void monstermesh_set_toggle_cb(void (*cb)(void)) { (void)cb; }
 
@@ -247,13 +275,25 @@ int MonsterMeshModule::handleInputEvent(const InputEvent *event)
         return 0;
     }
 
-    // Trackball events → viewport scroll
+    // Trackball / arrow-key events.
+    //   - browser active: route to file-browser cursor (synthesize 'w'/'s')
+    //   - emulator active: scroll viewport (the old behavior)
     if (event->inputEvent == INPUT_BROKER_UP) {
-        viewportDelta_--;
+        if (browserActive_) {
+            handleKeyPress('w');
+            lastKeyMs_ = millis();
+        } else {
+            viewportDelta_--;
+        }
         return 0;
     }
     if (event->inputEvent == INPUT_BROKER_DOWN) {
-        viewportDelta_++;
+        if (browserActive_) {
+            handleKeyPress('s');
+            lastKeyMs_ = millis();
+        } else {
+            viewportDelta_++;
+        }
         return 0;
     }
 
@@ -987,41 +1027,10 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                      (unsigned)mp.from);
         }
     }
-    // Outbound "MMB ON" DM hook: when the user types "MMB ON" (any case)
-    // in their phone DM chat to a peer, arm our reply-awaiting state so
-    // the peer's Y answer is actually recognized as an accept. Without
-    // this, the OUT DM goes over the air fine, the peer's device arms
-    // its challenger window from the inbound match above, the peer types
-    // Y — but our side has mmtAwaitingReplyFrom_ == 0 and silently
-    // drops the Y. Phone-originated DMs first arrive with from=0 (the
-    // PacketAPI USER path before stamping); the router stamps to=self
-    // on the subsequent REMOTE rebroadcast. Both paths look like
-    // outbound DMs to us, so accept either.
-    if (mp.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
-        (mp.from == 0 || mp.from == nodeDB->getNodeNum()) &&
-        !isBroadcast(mp.to) && mp.to != 0 && mp.to != nodeDB->getNodeNum()) {
-        const char *txt = (const char *)mp.decoded.payload.bytes;
-        size_t      len = mp.decoded.payload.size;
-        // Skip if we already armed for this same target — phone-originated
-        // packets can enter handleReceived twice (once as USER with from=0
-        // and once as REMOTE after router rebroadcast with from=self).
-        // Without this guard the challenge DM gets sent twice.
-        if (containsIgnoreCase(txt, len, "MMB ON", 6) &&
-            mmtAwaitingReplyFrom_ != mp.to) {
-            mmtAwaitingReplyFrom_ = mp.to;
-            mmtOnTxTarget_        = mp.to;
-            // Also queue the full "Do you want to battle..." challenge DM
-            // back to the peer, exactly as the terminal `mmt @peer` command
-            // does. Without this the peer's app only sees the raw "MMB ON"
-            // line — confusing — and there's no explicit Y/N prompt for
-            // them to reply to. Drained from runOnce so we never call
-            // router send from the handleReceived context (see
-            // feedback_mm_defer_tx_from_router.md).
-            pendingMmtOnTx_ = true;
-            LOG_INFO("[MonsterMesh] mmt: outbound MMB ON to 0x%08X — armed + queuing challenge DM\n",
-                     (unsigned)mp.to);
-        }
-    }
+    // (Outbound "MMB ON" sniff lives in sniffPhoneOutboundDM, called from
+    //  MeshService::handleToRadio. Unicast outbound DMs from the phone never
+    //  reach this function — Router::sendLocal only re-dispatches broadcasts
+    //  through the module pipeline. See feedback_mm_unicast_tx_module_blind.md.)
 
     // T4: parse the peer's Y/N reply to our outstanding challenge.
     if (mp.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP) {
@@ -1124,6 +1133,23 @@ void MonsterMeshModule::onLocalYReply()
     mmbPartyTxStartMs_ = millis();
     mmbPartyTxLastMs_  = 0;
     mmbPartyTxAttempts_ = 0;
+}
+
+void MonsterMeshModule::sniffPhoneOutboundDM(meshtastic_MeshPacket *p)
+{
+    if (!p || !nodeDB) return;
+    if (p->which_payload_variant != meshtastic_MeshPacket_decoded_tag) return;
+    if (p->decoded.portnum != meshtastic_PortNum_TEXT_MESSAGE_APP) return;
+    if (isBroadcast(p->to) || p->to == 0 || p->to == nodeDB->getNodeNum()) return;
+    const char *txt = (const char *)p->decoded.payload.bytes;
+    size_t      len = p->decoded.payload.size;
+    if (!mmContainsIgnoreCase(txt, len, "MMB ON", 6)) return;
+    if (mmtAwaitingReplyFrom_ == p->to) return; // already armed for this peer
+    mmtAwaitingReplyFrom_ = p->to;
+    mmtOnTxTarget_        = p->to;
+    pendingMmtOnTx_       = true;
+    LOG_INFO("[MonsterMesh] mmt: phone OUT MMB ON -> 0x%08X — armed + queuing challenge DM\n",
+             (unsigned)p->to);
 }
 
 void MonsterMeshModule::challengePeerByShortName(const char *peerShort)
