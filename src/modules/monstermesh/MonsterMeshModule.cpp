@@ -1002,10 +1002,23 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
         !isBroadcast(mp.to) && mp.to != 0 && mp.to != nodeDB->getNodeNum()) {
         const char *txt = (const char *)mp.decoded.payload.bytes;
         size_t      len = mp.decoded.payload.size;
-        if (containsIgnoreCase(txt, len, "MMB ON", 6)) {
+        // Skip if we already armed for this same target — phone-originated
+        // packets can enter handleReceived twice (once as USER with from=0
+        // and once as REMOTE after router rebroadcast with from=self).
+        // Without this guard the challenge DM gets sent twice.
+        if (containsIgnoreCase(txt, len, "MMB ON", 6) &&
+            mmtAwaitingReplyFrom_ != mp.to) {
             mmtAwaitingReplyFrom_ = mp.to;
-            mmtOnTxTarget_        = mp.to;  // for downstream record-keeping
-            LOG_INFO("[MonsterMesh] mmt: outbound MMB ON to 0x%08X — armed awaiting reply\n",
+            mmtOnTxTarget_        = mp.to;
+            // Also queue the full "Do you want to battle..." challenge DM
+            // back to the peer, exactly as the terminal `mmt @peer` command
+            // does. Without this the peer's app only sees the raw "MMB ON"
+            // line — confusing — and there's no explicit Y/N prompt for
+            // them to reply to. Drained from runOnce so we never call
+            // router send from the handleReceived context (see
+            // feedback_mm_defer_tx_from_router.md).
+            pendingMmtOnTx_ = true;
+            LOG_INFO("[MonsterMesh] mmt: outbound MMB ON to 0x%08X — armed + queuing challenge DM\n",
                      (unsigned)mp.to);
         }
     }
