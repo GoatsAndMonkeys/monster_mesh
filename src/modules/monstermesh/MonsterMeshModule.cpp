@@ -275,25 +275,14 @@ int MonsterMeshModule::handleInputEvent(const InputEvent *event)
         return 0;
     }
 
-    // Trackball / arrow-key events.
-    //   - browser active: route to file-browser cursor (synthesize 'w'/'s')
-    //   - emulator active: scroll viewport (the old behavior)
+    // Trackball events → viewport scroll (emulator only — the file browser
+    // is meant to be driven by W/S per user preference, not trackball).
     if (event->inputEvent == INPUT_BROKER_UP) {
-        if (browserActive_) {
-            handleKeyPress('w');
-            lastKeyMs_ = millis();
-        } else {
-            viewportDelta_--;
-        }
+        viewportDelta_--;
         return 0;
     }
     if (event->inputEvent == INPUT_BROKER_DOWN) {
-        if (browserActive_) {
-            handleKeyPress('s');
-            lastKeyMs_ = millis();
-        } else {
-            viewportDelta_++;
-        }
+        viewportDelta_++;
         return 0;
     }
 
