@@ -582,11 +582,11 @@ void NodeDB::installDefaultConfig(bool preserveKey = false)
 #ifdef USERPREFS_CONFIG_LORA_IGNORE_MQTT
     config.lora.ignore_mqtt = USERPREFS_CONFIG_LORA_IGNORE_MQTT;
 #else
-    // MonsterMesh default: don't rebroadcast MQTT-received packets to the
-    // LoRa mesh. Cuts cross-channel chatter so the local airwaves stay
-    // clear of broker traffic. Users can flip this back in Radio config
-    // if they want bridge behavior.
-    config.lora.ignore_mqtt = true;
+    // KEEP false — `ignore_mqtt=true` drops every MQTT-arriving packet at
+    // Router::receive before handleReceived fires, which kills PvP battle
+    // moves traveling over the broker. b391 briefly defaulted to true and
+    // broke action exchange between decks. Restore stock.
+    config.lora.ignore_mqtt = false;
 #endif
     // Initialize admin_key_count to zero
     byte numAdminKeys = 0;
