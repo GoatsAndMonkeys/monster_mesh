@@ -490,14 +490,20 @@ void MonsterMeshTerminal::executeLine(const char *line)
         println("  help sys    - system commands");
         return;
     }
-    if (strncmp(line, "daycare", 7) == 0) {
+    // Accept `daycare` or the `dc` shortcut. Both forms take the same args
+    // (e.g. `dc event` == `daycare event`).
+    bool isDaycare = (strncmp(line, "daycare", 7) == 0 &&
+                      (line[7] == '\0' || line[7] == ' '));
+    bool isDc     = (strncmp(line, "dc", 2) == 0 &&
+                      (line[2] == '\0' || line[2] == ' '));
+    if (isDaycare || isDc) {
         if (!daycareStatusFn_) {
             println("daycare not wired.");
             return;
         }
         // `daycare event` forces an event cycle immediately so the user can
         // verify the event generator without waiting the full 5-min interval.
-        const char *args = line + 7;
+        const char *args = isDaycare ? line + 7 : line + 2;
         while (*args == ' ') args++;
         if (strncmp(args, "event", 5) == 0 || strncmp(args, "force", 5) == 0) {
             if (daycareForceFn_) {
@@ -531,7 +537,7 @@ void MonsterMeshTerminal::executeLine(const char *line)
             return;
         }
         forgetFn_(forgetCtx_);
-        println("NodeDB purged. Re-beacon on both decks.");
+        println("NodeDB purged. Rebooting in 3s…");
         return;
     }
     if (strncmp(line, "version", 7) == 0) {
