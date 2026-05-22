@@ -1069,13 +1069,25 @@ void Gen1BattleEngine::forfeit(uint8_t side, LogSink log, void *ctx)
 
 void Gen1BattleEngine::hashState(uint8_t out[8]) const
 {
-    uint64_t h = 1469598103934665603ull;  // FNV-1a 64 offset
-    auto mix = [&](const void *p, size_t n) {
-        const uint8_t *b = (const uint8_t *)p;
-        for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
-    };
-    mix(&turn_, sizeof(turn_));
-    for (int s = 0; s < 2; ++s) {
+    // Networked PvP runs two engine instances with P0/P1 SWAPPED — the
+    // initiator's engine has P0=me=initiator, P1=opp=receiver; the
+    // receiver's engine has P0=me=receiver, P1=opp=initiator. Game
+    // progression stays in sync because move routing uses `p_[side^1]`
+    // (consistent self/foe references), but hashState used to iterate
+    // P0 then P1 in fixed order — so the two engines produced different
+    // hashes from the same logical state, guaranteeing a "desync"
+    // alarm on the first hash compare (every 5 turns).
+    //
+    // Fix: compute a per-side hash and XOR the two together. XOR is
+    // commutative, so the result is identical regardless of which side
+    // the engine considers P0 vs P1. The turn counter is mixed in
+    // separately (it's the same on both engines).
+    auto sideHash = [&](int s) -> uint64_t {
+        uint64_t h = 1469598103934665603ull;  // FNV-1a 64 offset
+        auto mix = [&](const void *p, size_t n) {
+            const uint8_t *b = (const uint8_t *)p;
+            for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+        };
         mix(&p_[s].active, 1);
         for (int i = 0; i < p_[s].count; ++i) {
             const BattlePoke &m = p_[s].mons[i];
@@ -1085,7 +1097,16 @@ void Gen1BattleEngine::hashState(uint8_t out[8]) const
             mix(b, 6);
             mix(m.pp, 4);
         }
+        return h;
+    };
+    uint64_t th = 1469598103934665603ull;
+    {
+        const uint8_t *b = (const uint8_t *)&turn_;
+        for (size_t i = 0; i < sizeof(turn_); ++i) {
+            th ^= b[i]; th *= 1099511628211ull;
+        }
     }
+    uint64_t h = th ^ sideHash(0) ^ sideHash(1);
     for (int i = 0; i < 8; ++i) out[i] = (uint8_t)(h >> (i * 8));
 }
 
