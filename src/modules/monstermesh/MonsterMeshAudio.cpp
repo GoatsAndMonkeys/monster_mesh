@@ -27,16 +27,20 @@ bool MonsterMeshAudio::begin() {
     memset(&apuCtx_, 0, sizeof(apuCtx_));
     minigb_apu_audio_init(&apuCtx_);
 
-    // Tear down any pre-existing I2S driver on I2S_NUM_0 first. Meshtastic's
-    // notification/ringtone path (and other modules) may install the I2S
-    // driver before we get here; without uninstalling, our install returns
-    // ESP_ERR_INVALID_STATE and emulator boots silently. The uninstall
-    // returns an error when nothing is installed — ignore it.
-    // NOTE: do NOT add i2s_stop / vTaskDelay around this — that combo
+    // Tear down any pre-existing I2S driver. Meshtastic's notification
+    // AudioThread uses I2S_NUM_1 routed to the SAME GPIO pins as us
+    // (DAC_I2S_BCK/WS/DOUT). When a DM ringtone plays, the ESP32 GPIO
+    // matrix gets repointed at port 1; our subsequent port 0 install
+    // succeeds but the pins still drive port 1 → silent emu after
+    // terminal use. Uninstalling BOTH ports frees the pins so our
+    // i2s_set_pin claim below actually takes effect.
+    //
+    // NOTE: do NOT add i2s_stop / vTaskDelay around these — that combo
     // crashed the device on ROM-load-after-battle on b387 (see logs:
     // device reset right after "save loaded" line, before any further
     // emulator log). driver_uninstall is sufficient.
     i2s_driver_uninstall(I2S_NUM_0);
+    i2s_driver_uninstall(I2S_NUM_1);
 
     // Configure I2S for audio output
     i2s_config_t i2s_config = {};
