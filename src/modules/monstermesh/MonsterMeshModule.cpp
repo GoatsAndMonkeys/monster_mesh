@@ -2019,6 +2019,15 @@ int32_t MonsterMeshModule::runOnce()
         setupStatus_ = "Playing!";
     }
 
+    // Safety net: if the user ALT'd into the ROM browser after a battle but
+    // textBattleActive_ never got cleared (the runOnce cleanup at line ~2910
+    // can be missed if runOnce was interrupted at the wrong moment), the
+    // gate below would block the browser forever. If the engine isn't
+    // running, clear the stale flag so the gate trips.
+    if (textBattleActive_ && !textBattle_.isActive()) {
+        LOG_WARN("[MonsterMesh] textBattleActive_ stale (engine OFF) — clearing\n");
+        textBattleActive_ = false;
+    }
     if (pendingBrowserActivate_ && !browserActive_ && !emulatorActive_ &&
         !textBattleActive_ && setupDone_) {
         pendingBrowserActivate_ = false;
