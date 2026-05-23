@@ -67,6 +67,17 @@ bool MonsterMeshAudio::begin() {
     i2s_config.tx_desc_auto_clear = true;
 
     esp_err_t err = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+    if (err == 257 /* ESP_ERR_INVALID_STATE */) {
+        // The driver thinks it's still installed even though we uninstalled
+        // it. Hammer it: stop+uninstall+small-yield+retry. The ESP-IDF I2S
+        // driver sometimes needs the DMA to fully drain before it
+        // re-accepts an install.
+        Serial.printf("[AUDIO] install returned INVALID_STATE — retrying\n");
+        i2s_stop(I2S_NUM_0);
+        i2s_driver_uninstall(I2S_NUM_0);
+        vTaskDelay(pdMS_TO_TICKS(50));
+        err = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+    }
     if (err != ESP_OK) {
         Serial.printf("[AUDIO] i2s_driver_install failed: %d\n", err);
         return false;
