@@ -298,44 +298,32 @@ void MonsterMeshEmulator::romPathToSavePath(const char *romPath, char *out, size
 void MonsterMeshEmulator::loadSaveFile(const char *romPath) {
     char savPath[256];
     romPathToSavePath(romPath, savPath, sizeof(savPath));
-    Serial.printf("[EMU] loading save: %s (ROM: %s)\n", savPath, romPath);
+    Serial.printf("[EMU] loading save: %s\n", savPath);
 
-    // loadROM ran just before us and already did SD.end()/SPI.begin()/SD.begin().
-    // Repeating it here was responsible for a hard reset on b397 — the second
-    // SD.end() interleaved with Meshtastic's still-draining LoRa TX queue.
-    // Skip the reinit; SD.open will fail cleanly if SD is in a bad state.
-    //
-    // Scope spiLock TIGHTLY to just the SD I/O. b404 trace showed f.close()
-    // returns successfully but the very next USB CDC println dies mid-write
-    // ("sav: po..." truncated). The LoRa thread had been blocked on spiLock
-    // for ROM read (~100ms) + sav read (~3ms) + close (variable); its TWDT
-    // was tripping right as we tried to print after close, and the device
-    // reset with no Guru Meditation (USB CDC re-enumerates instantly on
-    // reset, so the partial-print is all we see).
-    Serial.printf("[EMU] sav: waiting spiLock\n");
-    Serial.flush();
+    // ABSOLUTE MINIMAL VARIANT — b401-b405 instrumented every step inside this
+    // function and the crash kept moving with each Serial.printf we added/
+    // removed. Every variant died mid-printf around f.close(). Hypotheses:
+    //   1. USB CDC TX buffer floods under multiple printfs while spiLock is
+    //      held → host can't drain fast enough → write blocks → LoRa TWDT
+    //      fires while we're stuck.
+    //   2. SD library f.close() on ESP32-S3 has a hidden interaction with
+    //      Meshtastic's still-running LoRa state.
+    // Strip everything: one printf at top, scoped lock, read, NO explicit
+    // close (destructor at scope exit), no post-lock printfs. If this
+    // survives a post-battle ROM load, the bug was the print flood + close
+    // race. If it still crashes, the issue is the read itself or the SD
+    // driver state.
     size_t n = 0;
-    bool   opened = false;
     {
         concurrency::LockGuard g(spiLock);
-        Serial.printf("[EMU] sav: got spiLock\n");
         File f = SD.open(savPath, FILE_READ);
-        Serial.printf("[EMU] sav: open() handle=%d\n", (int)(bool)f);
-        if (!f) {
-            Serial.printf("[EMU] no save file: %s\n", savPath);
-            return;
-        }
-        opened = true;
-        size_t fsz = f.size();
-        Serial.printf("[EMU] sav: size=%u, reading...\n", (unsigned)fsz);
+        if (!f) return;
         n = f.read(cartRam_, sizeof(cartRam_));
-        Serial.printf("[EMU] sav: read=%u\n", (unsigned)n);
-        f.close();
-        Serial.printf("[EMU] sav: close ok\n");
+        // f goes out of scope here — destructor closes it under the lock.
     }
-    // spiLock released — LoRa thread can run again before we go USB-CDC-noisy.
-    vTaskDelay(pdMS_TO_TICKS(2));
-    if (opened) Serial.printf("[EMU] save loaded OK (n=%u)\n", (unsigned)n);
+    // Yield so LoRa thread / USB CDC can drain before any caller-side work.
+    vTaskDelay(pdMS_TO_TICKS(10));
+    Serial.printf("[EMU] sav loaded n=%u\n", (unsigned)n);
 }
 
 void MonsterMeshEmulator::writeSaveFile(const char *romPath) {
