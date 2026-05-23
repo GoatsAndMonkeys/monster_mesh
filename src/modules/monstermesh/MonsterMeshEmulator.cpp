@@ -324,16 +324,21 @@ void MonsterMeshEmulator::loadSaveFile(const char *romPath) {
     size_t fsz = f.size();
     Serial.printf("[EMU] sav: size=%u, reading...\n", (unsigned)fsz);
     size_t n = f.read(cartRam_, sizeof(cartRam_));
-    Serial.printf("[EMU] sav: read returned %u, closing...\n", (unsigned)n);
+    Serial.printf("[EMU] sav: read=%u\n", (unsigned)n);
+    Serial.flush();
+    // b403 showed the crash is INSIDE f.close() — log got past "read=N",
+    // started "sav: clo..." but never reached the post-close marker.
+    // ESP32 SD f.close() flushes FAT metadata + releases the directory
+    // entry; under high SPI contention this hangs on the SD wait-for-busy
+    // poll until the watchdog resets the chip with no Guru Meditation
+    // because the USB CDC re-enumerates instantly.
+    Serial.println("[EMU] sav: pre-close");
+    Serial.flush();
     f.close();
-    Serial.printf("[EMU] sav: closed, free=%u largest=%u\n",
-                  (unsigned)ESP.getFreeHeap(),
-                  (unsigned)ESP.getMaxAllocHeap());
+    Serial.println("[EMU] sav: post-close");
+    Serial.flush();
     // Yield so any pending UART output drains and the LoRa thread (waiting
-    // on spiLock for its RX path) can run between us and the next caller —
-    // post-battle ROM load was crashing mid-printf here with no Guru
-    // Meditation, b397→b401. Suspect: the implicit f-destructor + the
-    // LockGuard destructor stacked at function return.
+    // on spiLock for its RX path) can run between us and the next caller.
     vTaskDelay(pdMS_TO_TICKS(5));
     Serial.printf("[EMU] save loaded OK (n=%u)\n", (unsigned)n);
 }
