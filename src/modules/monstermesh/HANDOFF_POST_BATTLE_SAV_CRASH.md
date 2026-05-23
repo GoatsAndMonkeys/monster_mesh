@@ -65,6 +65,31 @@ Reproduction:
 3. While `restoring N messages completed` hasn't logged yet, press ALT.
 4. Observe MM heartbeat — if `free < 5000`, the entry will frozen-look.
 
+## Update 2026-05-23: crash returned on second ALT-emu entry, SPI race confirmed
+
+After the chat-history restore completes and heap recovers, user tried ALT-emu **again** (cold-start path, not direct resume). Crash returned with this signature:
+
+```
+04:25:29.222 [MonsterMesh] Launching ROM: /sd/pokemon.gb
+04:25:31.225 [MonsterMesh] [DeviceUI] sending meshpacket to radio id=...wantRs<DEVICE RESET>
+```
+
+Truncation is mid `sending meshpacket to radio` — **a phone-over-BLE meshpacket-send command** was accepted by PacketAPI while `loadROM` was reading 1MB of ROM data over SPI (spiLock held). The radio chip is on the same SPI bus as the SD card; the BLE→radio path tried to access it concurrently → crash.
+
+User's diagnosis: "if it's in the rom loader why is it sending mesh packets? that's the SPI issue." Correct.
+
+### Why the existing gate doesn't catch it
+
+Per `feedback_mm_tx_gate_layered.md` the `g_meshSuspended` gate is supposed to fire at 3 levels: phone-API, internal sendToMesh, RadioLibInterface::send. The log proves the phone-API layer is leaking — PacketAPI accepts the BLE-pushed packet (printing `sending meshpacket to radio ...`) instead of refusing it before any radio touch.
+
+### Fix paths
+
+1. **Refuse BLE meshpacket-send while `g_meshSuspended` is true.** Find the BLE/PacketAPI entry point that emits the `sending meshpacket to radio` log line and add a `g_meshSuspended` check BEFORE any radio-touching call. Reject the packet (or queue it for replay on `exitEmulatorMode`).
+2. **Reject at the BLE characteristic write callback.** Even cleaner — drop the packet when received from phone, never let it reach the router.
+3. Either way: validate by repeating the cold-launch flow (battle → exit → chat history restore completes → ALT → ROM browser → select ROM). The `sending meshpacket to radio` line should NOT appear during emu mode after the fix.
+
+The b413 fix (silent loadROM/loadSaveFile) is still correct — it kept our own thread from racing with USB-CDC. But it didn't address other threads (BLE, PacketAPI) issuing radio operations while we hold spiLock on the SD bus.
+
 ### What b406/b407 narrows the bug to
 
 Both builds crash at the **same point**: mid the first `Serial.printf` *after* SD operations complete and the spiLock is released, regardless of whether the audio teardown ran. That means:
