@@ -335,6 +335,20 @@ bool MonsterMeshTextBattle::handlePacket(uint32_t fromId,
                       (unsigned)pkt->sessionId(), (unsigned)session_);
         return false;
     }
+    // Reject our own packets bounced back via the MQTT bridge. Every action
+    // we transmit is echoed back to us by the MQTT broker (broker delivers to
+    // all subscribers including the publisher), and without this filter the
+    // engine applies our own move as the opponent's — silent desync, never
+    // hash-detected because both sides agree on the corrupt-but-mirrored
+    // outcome until they diverge on a later turn. Empirical: disabling LoRa
+    // (which leaves only MQTT) made desyncs vanish, pointing at this loop.
+    if (remoteId_ != 0 && fromId != remoteId_) {
+        Serial.printf("[MMB] pkt from non-peer from=0x%08X type=0x%02X "
+                      "expected_peer=0x%08X — dropping\n",
+                      (unsigned)fromId, (unsigned)pkt->type,
+                      (unsigned)remoteId_);
+        return false;
+    }
 
     switch (t) {
         case PktType::TEXT_BATTLE_ACTION: {
