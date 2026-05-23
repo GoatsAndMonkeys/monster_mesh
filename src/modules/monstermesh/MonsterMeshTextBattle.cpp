@@ -373,7 +373,17 @@ bool MonsterMeshTextBattle::handlePacket(uint32_t fromId,
             // divergence. Observed live: turn race between the two decks
             // (peer's hash arrives after we've already advanced past
             // that turn over MQTT).
-            if (pktTurn != engine_.turn()) return true;
+            if (pktTurn != engine_.turn()) {
+                Serial.printf("[MMB] HASH drop pktTurn=%u myTurn=%u "
+                              "theirs=%02x%02x%02x%02x%02x%02x%02x%02x "
+                              "from=0x%08X\n",
+                              (unsigned)pktTurn, (unsigned)engine_.turn(),
+                              pkt->payload[2], pkt->payload[3], pkt->payload[4],
+                              pkt->payload[5], pkt->payload[6], pkt->payload[7],
+                              pkt->payload[8], pkt->payload[9],
+                              (unsigned)fromId);
+                return true;
+            }
             uint8_t mine[8]; engine_.hashState(mine);
             const uint8_t *theirs = pkt->payload + 2;
             if (memcmp(mine, theirs, 8) != 0) {
