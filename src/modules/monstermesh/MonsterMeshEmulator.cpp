@@ -324,9 +324,18 @@ void MonsterMeshEmulator::loadSaveFile(const char *romPath) {
     size_t fsz = f.size();
     Serial.printf("[EMU] sav: size=%u, reading...\n", (unsigned)fsz);
     size_t n = f.read(cartRam_, sizeof(cartRam_));
-    Serial.printf("[EMU] sav: read returned %u\n", (unsigned)n);
+    Serial.printf("[EMU] sav: read returned %u, closing...\n", (unsigned)n);
     f.close();
-    Serial.printf("[EMU] save loaded: %s (%u bytes)\n", savPath, (unsigned)n);
+    Serial.printf("[EMU] sav: closed, free=%u largest=%u\n",
+                  (unsigned)ESP.getFreeHeap(),
+                  (unsigned)ESP.getMaxAllocHeap());
+    // Yield so any pending UART output drains and the LoRa thread (waiting
+    // on spiLock for its RX path) can run between us and the next caller —
+    // post-battle ROM load was crashing mid-printf here with no Guru
+    // Meditation, b397→b401. Suspect: the implicit f-destructor + the
+    // LockGuard destructor stacked at function return.
+    vTaskDelay(pdMS_TO_TICKS(5));
+    Serial.printf("[EMU] save loaded OK (n=%u)\n", (unsigned)n);
 }
 
 void MonsterMeshEmulator::writeSaveFile(const char *romPath) {
