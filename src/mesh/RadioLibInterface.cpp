@@ -261,6 +261,11 @@ currently active.
 */
 void RadioLibInterface::onNotify(uint32_t notification)
 {
+    extern bool g_meshSuspended;
+    if (g_meshSuspended) {
+        return;
+    }
+
     switch (notification) {
     case ISR_TX:
         handleTransmitInterrupt();

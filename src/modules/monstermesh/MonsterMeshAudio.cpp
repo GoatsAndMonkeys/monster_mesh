@@ -107,8 +107,6 @@ bool MonsterMeshAudio::begin() {
     // right at emulator start, which used to leave the player muted with no
     // obvious indication.
     muted_ = false;
-    Serial.printf("[AUDIO] started: %dHz, 16-bit stereo, vol=%u mute=0\n",
-                  AUDIO_SAMPLE_RATE, (unsigned)volume_);
     return true;
 }
 

@@ -26,6 +26,7 @@ class PacketAPI : public PhoneAPI, public concurrency::OSThread
 
   private:
     bool receivePacket(void);
+    bool drainPacketSilently(void);
     bool sendPacket(void);
     bool notifyProgrammingMode(void);
 

@@ -26,12 +26,12 @@ PacketAPI::PacketAPI(PacketServer *_server)
 int32_t PacketAPI::runOnce()
 {
     if (g_meshSuspended) {
-        // Emulator owns the device. We MUST still drain receivePacket() so
-        // the phone client's to-radio queue doesn't fill up — packets get
-        // dropped on the floor at MeshService::handleToRadio's gate. If we
-        // skip draining, after ~16 unread heartbeats the queue is full, and
-        // ~3 minutes in the device crashes from whatever DeviceUI does next.
-        receivePacket();
+        // Emulator owns the device. We still drain the phone client's
+        // to-radio queue so heartbeats don't pile up, but this path must be
+        // completely silent. b413/b414 hardware testing showed that USB-CDC
+        // logging from any task while MonsterMesh is doing SD ROM/SAV reads
+        // can reset the ESP32-S3 with no panic dump.
+        drainPacketSilently();
         return 500;
     }
     bool success = false;
@@ -49,6 +49,17 @@ int32_t PacketAPI::runOnce()
     }
     success |= receivePacket();
     return success ? 10 : 50;
+}
+
+bool PacketAPI::drainPacketSilently(void)
+{
+    bool data_received = false;
+    while (server->hasData()) {
+        data_received = true;
+        auto p = server->receivePacket();
+        (void)p;
+    }
+    return data_received;
 }
 
 bool PacketAPI::receivePacket(void)

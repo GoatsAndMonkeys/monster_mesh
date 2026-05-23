@@ -2038,12 +2038,10 @@ int32_t MonsterMeshModule::runOnce()
     // a separate step + delay between gives the chip time to flush.
     if (radioNeedsRx_) {
         radioNeedsRx_ = false;
-        // No-op: enterEmulatorMode no longer calls disableInterrupt, so
-        // the radio is still in RX continuously during emu. g_meshSuspended
-        // drops packets at the receivePacket level for the duration. On
-        // exit we just clear g_meshSuspended (in exitEmulatorMode) and
-        // packets flow normally again — no startReceive needed.
-        LOG_INFO("[MonsterMesh] sync: radio already RX'ing (no-op re-arm)\n");
+        RadioLibInterface *radio = RadioLibInterface::instance;
+        if (radio) {
+            radio->startReceive();
+        }
     }
     if (radioParked_ && wifiBooted_) {
         LOG_INFO("[MonsterMesh] sync: tearing WiFi down\n");
@@ -2085,6 +2083,24 @@ int32_t MonsterMeshModule::runOnce()
     // so the pre-allocated emu task wakes from its idle loop.
     if (pendingEmuResume_ && !emulatorActive_ && !browserActive_ &&
         !textBattleActive_ && setupDone_ && emuInitialized_) {
+        // b414: after ALT-exit, the phone client may spend ~20s restoring
+        // nodeinfo/message history. Resuming the emulator during that burst
+        // left only ~2.8KB heap / <1KB largest block, so the emu appeared
+        // frozen between Meshtastic and the game. Keep the ALT request
+        // pending until the sync storm has settled enough to run frames.
+        static uint32_t lastResumeDeferLogMs = 0;
+        uint32_t freeHeap = ESP.getFreeHeap();
+        uint32_t largestHeap = ESP.getMaxAllocHeap();
+        if (freeHeap < 24000 || largestHeap < 4096) {
+            uint32_t now = millis();
+            if (now - lastResumeDeferLogMs > 2000) {
+                lastResumeDeferLogMs = now;
+                LOG_INFO("[MonsterMesh] direct emu resume deferred: heap busy "
+                         "free=%u largest=%u\n",
+                         (unsigned)freeHeap, (unsigned)largestHeap);
+            }
+            return 50;
+        }
         pendingEmuResume_ = false;
         LOG_INFO("[MonsterMesh] direct emu resume (ROM already loaded)\n");
 #if HAS_TFT
@@ -2179,9 +2195,7 @@ int32_t MonsterMeshModule::runOnce()
                 concurrency::LockGuard g(spiLock);
                 selected = browser_.handleKey(key);
             }
-            LOG_DEBUG("[MonsterMesh] handleKey returned selected=%d\n", (int)selected);
             if (selected) {
-                LOG_DEBUG("[MonsterMesh] selectedPath='%s'\n", browser_.selectedPath());
                 launchROM(browser_.selectedPath());
             }
         }
@@ -4892,7 +4906,6 @@ void MonsterMeshModule::launchROM(const char *path)
     // POSIX fopen needs VFS path "/sd/pokemon.gb"
     char vfsPath[FB_MAX_PATH + 4];
     snprintf(vfsPath, sizeof(vfsPath), "/sd%s", path);
-    LOG_INFO("[MonsterMesh] Launching ROM: %s\n", vfsPath);
 
     // Small "Loading..." dialog in the GBC green palette so it matches the
     // ROM browser regardless of active theme.
@@ -5033,14 +5046,11 @@ void MonsterMeshModule::enterEmulatorMode()
     // come up instantly after pressing ALT.
     wifiSuppressed = true;
     g_meshSuspended = true;
-    // No-op park on the radio chip: previously we called disableInterrupt()
-    // here to silence DIO1 callbacks. That left the chip in a state that
-    // startReceive() on exit could not recover from — every exit hung at
-    // setStandby/checkNotification inside startReceive. Instead, let the
-    // chip keep RX'ing autonomously; g_meshSuspended already drops the
-    // packets at the receivePacket level and gates TX at three other layers
-    // (per feedback_mm_tx_gate_layered.md), so emu mode stays quiet.
-    LOG_INFO("MonsterMesh: radios parked (soft — IRQ left enabled to avoid resume hang)\n");
+    RadioLibInterface *radio = RadioLibInterface::instance;
+    if (radio) {
+        radio->disableInterrupt();
+    }
+    LOG_INFO("MonsterMesh: radios parked (IRQ disabled)\n");
 }
 
 void MonsterMeshModule::exitEmulatorMode()

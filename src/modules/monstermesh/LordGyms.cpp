@@ -18,19 +18,26 @@
 // beatable by a player coming off gym N-1 without grinding, but not a pushover.
 
 // Pewter — Brock (Rock/Ground).
-static const LordGymMon g1_t0[] = {  // Jr. Trainer
-    { 74 /*Geodude*/, 10, { 33 /*Tackle*/, 111 /*Defense Curl*/, 0, 0 } },
+static const LordGymMon g1_t0[] = {  // Camper Liam
+    { 74 /*Geodude*/,   10, { 33 /*Tackle*/, 111 /*Defense Curl*/, 0, 0 } },
+    { 27 /*Sandshrew*/, 10, { 10 /*Scratch*/, 28 /*Sand Attack*/, 0, 0 } },
+    { 74 /*Geodude*/,   11, { 88 /*Rock Throw*/, 33 /*Tackle*/, 0, 0 } },
 };
-static const LordGymMon g1_t1[] = {  // Lass
-    { 16 /*Pidgey*/,   9, { 16 /*Gust*/, 98 /*Quick Attack*/, 0, 0 } },
-    { 19 /*Rattata*/,  9, { 33 /*Tackle*/, 45 /*Growl*/, 0, 0 } },
+static const LordGymMon g1_t1[] = {  // Lass Crissy
+    { 16 /*Pidgey*/,    9, { 16 /*Gust*/, 98 /*Quick Attack*/, 0, 0 } },
+    { 19 /*Rattata*/,   9, { 33 /*Tackle*/, 45 /*Growl*/, 0, 0 } },
+    { 21 /*Spearow*/,  10, { 64 /*Peck*/, 43 /*Leer*/, 0, 0 } },
 };
-static const LordGymMon g1_t2[] = {  // Camper
+static const LordGymMon g1_t2[] = {  // Youngster Ben
     { 27 /*Sandshrew*/, 11, { 10 /*Scratch*/, 28 /*Sand Attack*/, 0, 0 } },
+    { 74 /*Geodude*/,   11, { 33 /*Tackle*/, 111 /*Defense Curl*/, 0, 0 } },
+    { 27 /*Sandshrew*/, 12, { 10 /*Scratch*/, 28 /*Sand Attack*/, 88 /*Rock Throw*/, 0 } },
 };
-static const LordGymMon g1_t3[] = {  // Hiker
-    { 74 /*Geodude*/, 11, { 88 /*Rock Throw*/, 33 /*Tackle*/, 0, 0 } },
-    { 95 /*Onix*/,    12, { 88 /*Rock Throw*/, 20 /*Bind*/, 0, 0 } },
+static const LordGymMon g1_t3[] = {  // Hiker Marcos
+    { 74 /*Geodude*/,  11, { 88 /*Rock Throw*/, 33 /*Tackle*/, 0, 0 } },
+    { 95 /*Onix*/,     12, { 88 /*Rock Throw*/, 20 /*Bind*/, 0, 0 } },
+    { 74 /*Geodude*/,  12, { 33 /*Tackle*/, 111 /*Defense Curl*/, 88 /*Rock Throw*/, 0 } },
+    { 95 /*Onix*/,     13, { 88 /*Rock Throw*/, 20 /*Bind*/, 43 /*Leer*/, 0 } },
 };
 static const LordGymMon g1_t4[] = {  // Brock — leader
     { 74 /*Geodude*/, 12, { 33 /*Tackle*/, 111 /*Defense Curl*/, 88 /*Rock Throw*/, 0 } },
@@ -38,18 +45,26 @@ static const LordGymMon g1_t4[] = {  // Brock — leader
 };
 
 // Cerulean — Misty (Water).
-static const LordGymMon g2_t0[] = {  // Swimmer
-    { 120 /*Staryu*/, 16, { 33 /*Tackle*/, 55 /*Water Gun*/, 0, 0 } },
+static const LordGymMon g2_t0[] = {  // Swimmer Luis
+    { 120 /*Staryu*/,   16, { 33 /*Tackle*/, 55 /*Water Gun*/, 0, 0 } },
+    {  90 /*Shellder*/, 16, { 33 /*Tackle*/, 55 /*Water Gun*/, 0, 0 } },
+    { 118 /*Goldeen*/,  17, { 64 /*Peck*/, 39 /*Tail Whip*/, 0, 0 } },
 };
-static const LordGymMon g2_t1[] = {  // Jr. Trainer
-    {  54 /*Psyduck*/, 19, { 10 /*Scratch*/, 39 /*Tail Whip*/, 55 /*Water Gun*/, 0 } },
-};
-static const LordGymMon g2_t2[] = {  // Lass
-    { 118 /*Goldeen*/, 17, { 64 /*Peck*/, 39 /*Tail Whip*/, 0, 0 } },
+static const LordGymMon g2_t1[] = {  // Trainer Diana
+    {  54 /*Psyduck*/,  18, { 10 /*Scratch*/, 39 /*Tail Whip*/, 55 /*Water Gun*/, 0 } },
+    {  86 /*Seel*/,     18, { 44 /*Bite*/, 45 /*Growl*/, 0, 0 } },
     {  72 /*Tentacool*/,18, { 40 /*Poison Sting*/, 51 /*Acid*/, 0, 0 } },
 };
-static const LordGymMon g2_t3[] = {  // Swimmer
-    {  86 /*Seel*/,    20, { 44 /*Bite*/, 45 /*Growl*/, 62 /*Aurora Beam*/, 0 } },
+static const LordGymMon g2_t2[] = {  // Lass Haley
+    { 118 /*Goldeen*/,  17, { 64 /*Peck*/, 39 /*Tail Whip*/, 0, 0 } },
+    {  72 /*Tentacool*/, 18, { 40 /*Poison Sting*/, 51 /*Acid*/, 0, 0 } },
+    {  86 /*Seel*/,     19, { 44 /*Bite*/, 45 /*Growl*/, 62 /*Aurora Beam*/, 0 } },
+    {  90 /*Shellder*/, 19, { 33 /*Tackle*/, 55 /*Water Gun*/, 0, 0 } },
+};
+static const LordGymMon g2_t3[] = {  // Swimmer Parker
+    {  86 /*Seel*/,     20, { 44 /*Bite*/, 45 /*Growl*/, 62 /*Aurora Beam*/, 0 } },
+    {  54 /*Psyduck*/,  20, { 10 /*Scratch*/, 55 /*Water Gun*/, 93 /*Confusion*/, 0 } },
+    { 120 /*Staryu*/,   20, { 33 /*Tackle*/, 55 /*Water Gun*/, 0, 0 } },
 };
 static const LordGymMon g2_t4[] = {  // Misty — leader
     { 120 /*Staryu*/,  18, { 33 /*Tackle*/, 55 /*Water Gun*/, 0, 0 } },
@@ -57,19 +72,26 @@ static const LordGymMon g2_t4[] = {  // Misty — leader
 };
 
 // Vermilion — Lt. Surge (Electric).
-static const LordGymMon g3_t0[] = {
-    {  25 /*Pikachu*/, 20, { 84 /*Thunder Shock*/, 28 /*Sand Attack*/, 98 /*Quick Attack*/, 0 } },
+static const LordGymMon g3_t0[] = {  // Gentleman Tucker
+    {  25 /*Pikachu*/,   20, { 84 /*Thunder Shock*/, 28 /*Sand Attack*/, 98 /*Quick Attack*/, 0 } },
+    { 100 /*Voltorb*/,   20, { 33 /*Tackle*/, 84 /*Thunder Shock*/, 0, 0 } },
+    {  81 /*Magnemite*/, 20, { 33 /*Tackle*/, 48 /*Supersonic*/, 84 /*Thunder Shock*/, 0 } },
 };
-static const LordGymMon g3_t1[] = {
-    { 100 /*Voltorb*/, 21, { 33 /*Tackle*/, 103 /*Screech*/, 84 /*Thunder Shock*/, 0 } },
+static const LordGymMon g3_t1[] = {  // Rocker Luca
+    { 100 /*Voltorb*/,  21, { 33 /*Tackle*/, 103 /*Screech*/, 84 /*Thunder Shock*/, 0 } },
+    {  25 /*Pikachu*/,  21, { 84 /*Thunder Shock*/, 28 /*Sand Attack*/, 0, 0 } },
+    {  81 /*Magnemite*/,21, { 33 /*Tackle*/, 48 /*Supersonic*/, 84 /*Thunder Shock*/, 0 } },
 };
-static const LordGymMon g3_t2[] = {
+static const LordGymMon g3_t2[] = {  // Sailor Dwayne
     {  81 /*Magnemite*/, 20, { 33 /*Tackle*/, 48 /*Supersonic*/, 84 /*Thunder Shock*/, 0 } },
     {  82 /*Magneton*/,  22, { 33 /*Tackle*/, 84 /*Thunder Shock*/, 49 /*Sonic Boom*/, 0 } },
+    { 100 /*Voltorb*/,   22, { 84 /*Thunder Shock*/, 103 /*Screech*/, 153 /*Explosion*/, 0 } },
+    {  25 /*Pikachu*/,   21, { 84 /*Thunder Shock*/, 86 /*Thunder Wave*/, 98 /*Quick Attack*/, 0 } },
 };
-static const LordGymMon g3_t3[] = {
+static const LordGymMon g3_t3[] = {  // Engineer Baily
     { 100 /*Voltorb*/,  23, { 33 /*Tackle*/, 84 /*Thunder Shock*/, 103 /*Screech*/, 0 } },
     { 125 /*Electabuzz*/,23, { 98 /*Quick Attack*/, 85 /*Thunderbolt*/, 50 /*Disable*/, 0 } },
+    {  82 /*Magneton*/,  23, { 85 /*Thunderbolt*/, 49 /*Sonic Boom*/, 86 /*Thunder Wave*/, 0 } },
 };
 static const LordGymMon g3_t4[] = {  // Lt. Surge
     { 100 /*Voltorb*/, 21, { 84 /*Thunder Shock*/, 103 /*Screech*/, 153 /*Explosion*/, 0 } },
@@ -78,18 +100,26 @@ static const LordGymMon g3_t4[] = {  // Lt. Surge
 };
 
 // Celadon — Erika (Grass).
-static const LordGymMon g4_t0[] = {
-    {  43 /*Oddish*/,   24, { 71 /*Absorb*/, 78 /*Stun Spore*/, 51 /*Acid*/, 0 } },
-};
-static const LordGymMon g4_t1[] = {
+static const LordGymMon g4_t0[] = {  // Lass Michelle
+    {  43 /*Oddish*/,    24, { 71 /*Absorb*/, 78 /*Stun Spore*/, 51 /*Acid*/, 0 } },
     {  69 /*Bellsprout*/, 24, { 22 /*Vine Whip*/, 74 /*Growth*/, 0, 0 } },
+    {  46 /*Paras*/,     24, { 78 /*Stun Spore*/, 77 /*Poison Powder*/, 10 /*Scratch*/, 0 } },
 };
-static const LordGymMon g4_t2[] = {
+static const LordGymMon g4_t1[] = {  // Beauty Lola
+    {  69 /*Bellsprout*/, 24, { 22 /*Vine Whip*/, 74 /*Growth*/, 0, 0 } },
+    {  43 /*Oddish*/,    25, { 71 /*Absorb*/, 78 /*Stun Spore*/, 0, 0 } },
+    { 102 /*Exeggcute*/, 25, { 79 /*Sleep Powder*/, 71 /*Absorb*/, 0, 0 } },
+};
+static const LordGymMon g4_t2[] = {  // Picnicker Tanya
     { 102 /*Exeggcute*/, 26, { 79 /*Sleep Powder*/, 77 /*Poison Powder*/, 71 /*Absorb*/, 0 } },
     {  44 /*Gloom*/,     25, { 78 /*Stun Spore*/, 51 /*Acid*/, 0, 0 } },
+    {  70 /*Weepinbell*/, 25, { 22 /*Vine Whip*/, 77 /*Poison Powder*/, 0, 0 } },
+    {  43 /*Oddish*/,    26, { 71 /*Absorb*/, 79 /*Sleep Powder*/, 51 /*Acid*/, 0 } },
 };
-static const LordGymMon g4_t3[] = {
+static const LordGymMon g4_t3[] = {  // Trainer Miranda
     {  70 /*Weepinbell*/, 26, { 22 /*Vine Whip*/, 77 /*Poison Powder*/, 79 /*Sleep Powder*/, 0 } },
+    {  44 /*Gloom*/,      27, { 78 /*Stun Spore*/, 51 /*Acid*/, 72 /*Mega Drain*/, 0 } },
+    { 114 /*Tangela*/,    26, { 22 /*Vine Whip*/, 20 /*Bind*/, 0, 0 } },
 };
 static const LordGymMon g4_t4[] = {  // Erika
     { 114 /*Tangela*/,   29, { 22 /*Vine Whip*/, 20 /*Bind*/, 75 /*Razor Leaf*/, 0 } },
@@ -98,19 +128,26 @@ static const LordGymMon g4_t4[] = {  // Erika
 };
 
 // Fuchsia — Koga (Poison).
-static const LordGymMon g5_t0[] = {
+static const LordGymMon g5_t0[] = {  // Juggler Nate
     {  41 /*Zubat*/,    31, { 44 /*Bite*/, 103 /*Screech*/, 109 /*Smokescreen*/, 0 } },
     {  41 /*Zubat*/,    31, { 44 /*Bite*/, 48 /*Supersonic*/, 0, 0 } },
+    {  23 /*Ekans*/,    31, { 40 /*Poison Sting*/, 43 /*Leer*/, 35 /*Wrap*/, 0 } },
 };
-static const LordGymMon g5_t1[] = {
+static const LordGymMon g5_t1[] = {  // Tamer Edgar
     {  48 /*Venonat*/,  32, { 48 /*Supersonic*/, 50 /*Disable*/, 93 /*Confusion*/, 0 } },
+    {  41 /*Zubat*/,    32, { 44 /*Bite*/, 103 /*Screech*/, 0, 0 } },
+    {  88 /*Grimer*/,   32, { 106 /*Harden*/, 51 /*Acid*/, 0, 0 } },
 };
-static const LordGymMon g5_t2[] = {
+static const LordGymMon g5_t2[] = {  // Juggler Kirk
     {  88 /*Grimer*/,   33, { 106 /*Harden*/, 51 /*Acid*/, 124 /*Sludge*/, 0 } },
     {  89 /*Muk*/,      33, { 124 /*Sludge*/, 106 /*Harden*/, 34 /*Body Slam*/, 0 } },
+    {  48 /*Venonat*/,  33, { 48 /*Supersonic*/, 50 /*Disable*/, 93 /*Confusion*/, 0 } },
+    {  23 /*Ekans*/,    34, { 40 /*Poison Sting*/, 43 /*Leer*/, 35 /*Wrap*/, 139 /*Toxic*/ } },
 };
-static const LordGymMon g5_t3[] = {
+static const LordGymMon g5_t3[] = {  // Ninja Shin
     {  42 /*Golbat*/,   34, { 44 /*Bite*/, 48 /*Supersonic*/, 100 /*Leech Life*/, 0 } },
+    {  49 /*Venomoth*/, 34, { 77 /*Poison Powder*/, 48 /*Supersonic*/, 93 /*Confusion*/, 0 } },
+    {  88 /*Grimer*/,   34, { 51 /*Acid*/, 124 /*Sludge*/, 139 /*Toxic*/, 0 } },
 };
 static const LordGymMon g5_t4[] = {  // Koga
     { 109 /*Koffing*/,  37, { 123 /*Smog*/, 108 /*Self-Destruct*/, 0, 0 } },
@@ -120,19 +157,26 @@ static const LordGymMon g5_t4[] = {  // Koga
 };
 
 // Saffron — Sabrina (Psychic).
-static const LordGymMon g6_t0[] = {
+static const LordGymMon g6_t0[] = {  // Medium Martha
     {  96 /*Drowzee*/,  34, { 95 /*Hypnosis*/, 50 /*Disable*/, 93 /*Confusion*/, 0 } },
     {  97 /*Hypno*/,    34, { 95 /*Hypnosis*/, 50 /*Disable*/, 93 /*Confusion*/, 0 } },
+    {  79 /*Slowpoke*/, 34, { 93 /*Confusion*/, 55 /*Water Gun*/, 0, 0 } },
 };
-static const LordGymMon g6_t1[] = {
+static const LordGymMon g6_t1[] = {  // Channeler Abigail
     {  64 /*Kadabra*/,  38, { 93 /*Confusion*/, 50 /*Disable*/, 105 /*Recover*/, 0 } },
+    {  96 /*Drowzee*/,  37, { 95 /*Hypnosis*/, 93 /*Confusion*/, 138 /*Dream Eater*/, 0 } },
+    { 122 /*Mr. Mime*/, 37, { 50 /*Disable*/, 93 /*Confusion*/, 113 /*Light Screen*/, 0 } },
 };
-static const LordGymMon g6_t2[] = {
+static const LordGymMon g6_t2[] = {  // Medium Grace
     { 122 /*Mr. Mime*/, 39, { 50 /*Disable*/, 93 /*Confusion*/, 113 /*Light Screen*/, 115 /*Reflect*/ } },
+    {  79 /*Slowpoke*/, 38, { 93 /*Confusion*/, 95 /*Hypnosis*/, 55 /*Water Gun*/, 0 } },
+    {  97 /*Hypno*/,    38, { 95 /*Hypnosis*/, 138 /*Dream Eater*/, 93 /*Confusion*/, 0 } },
 };
-static const LordGymMon g6_t3[] = {
+static const LordGymMon g6_t3[] = {  // Psychic Rodney
     {  96 /*Drowzee*/,  36, { 95 /*Hypnosis*/, 93 /*Confusion*/, 138 /*Dream Eater*/, 0 } },
     {  96 /*Drowzee*/,  36, { 95 /*Hypnosis*/, 93 /*Confusion*/, 138 /*Dream Eater*/, 0 } },
+    {  64 /*Kadabra*/,  39, { 93 /*Confusion*/, 50 /*Disable*/, 115 /*Reflect*/, 105 /*Recover*/ } },
+    { 122 /*Mr. Mime*/, 39, { 50 /*Disable*/, 93 /*Confusion*/, 113 /*Light Screen*/, 115 /*Reflect*/ } },
 };
 static const LordGymMon g6_t4[] = {  // Sabrina
     {  64 /*Kadabra*/,  38, { 93 /*Confusion*/, 50 /*Disable*/, 115 /*Reflect*/, 105 /*Recover*/ } },
@@ -142,19 +186,26 @@ static const LordGymMon g6_t4[] = {  // Sabrina
 };
 
 // Cinnabar — Blaine (Fire).
-static const LordGymMon g7_t0[] = {
-    {  77 /*Ponyta*/,  34, { 52 /*Ember*/, 45 /*Growl*/, 39 /*Tail Whip*/, 0 } },
-    { 126 /*Magmar*/,  38, { 108 /*Self-Destruct*/, 52 /*Ember*/, 98 /*Quick Attack*/, 0 } },
+static const LordGymMon g7_t0[] = {  // Burglar Derek
+    {  77 /*Ponyta*/,    34, { 52 /*Ember*/, 45 /*Growl*/, 39 /*Tail Whip*/, 0 } },
+    { 126 /*Magmar*/,    36, { 52 /*Ember*/, 98 /*Quick Attack*/, 109 /*Smokescreen*/, 0 } },
+    {  58 /*Growlithe*/, 35, { 52 /*Ember*/, 43 /*Leer*/, 0, 0 } },
 };
-static const LordGymMon g7_t1[] = {
+static const LordGymMon g7_t1[] = {  // Super Nerd Sam
     {  58 /*Growlithe*/, 40, { 52 /*Ember*/, 43 /*Leer*/, 36 /*Take Down*/, 0 } },
+    {  77 /*Ponyta*/,    40, { 52 /*Ember*/, 23 /*Stomp*/, 83 /*Fire Spin*/, 0 } },
+    { 126 /*Magmar*/,    40, { 108 /*Self-Destruct*/, 52 /*Ember*/, 83 /*Fire Spin*/, 0 } },
 };
-static const LordGymMon g7_t2[] = {
-    {  78 /*Rapidash*/, 41, { 52 /*Ember*/, 39 /*Tail Whip*/, 23 /*Stomp*/, 83 /*Fire Spin*/ } },
+static const LordGymMon g7_t2[] = {  // Burglar Ramon
+    {  78 /*Rapidash*/,  41, { 52 /*Ember*/, 39 /*Tail Whip*/, 23 /*Stomp*/, 83 /*Fire Spin*/ } },
+    {  37 /*Vulpix*/,    40, { 52 /*Ember*/, 45 /*Growl*/, 98 /*Quick Attack*/, 0 } },
+    {  58 /*Growlithe*/, 41, { 52 /*Ember*/, 36 /*Take Down*/, 43 /*Leer*/, 46 /*Roar*/ } },
+    { 126 /*Magmar*/,    41, { 52 /*Ember*/, 83 /*Fire Spin*/, 34 /*Body Slam*/, 0 } },
 };
-static const LordGymMon g7_t3[] = {
-    {  37 /*Vulpix*/,   42, { 52 /*Ember*/, 45 /*Growl*/, 98 /*Quick Attack*/, 46 /*Roar*/ } },
-    {  38 /*Ninetales*/,42, { 52 /*Ember*/, 46 /*Roar*/, 98 /*Quick Attack*/, 53 /*Flamethrower*/ } },
+static const LordGymMon g7_t3[] = {  // Super Nerd Zac
+    {  37 /*Vulpix*/,    42, { 52 /*Ember*/, 45 /*Growl*/, 98 /*Quick Attack*/, 46 /*Roar*/ } },
+    {  38 /*Ninetales*/, 42, { 52 /*Ember*/, 46 /*Roar*/, 98 /*Quick Attack*/, 53 /*Flamethrower*/ } },
+    {  78 /*Rapidash*/,  43, { 83 /*Fire Spin*/, 23 /*Stomp*/, 36 /*Take Down*/, 52 /*Ember*/ } },
 };
 static const LordGymMon g7_t4[] = {  // Blaine
     {  58 /*Growlithe*/, 42, { 52 /*Ember*/, 43 /*Leer*/, 36 /*Take Down*/, 46 /*Roar*/ } },
@@ -164,18 +215,26 @@ static const LordGymMon g7_t4[] = {  // Blaine
 };
 
 // Viridian — Giovanni (Ground).
-static const LordGymMon g8_t0[] = {
-    {  24 /*Arbok*/,   37, { 40 /*Poison Sting*/, 43 /*Leer*/, 35 /*Wrap*/, 0 } },
+static const LordGymMon g8_t0[] = {  // Tough Guy Nick
+    {  24 /*Arbok*/,    37, { 40 /*Poison Sting*/, 43 /*Leer*/, 35 /*Wrap*/, 0 } },
+    {  50 /*Diglett*/,  37, { 10 /*Scratch*/, 28 /*Sand Attack*/, 91 /*Dig*/, 0 } },
+    { 111 /*Rhyhorn*/,  37, { 88 /*Rock Throw*/, 43 /*Leer*/, 0, 0 } },
 };
-static const LordGymMon g8_t1[] = {
-    { 111 /*Rhyhorn*/, 42, { 88 /*Rock Throw*/, 43 /*Leer*/, 34 /*Body Slam*/, 0 } },
+static const LordGymMon g8_t1[] = {  // Cooltrainer Leo
+    { 111 /*Rhyhorn*/,  42, { 88 /*Rock Throw*/, 43 /*Leer*/, 34 /*Body Slam*/, 0 } },
+    {  51 /*Dugtrio*/,  41, { 28 /*Sand Attack*/, 91 /*Dig*/, 89 /*Earthquake*/, 0 } },
+    {  27 /*Sandshrew*/, 41, { 10 /*Scratch*/, 28 /*Sand Attack*/, 91 /*Dig*/, 0 } },
 };
-static const LordGymMon g8_t2[] = {
-    {  50 /*Diglett*/, 41, { 10 /*Scratch*/, 28 /*Sand Attack*/, 91 /*Dig*/, 0 } },
-    {  51 /*Dugtrio*/, 42, { 10 /*Scratch*/, 28 /*Sand Attack*/, 91 /*Dig*/, 89 /*Earthquake*/ } },
+static const LordGymMon g8_t2[] = {  // Tough Guy Shane
+    {  50 /*Diglett*/,  41, { 10 /*Scratch*/, 28 /*Sand Attack*/, 91 /*Dig*/, 0 } },
+    {  51 /*Dugtrio*/,  42, { 10 /*Scratch*/, 28 /*Sand Attack*/, 91 /*Dig*/, 89 /*Earthquake*/ } },
+    { 111 /*Rhyhorn*/,  43, { 88 /*Rock Throw*/, 34 /*Body Slam*/, 43 /*Leer*/, 0 } },
+    {  24 /*Arbok*/,    43, { 40 /*Poison Sting*/, 43 /*Leer*/, 35 /*Wrap*/, 139 /*Toxic*/ } },
 };
-static const LordGymMon g8_t3[] = {
-    {  34 /*Nidoking*/, 45, { 40 /*Poison Sting*/, 30 /*Horn Attack*/, 31 /*Fury Attack*/, 0 } },
+static const LordGymMon g8_t3[] = {  // Cooltrainer Gwen
+    {  34 /*Nidoking*/,  45, { 40 /*Poison Sting*/, 30 /*Horn Attack*/, 31 /*Fury Attack*/, 89 /*Earthquake*/ } },
+    {  31 /*Nidoqueen*/, 44, { 40 /*Poison Sting*/, 89 /*Earthquake*/, 34 /*Body Slam*/, 43 /*Leer*/ } },
+    { 111 /*Rhyhorn*/,   45, { 88 /*Rock Throw*/, 34 /*Body Slam*/, 31 /*Fury Attack*/, 43 /*Leer*/ } },
 };
 static const LordGymMon g8_t4[] = {  // Giovanni
     { 111 /*Rhyhorn*/, 45, { 88 /*Rock Throw*/, 34 /*Body Slam*/, 31 /*Fury Attack*/, 43 /*Leer*/ } },

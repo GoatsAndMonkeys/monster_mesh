@@ -94,7 +94,6 @@ bool MonsterMeshEmulator::begin(const char *romPath) {
     }
 
     running_ = true;
-    Serial.printf("[EMU] started — ROM: %s (%u bytes)\n", romPath, (unsigned)romSize_);
     return true;
 }
 
@@ -203,8 +202,6 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
     if (strncmp(path, "/sd/", 4) == 0) sdPath = path + 3;  // "/sd/foo" → "/foo"
     if (strncmp(path, "/sd", 3) == 0 && path[3] == '\0') sdPath = "/";
 
-    Serial.printf("[EMU] loadROM: path='%s' sdPath='%s'\n", path, sdPath);
-
     // Free previous ROM if reloading
     if (romData_) { free(romData_); romData_ = nullptr; romSize_ = 0; }
 
@@ -215,24 +212,19 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
     SD.end();
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
     bool sdOk = SD.begin(SDCARD_CS, SPI);
-    Serial.printf("[EMU] SD re-init: %d cardType=%d\n", (int)sdOk, (int)SD.cardType());
     if (!sdOk) {
-        Serial.printf("[EMU] SD.begin() failed\n");
         return false;
     }
 
     // Try direct open first
     File f = SD.open(sdPath, FILE_READ);
-    Serial.printf("[EMU] SD.open('%s') = %d\n", sdPath, (int)(bool)f);
     if (!f) {
         // Try with /sd prefix
         f = SD.open(path, FILE_READ);
-        Serial.printf("[EMU] SD.open('%s') = %d\n", path, (int)(bool)f);
     }
     if (!f) {
         // Try directory iteration as last resort
         File dir = SD.open("/");
-        Serial.printf("[EMU] SD.open('/') dir = %d isDir=%d\n", (int)(bool)dir, dir ? (int)dir.isDirectory() : -1);
         if (dir && dir.isDirectory()) {
             const char *targetName = strrchr(sdPath, '/');
             targetName = targetName ? targetName + 1 : sdPath;
@@ -241,10 +233,8 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
                 const char *ename = entry.name();
                 const char *slash = strrchr(ename, '/');
                 const char *fname = slash ? slash + 1 : ename;
-                Serial.printf("[EMU] dir entry: '%s'\n", fname);
                 if (!entry.isDirectory() && strcasecmp(fname, targetName) == 0) {
                     f = entry;
-                    Serial.printf("[EMU] Found match!\n");
                     break;
                 }
                 entry.close();
@@ -254,30 +244,24 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
         }
     }
     if (!f) {
-        Serial.printf("[EMU] All methods failed\n");
         return false;
     }
     romSize_ = f.size();
-    Serial.printf("[EMU] ROM file opened: size=%u\n", (unsigned)romSize_);
     if (romSize_ == 0 || romSize_ > 1024 * 1024) {
         f.close();
         return false;
     }
     romData_ = static_cast<uint8_t *>(ps_malloc(romSize_));
     if (!romData_) {
-        Serial.printf("[EMU] PSRAM alloc failed (%u bytes, free=%u)\n",
-                      (unsigned)romSize_, (unsigned)ESP.getFreePsram());
         f.close();
         return false;
     }
     size_t n = f.read(romData_, romSize_);
     f.close();
-    Serial.printf("[EMU] ROM read: %u / %u bytes\n", (unsigned)n, (unsigned)romSize_);
     if (n != romSize_) {
         free(romData_); romData_ = nullptr;
         return false;
     }
-    Serial.printf("[EMU] ROM loaded OK: %u bytes\n", (unsigned)romSize_);
     return true;
 }
 
@@ -298,32 +282,24 @@ void MonsterMeshEmulator::romPathToSavePath(const char *romPath, char *out, size
 void MonsterMeshEmulator::loadSaveFile(const char *romPath) {
     char savPath[256];
     romPathToSavePath(romPath, savPath, sizeof(savPath));
-    Serial.printf("[EMU] loading save: %s\n", savPath);
 
-    // ABSOLUTE MINIMAL VARIANT — b401-b405 instrumented every step inside this
-    // function and the crash kept moving with each Serial.printf we added/
-    // removed. Every variant died mid-printf around f.close(). Hypotheses:
-    //   1. USB CDC TX buffer floods under multiple printfs while spiLock is
-    //      held → host can't drain fast enough → write blocks → LoRa TWDT
-    //      fires while we're stuck.
-    //   2. SD library f.close() on ESP32-S3 has a hidden interaction with
-    //      Meshtastic's still-running LoRa state.
-    // Strip everything: one printf at top, scoped lock, read, NO explicit
-    // close (destructor at scope exit), no post-lock printfs. If this
-    // survives a post-battle ROM load, the bug was the print flood + close
-    // race. If it still crashes, the issue is the read itself or the SD
-    // driver state.
+    char vfsPath[260];
+    snprintf(vfsPath, sizeof(vfsPath), "/sd%s", savPath);
+
+    // b411 diagnostic: b410 reset on the entry Serial.printf before the SAV
+    // read even started. Keep this whole function silent so the post-battle
+    // ROM-load path does no USB-CDC writes during the fragile handoff.
     size_t n = 0;
     {
         concurrency::LockGuard g(spiLock);
-        File f = SD.open(savPath, FILE_READ);
+        FILE *f = fopen(vfsPath, "rb");
         if (!f) return;
-        n = f.read(cartRam_, sizeof(cartRam_));
-        // f goes out of scope here — destructor closes it under the lock.
+        n = fread(cartRam_, 1, sizeof(cartRam_), f);
+        fclose(f);
     }
+    (void)n;
     // Yield so LoRa thread / USB CDC can drain before any caller-side work.
     vTaskDelay(pdMS_TO_TICKS(10));
-    Serial.printf("[EMU] sav loaded n=%u\n", (unsigned)n);
 }
 
 void MonsterMeshEmulator::writeSaveFile(const char *romPath) {
