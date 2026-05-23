@@ -304,20 +304,27 @@ void MonsterMeshEmulator::loadSaveFile(const char *romPath) {
     // to serialize against concurrent radio ops. writeSaveFile already does
     // this; without it here we've crashed loading SAV when LoRa was active
     // (logs end at "loading save:" line, no further output → hard panic).
+    Serial.printf("[EMU] sav: waiting spiLock\n");
     concurrency::LockGuard g(spiLock);
-    SD.end();
-    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-    if (!SD.begin(SDCARD_CS, SPI)) {
-        Serial.println("[EMU] SD reinit failed for save load");
-        return;
-    }
+    Serial.printf("[EMU] sav: got spiLock\n");
+
+    // loadROM ran just before us and already did SD.end()/SPI.begin()/SD.begin().
+    // Repeating it here was responsible for a hard reset on b397 — the second
+    // SD.end() interleaved with Meshtastic's still-draining LoRa TX queue
+    // (logs cut off mid-printf of "save loaded:" with no Guru Meditation).
+    // Skip the reinit; if SD is in a bad state at this point, SD.open will
+    // return a null file and we degrade gracefully.
 
     File f = SD.open(savPath, FILE_READ);
+    Serial.printf("[EMU] sav: open() handle=%d\n", (int)(bool)f);
     if (!f) {
         Serial.printf("[EMU] no save file: %s\n", savPath);
         return;
     }
+    size_t fsz = f.size();
+    Serial.printf("[EMU] sav: size=%u, reading...\n", (unsigned)fsz);
     size_t n = f.read(cartRam_, sizeof(cartRam_));
+    Serial.printf("[EMU] sav: read returned %u\n", (unsigned)n);
     f.close();
     Serial.printf("[EMU] save loaded: %s (%u bytes)\n", savPath, (unsigned)n);
 }
