@@ -1,5 +1,7 @@
 #include "MonsterMeshAudio.h"
 #include "variant.h"
+#include "main.h" // for audioThread
+#include "AudioThread.h"
 
 MonsterMeshAudio *MonsterMeshAudio::instance_ = nullptr;
 
@@ -39,6 +41,15 @@ bool MonsterMeshAudio::begin() {
     // crashed the device on ROM-load-after-battle on b387 (see logs:
     // device reset right after "save loaded" line, before any further
     // emulator log). driver_uninstall is sufficient.
+    // Stop Meshtastic's ringtone AudioThread first if it's currently playing
+    // — its underlying I2S DMA on port 1 won't fully release until its driver
+    // is actually torn down by AudioOutputI2S. Without stopping it, our
+    // uninstall returns success but the GPIO matrix still routes to port 1.
+#ifdef HAS_I2S
+    if (audioThread && audioThread->isPlaying()) {
+        audioThread->stop();
+    }
+#endif
     i2s_driver_uninstall(I2S_NUM_0);
     i2s_driver_uninstall(I2S_NUM_1);
 
