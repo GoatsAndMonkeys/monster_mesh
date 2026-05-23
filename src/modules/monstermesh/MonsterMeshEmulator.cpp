@@ -300,7 +300,11 @@ void MonsterMeshEmulator::loadSaveFile(const char *romPath) {
     romPathToSavePath(romPath, savPath, sizeof(savPath));
     Serial.printf("[EMU] loading save: %s (ROM: %s)\n", savPath, romPath);
 
-    // SD shares SPI bus — reinit before access
+    // SD shares SPI bus with LoRa — hold spiLock around end/begin/open/read
+    // to serialize against concurrent radio ops. writeSaveFile already does
+    // this; without it here we've crashed loading SAV when LoRa was active
+    // (logs end at "loading save:" line, no further output → hard panic).
+    concurrency::LockGuard g(spiLock);
     SD.end();
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
     if (!SD.begin(SDCARD_CS, SPI)) {
