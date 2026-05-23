@@ -267,6 +267,8 @@ void MonsterMeshTextBattle::sendAction(uint8_t actionType, uint8_t index)
     pkt->payload[2] = actionType;
     pkt->payload[3] = index;
     transport_.queueSend(buf, BATTLELINK_HDR_SIZE + 4);
+    Serial.printf("[MMB] ACTION tx turn=%u act=%u idx=%u\n",
+                  (unsigned)turn, (unsigned)actionType, (unsigned)index);
     lastSentAction_ = actionType;
     lastSentIndex_  = index;
     lastSentTurn_   = turn;
@@ -338,9 +340,18 @@ bool MonsterMeshTextBattle::handlePacket(uint32_t fromId,
         case PktType::TEXT_BATTLE_ACTION: {
             if (len < BATTLELINK_HDR_SIZE + 4) return true;
             uint16_t turn = ((uint16_t)pkt->payload[0] << 8) | pkt->payload[1];
-            if (turn != engine_.turn()) return true;  // stale or future packet
             uint8_t act = pkt->payload[2];
             uint8_t idx = pkt->payload[3];
+            if (turn != engine_.turn()) {
+                Serial.printf("[MMB] ACTION drop pktTurn=%u myTurn=%u "
+                              "act=%u idx=%u from=0x%08X\n",
+                              (unsigned)turn, (unsigned)engine_.turn(),
+                              (unsigned)act, (unsigned)idx, (unsigned)fromId);
+                return true;  // stale or future packet
+            }
+            Serial.printf("[MMB] ACTION rx turn=%u act=%u idx=%u from=0x%08X\n",
+                          (unsigned)turn, (unsigned)act, (unsigned)idx,
+                          (unsigned)fromId);
             engine_.submitAction(1, act, idx);
             pendingRemoteAction_ = true;
             lastRecvMs_ = millis();
@@ -418,7 +429,15 @@ void MonsterMeshTextBattle::resolveTurn()
         }
     }
 
+    Serial.printf("[MMB] executeTurn pre: turn=%u pend0=%u pend1=%u "
+                  "active0=%u active1=%u\n",
+                  (unsigned)engine_.turn(),
+                  (unsigned)engine_.pendAction(0),
+                  (unsigned)engine_.pendAction(1),
+                  (unsigned)engine_.party(0).active,
+                  (unsigned)engine_.party(1).active);
     engine_.executeTurn(engineLogCb, this);
+    Serial.printf("[MMB] executeTurn post: turn=%u\n", (unsigned)engine_.turn());
     handleFaints();
 
     // Per-faint XP using the Gen 1 formula:
