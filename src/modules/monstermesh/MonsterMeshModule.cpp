@@ -1664,11 +1664,26 @@ int32_t MonsterMeshModule::runOnce()
                     for (uint8_t i = 0; i < nc && i < 6; ++i) {
                         const char *sn = neigh[i].shortName[0] ? neigh[i].shortName : "?";
                         const char *gn = neigh[i].gameName[0]  ? neigh[i].gameName  : "?";
+                        // Build a comma-separated level list across the party
+                        // (e.g. "L50,42,38"). Empty if the peer's beacon
+                        // arrived with partyCount=0 (a server-style beacon).
+                        char lvls[40] = {};
+                        size_t lvOff = 0;
+                        uint8_t pc = neigh[i].partyCount;
+                        if (pc > 6) pc = 6;
+                        for (uint8_t p = 0; p < pc; ++p) {
+                            int w = snprintf(lvls + lvOff, sizeof(lvls) - lvOff,
+                                             p == 0 ? "L%u" : ",%u",
+                                             (unsigned)neigh[i].party[p].level);
+                            if (w > 0) lvOff += (size_t)w;
+                            if (lvOff >= sizeof(lvls) - 1) break;
+                        }
                         if (neigh[i].ngPlusTier > 0) {
-                            MMT_APPEND("  %s/%s NG+%u\n",
-                                       sn, gn, (unsigned)neigh[i].ngPlusTier);
+                            MMT_APPEND("  %s/%s %s NG+%u\n",
+                                       sn, gn, lvls,
+                                       (unsigned)neigh[i].ngPlusTier);
                         } else {
-                            MMT_APPEND("  %s/%s\n", sn, gn);
+                            MMT_APPEND("  %s/%s %s\n", sn, gn, lvls);
                         }
                     }
                     MMT_APPEND("\nUsage: mmb <short_name>\n");
