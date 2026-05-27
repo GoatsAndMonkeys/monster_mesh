@@ -44,6 +44,68 @@ enum class PktType : uint8_t {
     // Header = 1 byte count. Total = 1 + 6*18 = 109 B.
     TEXT_BATTLE_PARTY_MIN = 0x65,
 
+    // ── Server-authoritative PvP protocol (replaces 0x60..0x65 on the PvP
+    // path; the old TEXT_BATTLE_* enums remain for LOCAL_ROGUELIKE).
+    //
+    // Initiator = SERVER (the only side running Gen1BattleEngine).
+    // Receiver  = CLIENT (renders state shipped by the server, no engine).
+    //
+    // Side convention in UPDATE / FULL_STATE payloads:
+    //   wire side 0 = CLIENT's party (the receiver's perspective: "me")
+    //   wire side 1 = SERVER's party (the receiver's perspective: "enemy")
+    // Server maps engine-P1 (client) → wire 0 and engine-P0 (self) → wire 1
+    // so both sides hash identical bytes.
+    //
+    // Every server→client packet on this path carries `header.seq` as a
+    // monotonic UPDATE counter; the client echoes the last applied seq in
+    // its next ACTION (piggyback ACK). No standalone ACK packet.
+
+    // UPDATE: server → client. After each executeTurn the server ships only
+    // the fields that changed plus a 3-byte board hash. Layout:
+    //   [0]=turn  [1]=flags  [2..4]=boardHash24 (low 3 B of FNV1a)
+    //   conditional sections appended in flag order:
+    //     bit0 hp     : [hp0:2][hp1:2]
+    //     bit1 pp     : [pp0..pp3:4]   (CLIENT's active mon only)
+    //     bit2 switch : [active0:1][active1:1]
+    //     bit3 status : [status0:1][status1:1]
+    //     bit4 result : [result:1]   (client POV: 0=ongoing 1=youWin
+    //                                 2=youLose 3=draw 4=fled)
+    //     bit5 log    : [numLines:1] then n×[msgId:1][argCount:1][args...]
+    //     bit6 needPlayerSwitch : no bytes (control bit)
+    TEXT_BATTLE_UPDATE = 0x66,
+
+    // ACTION: client → server. Fixed 4-byte payload:
+    //   [0]=turn  [1]=actionType  [2]=index  [3]=lastAckedSeq
+    // actionType: 0=move (index = move slot 0..3), 1=switch (party 0..5),
+    // 2=flee.
+    TEXT_BATTLE_ACTION_V2 = 0x67,
+
+    // CHALLENGE: server → client. ~127-byte payload:
+    //   [0]=gen  [1]=nameLen (≤12)  [2..]=name  then 109-byte partyMin.
+    // rngSeed is NOT transmitted (server-authoritative — client never runs
+    // the engine, so seed is private to the server).
+    TEXT_BATTLE_CHALLENGE = 0x68,
+
+    // ACCEPT: client → server. ~127-byte payload:
+    //   [0]=accepted (1=accept, 0=decline)
+    //   [1]=nameLen (≤12)  [2..]=name  then 109-byte partyMin.
+    TEXT_BATTLE_ACCEPT = 0x69,
+
+    // STATE_REQUEST: client → server. Sent when the client's recomputed
+    // boardHash24 disagrees with the server's UPDATE.boardHash24.
+    // 1-byte payload: [0]=lastAppliedSeq.
+    TEXT_BATTLE_STATE_REQUEST = 0x6A,
+
+    // FULL_STATE: server → client. Authoritative snapshot of the client-
+    // visible board (== the input buffer to boardHash24). Layout:
+    //   [0..1]=turn (BE)  [2]=result
+    //   per side s in {0,1}: [activeSlot:1][count:1] then
+    //                        count × [hp:2 BE][status:1]
+    //   then clientActivePP[4]
+    // maxHp is NOT shipped — it is static; client has it from the
+    // CHALLENGE / ACCEPT party.
+    TEXT_BATTLE_FULL_STATE = 0x6B,
+
     // BBS gym discovery (Phase C-1) — runs over PRIVATE_APP so it does NOT
     // appear in mesh chat. Never use TEXT_MESSAGE_APP for these.
     BBS_PING  = 0x70,  // broadcast probe; payload empty
@@ -100,10 +162,12 @@ enum class PktType : uint8_t {
     DUNGEON_PROMPT   = 0x86,  // host sends trivia/wordle/hack prompt
 };
 
-// Text-battle action types (TEXT_BATTLE_ACTION.payload[2])
+// Text-battle action types (TEXT_BATTLE_ACTION.payload[2] for the legacy
+// LOCAL/lockstep path; TEXT_BATTLE_ACTION_V2.payload[1] for server-auth).
 enum class TextBattleAction : uint8_t {
     USE_MOVE = 0,   // index = move slot 0-3
     SWITCH   = 1,   // index = party slot 0-5
+    FLEE     = 2,   // index unused; server-auth only
 };
 
 // How often (in turns) each side broadcasts a state hash so we can detect
@@ -111,7 +175,106 @@ enum class TextBattleAction : uint8_t {
 // drift instead of waiting up to 5 turns for the next window (and risking
 // the silent-stall case where the hash packet arrives turn-mismatched and
 // gets dropped, so nothing ever compares).
+// Server-auth path does not use this — boardHash24 is carried inline on
+// every UPDATE.
 static constexpr uint8_t TEXT_BATTLE_HASH_INTERVAL = 1;
+
+// ── Server-auth PvP wire constants ──────────────────────────────────────────
+// Max bytes for the trainer name embedded in CHALLENGE/ACCEPT payload.
+static constexpr uint8_t  TB_MAX_NAME_LEN     = 12;
+// Static party blob size (matches packPartyMin output in MonsterMeshModule.cpp).
+static constexpr uint8_t  TB_PARTY_MIN_BYTES  = 109;
+// Fixed-size payload widths (excludes the 4-byte BattlePacket header).
+static constexpr uint8_t  TB_ACTION_BYTES         = 4;
+static constexpr uint8_t  TB_STATE_REQUEST_BYTES  = 1;
+// Soft upper bound for log section in UPDATE (lines × bytes).
+static constexpr uint8_t  TB_UPDATE_MAX_LOG_LINES = 6;
+// Server retransmit/timeout cadences (ms).
+static constexpr uint32_t TB_CHALLENGE_RESEND_MS  = 4000;
+static constexpr uint32_t TB_CHALLENGE_MAX_TRIES  = 3;
+static constexpr uint32_t TB_UPDATE_RESEND_MS     = 3000;
+static constexpr uint32_t TB_ACTION_RESEND_MS     = 3000;
+static constexpr uint32_t TB_NO_TRAFFIC_TIMEOUT_MS = 30000;
+
+// UPDATE flag bits (BattlePacket.payload[1] of TEXT_BATTLE_UPDATE). Order
+// in this enum doubles as the order of conditional sections in the packed
+// payload — keep additions append-only.
+enum TbUpdateFlag : uint8_t {
+    TB_UPD_HP                = 1 << 0,
+    TB_UPD_PP                = 1 << 1,
+    TB_UPD_SWITCH            = 1 << 2,
+    TB_UPD_STATUS            = 1 << 3,
+    TB_UPD_RESULT            = 1 << 4,
+    TB_UPD_LOG               = 1 << 5,
+    TB_UPD_NEED_PLAYER_SWITCH = 1 << 6,
+};
+
+// Client-POV result codes (TEXT_BATTLE_UPDATE result byte / FULL_STATE [2]).
+enum TbClientResult : uint8_t {
+    TB_RESULT_ONGOING  = 0,
+    TB_RESULT_YOU_WIN  = 1,
+    TB_RESULT_YOU_LOSE = 2,
+    TB_RESULT_DRAW     = 3,
+    TB_RESULT_FLED     = 4,
+};
+
+// ── Fixed-size pack/unpack helpers (header-only, inline) ────────────────────
+//
+// Variable-size packets (CHALLENGE, ACCEPT, UPDATE, FULL_STATE) build their
+// payload directly in the caller because they need access to packPartyMin()
+// and the engine's BattleParty.  These two are tiny and constant-shape:
+
+// Pack a TEXT_BATTLE_ACTION_V2 payload. `out` must have at least
+// TB_ACTION_BYTES bytes available.
+static inline void tbPackAction(uint8_t out[TB_ACTION_BYTES],
+                                uint8_t turn, uint8_t actionType,
+                                uint8_t index, uint8_t lastAckedSeq)
+{
+    out[0] = turn;
+    out[1] = actionType;
+    out[2] = index;
+    out[3] = lastAckedSeq;
+}
+
+static inline bool tbUnpackAction(const uint8_t *in, size_t len,
+                                  uint8_t &turn, uint8_t &actionType,
+                                  uint8_t &index, uint8_t &lastAckedSeq)
+{
+    if (len < TB_ACTION_BYTES) return false;
+    turn         = in[0];
+    actionType   = in[1];
+    index        = in[2];
+    lastAckedSeq = in[3];
+    return true;
+}
+
+// Pack a TEXT_BATTLE_STATE_REQUEST payload.
+static inline void tbPackStateRequest(uint8_t out[TB_STATE_REQUEST_BYTES],
+                                      uint8_t lastAppliedSeq)
+{
+    out[0] = lastAppliedSeq;
+}
+
+static inline bool tbUnpackStateRequest(const uint8_t *in, size_t len,
+                                        uint8_t &lastAppliedSeq)
+{
+    if (len < TB_STATE_REQUEST_BYTES) return false;
+    lastAppliedSeq = in[0];
+    return true;
+}
+
+// 24-bit FNV-1a over the client-visible board buffer. Server and client
+// both compute this over byte-identical buffers (FULL_STATE payload format).
+// Returns the low 24 bits; caller stores in 3 contiguous bytes.
+static inline uint32_t tbBoardHash24(const uint8_t *buf, size_t len)
+{
+    uint32_t h = 0x811c9dc5u;
+    for (size_t i = 0; i < len; ++i) {
+        h ^= buf[i];
+        h *= 0x01000193u;
+    }
+    return h & 0x00FFFFFFu;
+}
 
 #pragma pack(push, 1)
 struct BattlePacket {
