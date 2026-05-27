@@ -1694,6 +1694,11 @@ void MonsterMeshTextBattle::serverAuthSendUpdate()
     lastUpdateLen_     = pktLen;
     unackedUpdate_     = true;
     lastUpdateSendMs_  = millis();
+    Serial.printf("[MMB] server UPDATE tx seq=%u flags=0x%04X turn=%u "
+                  "logLines=%u pktLen=%u\n",
+                  (unsigned)updateSeq_, (unsigned)flags,
+                  (unsigned)engine_.turn(), (unsigned)numLogLines,
+                  (unsigned)pktLen);
 }
 
 void MonsterMeshTextBattle::serverAuthSendFullState()
@@ -1985,17 +1990,36 @@ void MonsterMeshTextBattle::clientAuthSendAccept(bool accepted)
 // state. Wire side 0 = us (engine P0), wire side 1 = server (engine P1).
 void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len)
 {
-    if (len < BATTLELINK_HDR_SIZE + 6) return;  // turn(1)+flags(2)+hash(3)
+    if (len < BATTLELINK_HDR_SIZE + 6) {
+        Serial.printf("[MMB] client UPDATE too short len=%u\n", (unsigned)len);
+        return;
+    }
     const BattlePacket *pkt = (const BattlePacket *)buf;
-    if (pkt->sessionId() != session_) return;
+    if (pkt->sessionId() != session_) {
+        Serial.printf("[MMB] client UPDATE session mismatch pkt=0x%04X our=0x%04X\n",
+                      (unsigned)pkt->sessionId(), (unsigned)session_);
+        return;
+    }
+    Serial.printf("[MMB] client UPDATE rx seq=%u len=%u flags=0x%04X\n",
+                  (unsigned)pkt->seq, (unsigned)len,
+                  (unsigned)(((uint16_t)pkt->payload[1] << 8) | pkt->payload[2]));
     // First UPDATE proves the server got our ACCEPT — stop retransmitting it.
     awaitingFirstUpdate_ = false;
 
-    // Idempotent dedupe: same seq already applied → still ACK so server
-    // can clear unackedUpdate_, but don't reapply state.
+    // Idempotent dedupe: same seq already applied → ACK so server can
+    // clear unackedUpdate_, but don't reapply state. If the user hasn't
+    // picked an action yet (clientActionType_ == 0xFF), send a pure-ACK
+    // sentinel (0xFE) so the server doesn't treat our re-emit as a real
+    // engine submission. Without this gate, every server-side UPDATE
+    // retransmit advanced the server's turn counter with garbage on the
+    // client's side of the engine.
     uint8_t seq = pkt->seq;
     if (seq == lastAppliedUpdateSeq_ && lastAppliedUpdateSeq_ != 0) {
-        clientAuthSendActionV2(clientActionType_, clientActionIndex_);
+        if (clientActionType_ != 0xFF) {
+            clientAuthSendActionV2(clientActionType_, clientActionIndex_);
+        } else {
+            clientAuthSendActionV2(0xFE /*pure-ACK*/, 0);
+        }
         return;
     }
 
@@ -2170,11 +2194,15 @@ void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len
     if (needSwitch) {
         phase_ = Phase::WAIT_SWITCH;
         switchCursor_ = engine_.party(0).active;
+        Serial.printf("[MMB] client UPDATE applied seq=%u → WAIT_SWITCH\n",
+                      (unsigned)seq);
         return;
     }
     // Normal flow: server has resolved the turn and is now waiting for our
     // next action.
     phase_ = Phase::WAIT_ACTION;
+    Serial.printf("[MMB] client UPDATE applied seq=%u → WAIT_ACTION turn=%u\n",
+                  (unsigned)seq, (unsigned)clientTurn_);
 }
 
 void MonsterMeshTextBattle::clientAuthOnFullStatePkt(const uint8_t *buf, size_t len)
