@@ -27,6 +27,11 @@ public:
     static constexpr uint16_t SCREEN_H = 240;
 
     enum class Mode  : uint8_t { OFF, NETWORKED, LOCAL_ROGUELIKE };
+    // Server-authoritative PvP role. LEGACY = the old lockstep dual-engine
+    // path (Mode::NETWORKED + sendHash/HASH abort). SERVER = initiator runs
+    // the only engine and ships UPDATE packets. CLIENT = receiver renders
+    // state from UPDATE packets; runs no engine.
+    enum class Role  : uint8_t { LEGACY, SERVER, CLIENT };
     enum class Phase : uint8_t {
         IDLE,           // not in a battle
         WAIT_ACTION,    // waiting for player input
@@ -41,6 +46,21 @@ public:
       : transport_(transport) {}
 
     // ── Lifecycle ───────────────────────────────────────────────────────────
+    // ── Server-authoritative PvP entry point ──────────────────────────────
+    // Initiator's only call. Stages our party, generates a session id, and
+    // broadcasts CHALLENGE. Battle proper starts when ACCEPT arrives (in
+    // handlePacket → onServerAuthAcceptPkt). Returns immediately.
+    //
+    // `myName` is the trainer name shown in the opponent's "X challenges
+    // you!" overlay (truncated to TB_MAX_NAME_LEN).
+    void startServerAuthAsInitiator(uint32_t remoteId,
+                                    const Gen1Party &myParty,
+                                    const char *myName);
+
+    // Role of the current battle (LEGACY by default; SERVER/CLIENT only for
+    // server-authoritative path).
+    Role role() const { return role_; }
+
     // Networked initiator. `myParty` is our current save's party; `oppParty`
     // is the peer's party (reconstructed from their daycare beacon — both
     // sides build the same party locally from the same beacon data so we
@@ -239,6 +259,67 @@ private:
 
     // After both sides submitted, run executeTurn and prep next phase.
     void resolveTurn();
+
+    // ── Server-authoritative PvP wire handlers ────────────────────────────
+    //
+    // role_ governs whether the server-auth code paths run instead of the
+    // legacy lockstep ones. SERVER/CLIENT each touch only their own helpers.
+    Role     role_ = Role::LEGACY;
+    char     myTbName_[TB_MAX_NAME_LEN + 1] = {};
+    char     peerTbName_[TB_MAX_NAME_LEN + 1] = {};
+    Gen1Party pendingMyParty_      = {};   // staged for CHALLENGE / ACCEPT
+    Gen1Party pendingClientParty_  = {};   // server: filled from ACCEPT
+    Gen1Party pendingServerParty_  = {};   // client: filled from CHALLENGE
+
+    // SERVER: CHALLENGE retransmit until ACCEPT arrives.
+    uint32_t lastChallengeMs_ = 0;
+    uint8_t  challengeTries_  = 0;
+    bool     awaitingAccept_  = false;
+
+    // SERVER: UPDATE retransmit until client's next ACTION_V2 acks the seq.
+    uint8_t  updateSeq_         = 0;     // monotonic across UPDATEs (header.seq)
+    bool     unackedUpdate_     = false; // set on send, cleared on matching ACK
+    uint32_t lastUpdateSendMs_  = 0;
+    uint8_t  lastUpdateBuf_[BATTLELINK_MAX_PKT] = {};
+    size_t   lastUpdateLen_     = 0;
+
+    // CLIENT: ACTION_V2 retransmit + last seq we acked (echoed back as
+    // lastAckedSeq in every ACTION_V2 we emit).
+    uint8_t  clientActionType_       = 0xFF;
+    uint8_t  clientActionIndex_      = 0;
+    uint8_t  clientActionTurn_       = 0;
+    uint32_t lastClientActionSendMs_ = 0;
+    uint8_t  lastAppliedUpdateSeq_   = 0;
+    bool     clientNeedsFullState_   = false;
+
+    // SERVER helpers.
+    void serverAuthSendChallenge();
+    void serverAuthOnAcceptPkt(uint32_t fromId,
+                               const uint8_t *buf, size_t len);
+    void serverAuthOnActionV2Pkt(uint32_t fromId,
+                                 const uint8_t *buf, size_t len);
+    void serverAuthOnStateRequestPkt(uint32_t fromId,
+                                     const uint8_t *buf, size_t len);
+    void serverAuthSendUpdate();
+    void serverAuthSendFullState();
+    void serverAuthRetransmit(uint32_t nowMs);
+
+    // CLIENT helpers (implemented in P3).
+    void clientAuthOnChallengePkt(uint32_t fromId,
+                                  const uint8_t *buf, size_t len);
+    void clientAuthOnUpdatePkt(const uint8_t *buf, size_t len);
+    void clientAuthOnFullStatePkt(const uint8_t *buf, size_t len);
+    void clientAuthSendAccept(bool accepted);
+    void clientAuthSendActionV2(uint8_t actionType, uint8_t index);
+    void clientAuthSendStateRequest();
+    void clientAuthRetransmit(uint32_t nowMs);
+
+    // Canonical client-visible board buffer (single source of truth for
+    // hash + FULL_STATE body). Layout matches the FULL_STATE wire format:
+    //   [0..1] turn (BE)  [2] result  per side {active, count,
+    //   count×(hp BE, status)}  then clientActivePP[4].
+    // Returns bytes written (≤ ~64).
+    size_t packClientStateFromEngine(uint8_t out[]);
 
     // Auto-replace a fainted active mon at the start of each input phase.
     void handleFaints();

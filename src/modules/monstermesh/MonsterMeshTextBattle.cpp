@@ -278,7 +278,61 @@ void MonsterMeshTextBattle::exit()
 {
     mode_ = Mode::OFF;
     phase_ = Phase::IDLE;
+    role_  = Role::LEGACY;
+    awaitingAccept_ = false;
+    unackedUpdate_  = false;
+    challengeTries_ = 0;
+    clientActionType_ = 0xFF;
+    clientNeedsFullState_ = false;
     dirty_ = true;
+}
+
+// ── Server-authoritative initiator entry point ──────────────────────────────
+//
+// Stages our party + name, picks a session id, and broadcasts CHALLENGE.
+// The engine is NOT started here — it waits for the client's ACCEPT (in
+// serverAuthOnAcceptPkt), which carries the client's party. Until ACCEPT
+// arrives (or 3 retries expire), no battle UI exists; we just sit in
+// awaitingAccept_ and the tick() loop retransmits.
+void MonsterMeshTextBattle::startServerAuthAsInitiator(uint32_t remoteId,
+                                                       const Gen1Party &myParty,
+                                                       const char *myName)
+{
+    mode_     = Mode::NETWORKED;
+    phase_    = Phase::WAIT_REMOTE;   // "waiting for opponent to accept"
+    role_     = Role::SERVER;
+    remoteId_ = remoteId;
+    session_  = (uint16_t)((millis() ^ remoteId) & 0xFFFF);
+    cursor_   = 0; switchCursor_ = 0;
+    pendingRemoteAction_ = false;
+    logFill_ = logHead_ = 0; scrollPending_ = 0;
+    peerReady_ = false;
+    awaitingAccept_ = true;
+    challengeTries_ = 0;
+    lastChallengeMs_ = 0;
+    unackedUpdate_  = false;
+    updateSeq_      = 0;
+    lastUpdateLen_  = 0;
+    clientActionType_      = 0xFF;
+    lastAppliedUpdateSeq_  = 0;
+    clientNeedsFullState_  = false;
+
+    pendingMyParty_ = myParty;
+    myTbName_[0] = '\0';
+    if (myName && *myName) {
+        snprintf(myTbName_, sizeof(myTbName_), "%.*s",
+                 (int)TB_MAX_NAME_LEN, myName);
+    }
+    peerTbName_[0] = '\0';
+
+    appendLog("Sending challenge…");
+    serverAuthSendChallenge();          // first burst
+    lastRecvMs_ = millis();
+    dirty_ = true;
+    Serial.printf("[MMB] server-auth CHALLENGE → 0x%08X session=0x%04X "
+                  "name=%s count=%u\n",
+                  (unsigned)remoteId, (unsigned)session_,
+                  myTbName_, (unsigned)myParty.count);
 }
 
 // ── Wire packet emit/receive ────────────────────────────────────────────────
@@ -372,6 +426,39 @@ bool MonsterMeshTextBattle::handlePacket(uint32_t fromId,
     if (len < BATTLELINK_HDR_SIZE) return false;
     const BattlePacket *pkt = (const BattlePacket *)buf;
     PktType t = (PktType)pkt->type;
+
+    // ── Server-auth dispatch (must precede the mode_/session checks since
+    // CHALLENGE arrives when mode_ == OFF and ACCEPT/ACTION_V2 may carry
+    // session ids unknown to the legacy session_ field). ─────────────────
+    if (t == PktType::TEXT_BATTLE_CHALLENGE) {
+        if (mode_ != Mode::OFF) return true;  // busy
+        clientAuthOnChallengePkt(fromId, buf, len);
+        return true;
+    }
+    if (mode_ != Mode::OFF && role_ == Role::SERVER) {
+        if (t == PktType::TEXT_BATTLE_ACCEPT) {
+            serverAuthOnAcceptPkt(fromId, buf, len);
+            return true;
+        }
+        if (t == PktType::TEXT_BATTLE_ACTION_V2) {
+            serverAuthOnActionV2Pkt(fromId, buf, len);
+            return true;
+        }
+        if (t == PktType::TEXT_BATTLE_STATE_REQUEST) {
+            serverAuthOnStateRequestPkt(fromId, buf, len);
+            return true;
+        }
+    }
+    if (mode_ != Mode::OFF && role_ == Role::CLIENT) {
+        if (t == PktType::TEXT_BATTLE_UPDATE) {
+            clientAuthOnUpdatePkt(buf, len);
+            return true;
+        }
+        if (t == PktType::TEXT_BATTLE_FULL_STATE) {
+            clientAuthOnFullStatePkt(buf, len);
+            return true;
+        }
+    }
 
     if (t == PktType::TEXT_BATTLE_START) {
         if (mode_ != Mode::OFF) return true;  // already in a battle, ignore
@@ -633,13 +720,20 @@ void MonsterMeshTextBattle::resolveTurn()
             case Gen1BattleEngine::Result::DRAW:   appendLog("It's a draw.");  break;
             default: break;
         }
+        // Server-auth: ship a final UPDATE carrying result so the client
+        // sees the end-of-battle state. Legacy path: nothing extra.
+        if (role_ == Role::SERVER) serverAuthSendUpdate();
         phase_ = Phase::FINISHED;
         return;
     }
     pendingRemoteAction_ = false;
-    if (mode_ == Mode::NETWORKED &&
-        engine_.turn() % TEXT_BATTLE_HASH_INTERVAL == 0) {
-        sendHash();
+    if (mode_ == Mode::NETWORKED) {
+        if (role_ == Role::SERVER) {
+            // Server-authoritative: ship UPDATE with the new board, no hash.
+            serverAuthSendUpdate();
+        } else if (engine_.turn() % TEXT_BATTLE_HASH_INTERVAL == 0) {
+            sendHash();
+        }
     }
     phase_ = Phase::WAIT_ACTION;
     // Keep cursor_ on whatever move the user picked last turn — Gen 1 UX:
@@ -709,19 +803,32 @@ void MonsterMeshTextBattle::tick(uint32_t nowMs)
     // that read as screen flicker.)
 
     if (mode_ == Mode::NETWORKED) {
-        // Re-broadcast our pending action periodically — LoRa is lossy.
-        if (phase_ == Phase::WAIT_REMOTE && lastSentAction_ != 0xFF &&
-            (nowMs - lastSendMs_ >= RESEND_INTERVAL_MS)) {
-            sendAction(lastSentAction_, lastSentIndex_);
+        if (role_ == Role::SERVER) {
+            serverAuthRetransmit(nowMs);
+        } else if (role_ == Role::CLIENT) {
+            clientAuthRetransmit(nowMs);
+        } else {
+            // Re-broadcast our pending action periodically — LoRa is lossy.
+            if (phase_ == Phase::WAIT_REMOTE && lastSentAction_ != 0xFF &&
+                (nowMs - lastSendMs_ >= RESEND_INTERVAL_MS)) {
+                sendAction(lastSentAction_, lastSentIndex_);
+            }
         }
-        // Timeout: opponent hasn't sent anything in a while.
-        if ((nowMs - lastRecvMs_) > REMOTE_TIMEOUT_MS &&
-            phase_ != Phase::FINISHED) {
+        // Timeout: opponent hasn't sent anything in a while. Server-auth
+        // uses the spec's 30 s window; legacy uses the legacy 60 s.
+        uint32_t timeout = (role_ != Role::LEGACY)
+                             ? TB_NO_TRAFFIC_TIMEOUT_MS
+                             : REMOTE_TIMEOUT_MS;
+        if ((nowMs - lastRecvMs_) > timeout &&
+            phase_ != Phase::FINISHED && !awaitingAccept_) {
             appendLog("Opponent timed out.");
-            engine_.forfeit(1, engineLogCb, this);
+            if (engine_.result() == Gen1BattleEngine::Result::ONGOING) {
+                engine_.forfeit(1, engineLogCb, this);
+            }
             phase_ = Phase::FINISHED;
         }
-        // If both sides have submitted, resolve.
+        // If both sides have submitted, resolve. Server-auth uses the same
+        // pendingRemoteAction_ flag (set in serverAuthOnActionV2Pkt).
         if (phase_ == Phase::WAIT_REMOTE && pendingRemoteAction_) {
             resolveTurn();
         }
@@ -1098,11 +1205,442 @@ void MonsterMeshTextBattle::render(lgfx::LGFX_Device *g)
     else if (phase_ == Phase::WAIT_REMOTE) {
         g->setTextColor(FG, BG);
         g->setCursor(8, SCREEN_H - 24);
-        g->print(mode_ == Mode::NETWORKED ? "Waiting for opponent…" : "…");
+        if (mode_ == Mode::NETWORKED && role_ == Role::SERVER && awaitingAccept_) {
+            g->print("Awaiting accept…");
+        } else {
+            g->print(mode_ == Mode::NETWORKED ? "Waiting for opponent…" : "…");
+        }
     } else if (phase_ == Phase::FINISHED) {
         g->setTextColor(FG, BG);
         g->setCursor(8, SCREEN_H - 24);
         g->print(endPromptOverride_[0] ? endPromptOverride_ : "Press any key to exit.");
     }
     dirty_ = false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Server-authoritative PvP — wire glue
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Local copies of packPartyMin / unpackPartyMin (mirror of the static
+// helpers in MonsterMeshModule.cpp; identical byte layout). Kept local so
+// the text-battle TU has no link-time dependency on the module's statics.
+namespace {
+void packPartyMinTb(const Gen1Party &src, uint8_t out[TB_PARTY_MIN_BYTES])
+{
+    out[0] = src.count;
+    for (uint8_t i = 0; i < 6; ++i) {
+        uint8_t *p = out + 1 + (size_t)i * 18;
+        const Gen1Pokemon &m = src.mons[i];
+        p[0] = m.species;
+        p[1] = m.level ? m.level : m.boxLevel;
+        p[2] = m.dvs[0];
+        p[3] = m.dvs[1];
+        memcpy(p +  4, m.hpExp,  2);
+        memcpy(p +  6, m.atkExp, 2);
+        memcpy(p +  8, m.defExp, 2);
+        memcpy(p + 10, m.spdExp, 2);
+        memcpy(p + 12, m.spcExp, 2);
+        memcpy(p + 14, m.moves,  4);
+    }
+}
+
+void unpackPartyMinTb(const uint8_t in[TB_PARTY_MIN_BYTES], Gen1Party &dst)
+{
+    memset(&dst, 0, sizeof(dst));
+    dst.count = in[0];
+    if (dst.count > 6) dst.count = 6;
+    for (uint8_t i = 0; i < 6; ++i) {
+        const uint8_t *p = in + 1 + (size_t)i * 18;
+        Gen1Pokemon &m = dst.mons[i];
+        m.species  = p[0];
+        m.level    = p[1];
+        m.boxLevel = p[1];
+        m.dvs[0]   = p[2];
+        m.dvs[1]   = p[3];
+        memcpy(m.hpExp,  p +  4, 2);
+        memcpy(m.atkExp, p +  6, 2);
+        memcpy(m.defExp, p +  8, 2);
+        memcpy(m.spdExp, p + 10, 2);
+        memcpy(m.spcExp, p + 12, 2);
+        memcpy(m.moves,  p + 14, 4);
+        for (uint8_t k = 0; k < 4; ++k) {
+            const Gen1MoveData *md = gen1Move(m.moves[k]);
+            m.pp[k] = md ? md->pp : 0;
+        }
+    }
+    for (uint8_t i = 0; i < 7; ++i) {
+        dst.species[i] = (i < dst.count) ? dst.mons[i].species : 0xFF;
+    }
+}
+} // namespace
+
+// Send the CHALLENGE packet. Layout:
+//   header (4B) | [0]=gen [1]=nameLen [2..]=name | partyMin (109 B)
+void MonsterMeshTextBattle::serverAuthSendChallenge()
+{
+    uint8_t buf[BATTLELINK_MAX_PKT];
+    memset(buf, 0, sizeof(buf));
+    BattlePacket *pkt = (BattlePacket *)buf;
+    pkt->type = (uint8_t)PktType::TEXT_BATTLE_CHALLENGE;
+    pkt->setSessionId(session_);
+    pkt->seq = 0;  // CHALLENGE doesn't participate in the UPDATE seq stream
+
+    size_t nameLen = strlen(myTbName_);
+    if (nameLen > TB_MAX_NAME_LEN) nameLen = TB_MAX_NAME_LEN;
+    pkt->payload[0] = 1;                          // gen 1
+    pkt->payload[1] = (uint8_t)nameLen;
+    memcpy(pkt->payload + 2, myTbName_, nameLen);
+    packPartyMinTb(pendingMyParty_, pkt->payload + 2 + nameLen);
+
+    size_t payloadLen = 2 + nameLen + TB_PARTY_MIN_BYTES;
+    transport_.queueSend(buf, BATTLELINK_HDR_SIZE + payloadLen);
+    lastChallengeMs_ = millis();
+    challengeTries_++;
+}
+
+// Build the canonical client-visible board buffer from the server's engine.
+// Server convention: wire side 0 = engine P1 (client), wire side 1 = engine
+// P0 (us). PP shown is the CLIENT's active mon (engine P1). Layout matches
+// FULL_STATE wire format AND is fed into tbBoardHash24() for the inline
+// hash on UPDATE.
+size_t MonsterMeshTextBattle::packClientStateFromEngine(uint8_t out[])
+{
+    uint16_t turn = engine_.turn();
+    uint8_t result;
+    switch (engine_.result()) {
+        case Gen1BattleEngine::Result::ONGOING: result = TB_RESULT_ONGOING; break;
+        // Client POV: client = engine P1, so P2_WIN means client won.
+        case Gen1BattleEngine::Result::P2_WIN:  result = TB_RESULT_YOU_WIN; break;
+        case Gen1BattleEngine::Result::P1_WIN:  result = TB_RESULT_YOU_LOSE; break;
+        case Gen1BattleEngine::Result::DRAW:    result = TB_RESULT_DRAW; break;
+        default:                                result = TB_RESULT_ONGOING; break;
+    }
+
+    size_t w = 0;
+    out[w++] = (turn >> 8) & 0xFF;
+    out[w++] =  turn       & 0xFF;
+    out[w++] = result;
+
+    // Wire side 0 = engine P1 (client). Wire side 1 = engine P0 (us).
+    static const uint8_t wireToEngine[2] = { 1, 0 };
+    for (uint8_t ws = 0; ws < 2; ++ws) {
+        const auto &party = engine_.party(wireToEngine[ws]);
+        out[w++] = party.active;
+        out[w++] = party.count;
+        for (uint8_t i = 0; i < party.count && i < 6; ++i) {
+            const auto &m = party.mons[i];
+            out[w++] = (m.hp >> 8) & 0xFF;
+            out[w++] =  m.hp       & 0xFF;
+            out[w++] = m.status;
+        }
+    }
+
+    // CLIENT's active mon PP — wire side 0 → engine P1.
+    const auto &cp = engine_.party(1);
+    const auto &cm = cp.mons[cp.active];
+    for (uint8_t i = 0; i < 4; ++i) out[w++] = cm.pp[i];
+
+    return w;
+}
+
+// Build + send an UPDATE. For simplicity, every UPDATE carries every flag
+// section (HP/PP/switch/status) plus the inline boardHash24. Result + log
+// + needPlayerSwitch are conditional. This is bandwidth-wasteful vs a
+// true diff but keeps the implementation simple and the apply logic
+// trivially idempotent on the client side.
+void MonsterMeshTextBattle::serverAuthSendUpdate()
+{
+    uint8_t board[80];
+    size_t blen = packClientStateFromEngine(board);
+    uint32_t h24 = tbBoardHash24(board, blen);
+
+    uint8_t buf[BATTLELINK_MAX_PKT];
+    memset(buf, 0, sizeof(buf));
+    BattlePacket *pkt = (BattlePacket *)buf;
+    pkt->type = (uint8_t)PktType::TEXT_BATTLE_UPDATE;
+    pkt->setSessionId(session_);
+    pkt->seq = ++updateSeq_;
+
+    uint8_t flags = TB_UPD_HP | TB_UPD_PP | TB_UPD_SWITCH | TB_UPD_STATUS;
+    bool finished = (engine_.result() != Gen1BattleEngine::Result::ONGOING);
+    if (finished) flags |= TB_UPD_RESULT;
+
+    // Drain the log buffer into the packet if there's room.
+    uint8_t numLogLines = 0;
+    if (logFill_ > 0) {
+        numLogLines = logFill_;
+        if (numLogLines > TB_UPDATE_MAX_LOG_LINES) {
+            numLogLines = TB_UPDATE_MAX_LOG_LINES;
+        }
+        flags |= TB_UPD_LOG;
+    }
+
+    // needPlayerSwitch on the CLIENT side (wire 0 = engine P1) when their
+    // active mon has fainted but the battle is still ongoing.
+    if (!finished) {
+        const auto &cp = engine_.party(1);
+        if (cp.mons[cp.active].hp == 0) flags |= TB_UPD_NEED_PLAYER_SWITCH;
+    }
+
+    size_t w = 0;
+    pkt->payload[w++] = (engine_.turn() & 0xFF);
+    pkt->payload[w++] = flags;
+    pkt->payload[w++] = (h24 >> 16) & 0xFF;
+    pkt->payload[w++] = (h24 >>  8) & 0xFF;
+    pkt->payload[w++] =  h24        & 0xFF;
+
+    if (flags & TB_UPD_HP) {
+        const auto &c = engine_.party(1).mons[engine_.party(1).active];
+        const auto &s = engine_.party(0).mons[engine_.party(0).active];
+        pkt->payload[w++] = (c.hp >> 8) & 0xFF;
+        pkt->payload[w++] =  c.hp       & 0xFF;
+        pkt->payload[w++] = (s.hp >> 8) & 0xFF;
+        pkt->payload[w++] =  s.hp       & 0xFF;
+    }
+    if (flags & TB_UPD_PP) {
+        const auto &c = engine_.party(1).mons[engine_.party(1).active];
+        for (uint8_t i = 0; i < 4; ++i) pkt->payload[w++] = c.pp[i];
+    }
+    if (flags & TB_UPD_SWITCH) {
+        pkt->payload[w++] = engine_.party(1).active;
+        pkt->payload[w++] = engine_.party(0).active;
+    }
+    if (flags & TB_UPD_STATUS) {
+        pkt->payload[w++] = engine_.party(1).mons[engine_.party(1).active].status;
+        pkt->payload[w++] = engine_.party(0).mons[engine_.party(0).active].status;
+    }
+    if (flags & TB_UPD_RESULT) {
+        // Map engine result → client POV (engine P1 = client).
+        uint8_t r = TB_RESULT_ONGOING;
+        switch (engine_.result()) {
+            case Gen1BattleEngine::Result::P2_WIN: r = TB_RESULT_YOU_WIN;  break;
+            case Gen1BattleEngine::Result::P1_WIN: r = TB_RESULT_YOU_LOSE; break;
+            case Gen1BattleEngine::Result::DRAW:   r = TB_RESULT_DRAW;     break;
+            default: break;
+        }
+        pkt->payload[w++] = r;
+    }
+    if (flags & TB_UPD_LOG) {
+        pkt->payload[w++] = numLogLines;
+        // Lines are oldest→newest from the circular buffer.
+        for (uint8_t i = 0; i < numLogLines; ++i) {
+            uint8_t idx = (logHead_ + LOG_LINES - logFill_ + i) % LOG_LINES;
+            // Raw-string log: [len:1][bytes...]
+            size_t llen = strnlen(log_[idx], LOG_WIDTH);
+            if (w + 1 + llen > BATTLELINK_MAX_PAYLOAD) break;
+            pkt->payload[w++] = (uint8_t)llen;
+            memcpy(pkt->payload + w, log_[idx], llen);
+            w += llen;
+        }
+        // Once shipped, clear so we don't ship the same lines next turn.
+        logFill_ = 0; logHead_ = 0;
+    }
+
+    size_t pktLen = BATTLELINK_HDR_SIZE + w;
+    transport_.queueSend(buf, pktLen);
+    memcpy(lastUpdateBuf_, buf, pktLen);
+    lastUpdateLen_     = pktLen;
+    unackedUpdate_     = true;
+    lastUpdateSendMs_  = millis();
+}
+
+void MonsterMeshTextBattle::serverAuthSendFullState()
+{
+    uint8_t buf[BATTLELINK_MAX_PKT];
+    memset(buf, 0, sizeof(buf));
+    BattlePacket *pkt = (BattlePacket *)buf;
+    pkt->type = (uint8_t)PktType::TEXT_BATTLE_FULL_STATE;
+    pkt->setSessionId(session_);
+    pkt->seq = updateSeq_;
+    size_t blen = packClientStateFromEngine(pkt->payload);
+    transport_.queueSend(buf, BATTLELINK_HDR_SIZE + blen);
+}
+
+// CLIENT → SERVER: an ACCEPT(1, party, name) lands. Unpack, init engine
+// with both parties, transition into RUN. ACCEPT(0) → "Declined" → exit.
+void MonsterMeshTextBattle::serverAuthOnAcceptPkt(uint32_t fromId,
+                                                  const uint8_t *buf, size_t len)
+{
+    if (!awaitingAccept_) return;
+    if (len < BATTLELINK_HDR_SIZE + 2 + TB_PARTY_MIN_BYTES) return;
+    const BattlePacket *pkt = (const BattlePacket *)buf;
+    if (pkt->sessionId() != session_) return;
+
+    uint8_t accepted = pkt->payload[0];
+    uint8_t nameLen  = pkt->payload[1];
+    if (nameLen > TB_MAX_NAME_LEN) nameLen = TB_MAX_NAME_LEN;
+    if (len < (size_t)BATTLELINK_HDR_SIZE + 2 + nameLen + TB_PARTY_MIN_BYTES) return;
+
+    if (!accepted) {
+        appendLog("Challenge declined.");
+        phase_ = Phase::FINISHED;
+        awaitingAccept_ = false;
+        dirty_ = true;
+        Serial.printf("[MMB] server-auth ACCEPT(0) from=0x%08X\n",
+                      (unsigned)fromId);
+        return;
+    }
+
+    memset(peerTbName_, 0, sizeof(peerTbName_));
+    memcpy(peerTbName_, pkt->payload + 2, nameLen);
+    unpackPartyMinTb(pkt->payload + 2 + nameLen, pendingClientParty_);
+
+    // Init engine: P0 = us, P1 = client. Seed is private to server (client
+    // never runs the engine so doesn't need it).
+    uint32_t rngSeed = (uint32_t)(millis() ^ esp_random() ^ fromId);
+    engine_.start(pendingMyParty_, pendingClientParty_, rngSeed);
+    // Heal both sides — same rationale as legacy networked path (PARTY_MIN
+    // strips HP/PP/status; everyone starts fully healed in mesh PvP).
+    for (uint8_t side = 0; side < 2; ++side) {
+        auto &p = engine_.party(side);
+        for (uint8_t i = 0; i < p.count && i < 6; ++i) {
+            auto &m = p.mons[i];
+            m.hp     = m.maxHp;
+            m.status = 0;
+            for (uint8_t s = 0; s < 4; ++s) {
+                const Gen1MoveData *mv = gen1Move(m.moves[s]);
+                m.pp[s] = mv ? mv->pp : 0;
+            }
+        }
+    }
+
+    awaitingAccept_ = false;
+    peerReady_      = true;
+    remoteId_       = fromId;
+    pendingRemoteAction_ = false;
+    phase_          = Phase::WAIT_ACTION;
+    handleFaints();
+    appendLog("Battle begins!");
+    char wlog[40];
+    snprintf(wlog, sizeof(wlog), "Vs %.12s",
+             peerTbName_[0] ? peerTbName_ : "trainer");
+    appendLog(wlog);
+
+    // Ship a turn-0 UPDATE immediately so the client renders the initial
+    // board even before either side has acted.
+    serverAuthSendUpdate();
+
+    dirty_ = true;
+    Serial.printf("[MMB] server-auth ACCEPT(1) from=0x%08X name=%s "
+                  "count=%u seed=0x%08X\n",
+                  (unsigned)fromId, peerTbName_,
+                  (unsigned)pendingClientParty_.count,
+                  (unsigned)rngSeed);
+}
+
+void MonsterMeshTextBattle::serverAuthOnActionV2Pkt(uint32_t fromId,
+                                                    const uint8_t *buf, size_t len)
+{
+    if (len < BATTLELINK_HDR_SIZE + TB_ACTION_BYTES) return;
+    const BattlePacket *pkt = (const BattlePacket *)buf;
+    if (pkt->sessionId() != session_) return;
+    if (fromId != remoteId_) return;
+
+    uint8_t turn, actionType, index, lastAckedSeq;
+    if (!tbUnpackAction(pkt->payload, len - BATTLELINK_HDR_SIZE,
+                        turn, actionType, index, lastAckedSeq)) return;
+
+    // ACK piggyback: clear unackedUpdate_ if the client confirmed our seq.
+    if (unackedUpdate_ && lastAckedSeq == updateSeq_) {
+        unackedUpdate_ = false;
+    }
+
+    // Ignore action for the wrong turn (idempotent: client retransmits).
+    if (turn != (uint8_t)(engine_.turn() & 0xFF)) {
+        Serial.printf("[MMB] server-auth ACTION turn=%u (we're at %u) — "
+                      "dropping\n", turn, (unsigned)(engine_.turn() & 0xFF));
+        return;
+    }
+
+    if (actionType == 2 /* flee */) {
+        engine_.forfeit(1, engineLogCb, this);
+        appendLog("Opponent fled.");
+        phase_ = Phase::FINISHED;
+        serverAuthSendUpdate();
+        return;
+    }
+
+    engine_.submitAction(1, actionType, index);
+    pendingRemoteAction_ = true;
+    lastRecvMs_ = millis();
+}
+
+void MonsterMeshTextBattle::serverAuthOnStateRequestPkt(uint32_t fromId,
+                                                        const uint8_t *buf, size_t len)
+{
+    if (len < BATTLELINK_HDR_SIZE + TB_STATE_REQUEST_BYTES) return;
+    const BattlePacket *pkt = (const BattlePacket *)buf;
+    if (pkt->sessionId() != session_) return;
+    if (fromId != remoteId_) return;
+    uint8_t lastAppliedSeq = 0;
+    tbUnpackStateRequest(pkt->payload, len - BATTLELINK_HDR_SIZE, lastAppliedSeq);
+    Serial.printf("[MMB] server-auth STATE_REQUEST from=0x%08X "
+                  "client_lastApplied=%u our_updateSeq=%u\n",
+                  (unsigned)fromId, lastAppliedSeq, (unsigned)updateSeq_);
+    serverAuthSendFullState();
+}
+
+void MonsterMeshTextBattle::serverAuthRetransmit(uint32_t nowMs)
+{
+    // CHALLENGE retransmit until ACCEPT arrives or tries exhausted.
+    if (awaitingAccept_) {
+        if (nowMs - lastChallengeMs_ >= TB_CHALLENGE_RESEND_MS) {
+            if (challengeTries_ >= TB_CHALLENGE_MAX_TRIES) {
+                appendLog("No response — cancelled.");
+                phase_ = Phase::FINISHED;
+                awaitingAccept_ = false;
+                dirty_ = true;
+                return;
+            }
+            serverAuthSendChallenge();
+        }
+        return;
+    }
+
+    // UPDATE retransmit until client acks via ACTION_V2.lastAckedSeq.
+    if (unackedUpdate_ && lastUpdateLen_ > 0 &&
+        (nowMs - lastUpdateSendMs_) >= TB_UPDATE_RESEND_MS) {
+        transport_.queueSend(lastUpdateBuf_, lastUpdateLen_);
+        lastUpdateSendMs_ = nowMs;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLIENT helpers — stubs in P2; fleshed out in P3.
+// ─────────────────────────────────────────────────────────────────────────────
+void MonsterMeshTextBattle::clientAuthOnChallengePkt(uint32_t fromId,
+                                                     const uint8_t *buf, size_t len)
+{
+    (void)fromId; (void)buf; (void)len;
+    // P3: stash sender party + name, show overlay.
+}
+void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len)
+{
+    (void)buf; (void)len;
+    // P3: parse flags, apply to ClientState, re-hash, ACK.
+}
+void MonsterMeshTextBattle::clientAuthOnFullStatePkt(const uint8_t *buf, size_t len)
+{
+    (void)buf; (void)len;
+    // P4: overwrite ClientState authoritatively.
+}
+void MonsterMeshTextBattle::clientAuthSendAccept(bool accepted)
+{
+    (void)accepted;
+    // P3: emit ACCEPT(accepted, ourParty, ourName).
+}
+void MonsterMeshTextBattle::clientAuthSendActionV2(uint8_t actionType, uint8_t index)
+{
+    (void)actionType; (void)index;
+    // P3: emit ACTION_V2 with lastAppliedUpdateSeq_ as ACK.
+}
+void MonsterMeshTextBattle::clientAuthSendStateRequest()
+{
+    // P4: emit STATE_REQUEST with lastAppliedUpdateSeq_.
+}
+void MonsterMeshTextBattle::clientAuthRetransmit(uint32_t nowMs)
+{
+    (void)nowMs;
+    // P3: ACCEPT retransmit until first UPDATE; ACTION_V2 retransmit until UPDATE for turn+1.
 }
