@@ -1394,8 +1394,8 @@ void MonsterMeshTextBattle::serverAuthSendUpdate()
     pkt->setSessionId(session_);
     pkt->seq = ++updateSeq_;
 
-    uint8_t flags = TB_UPD_HP | TB_UPD_PP | TB_UPD_SWITCH | TB_UPD_STATUS |
-                    TB_UPD_BENCH;
+    uint16_t flags = TB_UPD_HP | TB_UPD_PP | TB_UPD_SWITCH | TB_UPD_STATUS |
+                     TB_UPD_BENCH | TB_UPD_FX;
     bool finished = (engine_.result() != Gen1BattleEngine::Result::ONGOING);
     if (finished) flags |= TB_UPD_RESULT;
 
@@ -1418,7 +1418,8 @@ void MonsterMeshTextBattle::serverAuthSendUpdate()
 
     size_t w = 0;
     pkt->payload[w++] = (engine_.turn() & 0xFF);
-    pkt->payload[w++] = flags;
+    pkt->payload[w++] = (flags >> 8) & 0xFF;
+    pkt->payload[w++] =  flags       & 0xFF;
     pkt->payload[w++] = (h24 >> 16) & 0xFF;
     pkt->payload[w++] = (h24 >>  8) & 0xFF;
     pkt->payload[w++] =  h24        & 0xFF;
@@ -1493,6 +1494,44 @@ void MonsterMeshTextBattle::serverAuthSendUpdate()
         pkt->payload[w++] = (uint8_t)cmActive.spcBoost;
         pkt->payload[w++] = (uint8_t)cmActive.accBoost;
         pkt->payload[w++] = (uint8_t)cmActive.evaBoost;
+    }
+    if (flags & TB_UPD_FX) {
+        // Per active mon + per side: visible Gen-1 FX state. Order:
+        //   wire 0 = client (engine P1), wire 1 = server (engine P0).
+        static const uint8_t wireToEng[2] = { 1, 0 };
+        for (uint8_t ws = 0; ws < 2; ++ws) {
+            const auto &party = engine_.party(wireToEng[ws]);
+            const auto &m     = party.mons[party.active];
+            pkt->payload[w++] = m.sleepTurns;
+            pkt->payload[w++] = m.confuseTurns;
+            pkt->payload[w++] = (m.substituteHp >> 8) & 0xFF;
+            pkt->payload[w++] =  m.substituteHp       & 0xFF;
+            uint8_t mf = 0;
+            if (m.mustRecharge)         mf |= 1u << 0;
+            if (m.flinched)             mf |= 1u << 1;
+            if (m.thrashing)            mf |= 1u << 2;
+            if (m.rageActive)           mf |= 1u << 3;
+            if (m.transformed)          mf |= 1u << 4;
+            if (m.chargingSlot != 0xFF) mf |= 1u << 5;
+            pkt->payload[w++] = mf;
+            uint8_t ff = 0;
+            if (party.reflect)     ff |= 1u << 0;
+            if (party.lightScreen) ff |= 1u << 1;
+            if (party.mist)        ff |= 1u << 2;
+            if (party.focused)     ff |= 1u << 3;
+            pkt->payload[w++] = ff;
+            pkt->payload[w++] = party.reflectTurns;
+            pkt->payload[w++] = party.lightScreenTurns;
+        }
+        // Client-side only: disabled move + trap counters (the opponent
+        // doesn't need to know exactly which slot is disabled — only the
+        // owner's UI uses these to grey out the disabled move and the
+        // switch option when wrapped).
+        const auto &cp2 = engine_.party(1);
+        const auto &cm2 = cp2.mons[cp2.active];
+        pkt->payload[w++] = cm2.disabledSlot;
+        pkt->payload[w++] = cm2.disabledTurns;
+        pkt->payload[w++] = cm2.trapTurns;
     }
 
     size_t pktLen = BATTLELINK_HDR_SIZE + w;
@@ -1769,7 +1808,7 @@ void MonsterMeshTextBattle::clientAuthSendAccept(bool accepted)
 // state. Wire side 0 = us (engine P0), wire side 1 = server (engine P1).
 void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len)
 {
-    if (len < BATTLELINK_HDR_SIZE + 5) return;
+    if (len < BATTLELINK_HDR_SIZE + 6) return;  // turn(1)+flags(2)+hash(3)
     const BattlePacket *pkt = (const BattlePacket *)buf;
     if (pkt->sessionId() != session_) return;
 
@@ -1782,11 +1821,12 @@ void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len
     }
 
     size_t r = 0;
-    uint8_t turn  = pkt->payload[r++];
-    uint8_t flags = pkt->payload[r++];
-    uint8_t h0 = pkt->payload[r++];
-    uint8_t h1 = pkt->payload[r++];
-    uint8_t h2 = pkt->payload[r++];
+    uint8_t  turn   = pkt->payload[r++];
+    uint16_t flags  = ((uint16_t)pkt->payload[r] << 8) | pkt->payload[r + 1];
+    r += 2;
+    uint8_t  h0 = pkt->payload[r++];
+    uint8_t  h1 = pkt->payload[r++];
+    uint8_t  h2 = pkt->payload[r++];
     uint32_t serverHash = ((uint32_t)h0 << 16) |
                           ((uint32_t)h1 <<  8) |
                                      h2;
@@ -1879,6 +1919,43 @@ void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len
             m.spcBoost = (int8_t)b[3];
             m.accBoost = (int8_t)b[4];
             m.evaBoost = (int8_t)b[5];
+        }
+    }
+    if (flags & TB_UPD_FX) {
+        // Wire 0 = us (engine P0); wire 1 = server (engine P1).
+        // 8 bytes per side: sleepTurns, confuseTurns, substituteHp(2 BE),
+        // monFlags, fieldFlags, reflectTurns, lightScreenTurns.
+        for (uint8_t ws = 0; ws < 2; ++ws) {
+            const uint8_t *p = take(8); if (!p) return;
+            auto &party = engine_.party(ws);
+            auto &m     = party.mons[party.active];
+            m.sleepTurns      = p[0];
+            m.confuseTurns    = p[1];
+            m.substituteHp    = ((uint16_t)p[2] << 8) | p[3];
+            uint8_t mf = p[4];
+            m.mustRecharge = (mf & (1u << 0)) != 0;
+            m.flinched     = (mf & (1u << 1)) != 0;
+            m.thrashing    = (mf & (1u << 2)) != 0;
+            m.rageActive   = (mf & (1u << 3)) != 0;
+            m.transformed  = (mf & (1u << 4)) != 0;
+            // Bit 5 (chargingSlot) is informational for the UI; engine
+            // tracks the actual slot index, so we don't restore that here.
+            uint8_t ff = p[5];
+            party.reflect     = (ff & (1u << 0)) != 0;
+            party.lightScreen = (ff & (1u << 1)) != 0;
+            party.mist        = (ff & (1u << 2)) != 0;
+            party.focused     = (ff & (1u << 3)) != 0;
+            party.reflectTurns     = p[6];
+            party.lightScreenTurns = p[7];
+        }
+        // Client-side disabled-move + trap counters.
+        const uint8_t *dis = take(3); if (!dis) return;
+        auto &mp2 = engine_.party(0);
+        if (mp2.count) {
+            auto &m = mp2.mons[mp2.active];
+            m.disabledSlot  = dis[0];
+            m.disabledTurns = dis[1];
+            m.trapTurns     = dis[2];
         }
     }
     bool needSwitch = (flags & TB_UPD_NEED_PLAYER_SWITCH) != 0;

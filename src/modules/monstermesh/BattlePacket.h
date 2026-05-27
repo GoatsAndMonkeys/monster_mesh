@@ -62,16 +62,9 @@ enum class PktType : uint8_t {
 
     // UPDATE: server → client. After each executeTurn the server ships only
     // the fields that changed plus a 3-byte board hash. Layout:
-    //   [0]=turn  [1]=flags  [2..4]=boardHash24 (low 3 B of FNV1a)
-    //   conditional sections appended in flag order:
-    //     bit0 hp     : [hp0:2][hp1:2]
-    //     bit1 pp     : [pp0..pp3:4]   (CLIENT's active mon only)
-    //     bit2 switch : [active0:1][active1:1]
-    //     bit3 status : [status0:1][status1:1]
-    //     bit4 result : [result:1]   (client POV: 0=ongoing 1=youWin
-    //                                 2=youLose 3=draw 4=fled)
-    //     bit5 log    : [numLines:1] then n×[msgId:1][argCount:1][args...]
-    //     bit6 needPlayerSwitch : no bytes (control bit)
+    //   [0]=turn  [1..2]=flags (uint16 BE)  [3..5]=boardHash24 (FNV1a low24)
+    //   conditional sections appended in flag order — see TbUpdateFlag enum
+    //   for full layout per bit.
     TEXT_BATTLE_UPDATE = 0x66,
 
     // ACTION: client → server. Fixed 4-byte payload:
@@ -196,17 +189,17 @@ static constexpr uint32_t TB_UPDATE_RESEND_MS     = 3000;
 static constexpr uint32_t TB_ACTION_RESEND_MS     = 3000;
 static constexpr uint32_t TB_NO_TRAFFIC_TIMEOUT_MS = 30000;
 
-// UPDATE flag bits (BattlePacket.payload[1] of TEXT_BATTLE_UPDATE). Order
-// in this enum doubles as the order of conditional sections in the packed
-// payload — keep additions append-only.
-enum TbUpdateFlag : uint8_t {
-    TB_UPD_HP                = 1 << 0,
-    TB_UPD_PP                = 1 << 1,
-    TB_UPD_SWITCH            = 1 << 2,
-    TB_UPD_STATUS            = 1 << 3,
-    TB_UPD_RESULT            = 1 << 4,
-    TB_UPD_LOG               = 1 << 5,
-    TB_UPD_NEED_PLAYER_SWITCH = 1 << 6,
+// UPDATE flag bits (TEXT_BATTLE_UPDATE payload[1..2] — BIG-ENDIAN uint16).
+// Order in this enum doubles as the order of conditional sections in the
+// packed payload — keep additions append-only.
+enum TbUpdateFlag : uint16_t {
+    TB_UPD_HP                = 1u << 0,
+    TB_UPD_PP                = 1u << 1,
+    TB_UPD_SWITCH            = 1u << 2,
+    TB_UPD_STATUS            = 1u << 3,
+    TB_UPD_RESULT            = 1u << 4,
+    TB_UPD_LOG               = 1u << 5,
+    TB_UPD_NEED_PLAYER_SWITCH = 1u << 6,
     // CLIENT's full party state — HP+status+PP for every slot + per-stat
     // boost stages. Lets the switch menu show accurate HP / status / PP
     // for bench mons (would otherwise be stuck at the values frozen in
@@ -218,7 +211,23 @@ enum TbUpdateFlag : uint8_t {
     //   [atkBoost:i1][defBoost:i1][spdBoost:i1][spcBoost:i1]
     //   [accBoost:i1][evaBoost:i1]
     // Worst case (6 mons): 1 + 6*7 + 6 = 49 bytes.
-    TB_UPD_BENCH             = 1 << 7,
+    TB_UPD_BENCH             = 1u << 7,
+    // Battle FX — per-active-mon counters + per-side field effects.
+    // Visible Gen-1 UX: substitute bar, sleep / confuse / trap counters,
+    // disabled move slot, must-recharge / thrashing, reflect / light
+    // screen / mist screens with turn counts.
+    // Section layout when set:
+    //   per side s in {0=client, 1=server} (14 bytes):
+    //     [sleepTurns:1][confuseTurns:1]
+    //     [substituteHp:2 BE]
+    //     [monFlags:1]   // bit0=mustRecharge bit1=flinched bit2=thrashing
+    //                    //  bit3=rageActive  bit4=transformed bit5=charging
+    //     [fieldFlags:1] // bit0=reflect bit1=lightScreen bit2=mist bit3=focused
+    //     [reflectTurns:1][lightScreenTurns:1]
+    //   client-side only (3 bytes):
+    //     [disabledSlot:1][disabledTurns:1][trapTurns:1]
+    // Total = 2×7 + 3 = 17 bytes.
+    TB_UPD_FX                = 1u << 8,
 };
 
 // Client-POV result codes (TEXT_BATTLE_UPDATE result byte / FULL_STATE [2]).
