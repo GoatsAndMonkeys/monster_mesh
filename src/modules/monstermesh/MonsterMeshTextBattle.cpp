@@ -1644,18 +1644,37 @@ void MonsterMeshTextBattle::serverAuthSendUpdate()
         pkt->payload[w++] = r;
     }
     if (flags & TB_UPD_LOG) {
-        pkt->payload[w++] = numLogLines;
-        // Lines are oldest→newest from the circular buffer.
+        // Reserve room for BENCH (≤49 B) + FX (≤19 B) that follow LOG —
+        // both write unconditionally without their own bounds checks, so
+        // if LOG fills close to the limit they'd scribble past
+        // pkt->payload[196] into adjacent stack memory and crash the
+        // deck. Cap the log section to leave at least 70 B free.
+        const size_t kPostLogReserve = 70;
+        size_t logBudgetEnd = (BATTLELINK_MAX_PAYLOAD > kPostLogReserve)
+                                 ? (BATTLELINK_MAX_PAYLOAD - kPostLogReserve)
+                                 : 0;
+        // Patch numLogLines AFTER we know how many we actually fit, since
+        // the count drives the client-side parser. Without this patch the
+        // client would expect 6 lines but find 3, run off the buffer,
+        // and bail without applying BENCH/FX.
+        size_t countSlot = w;
+        pkt->payload[w++] = 0;
+        uint8_t shippedLines = 0;
         for (uint8_t i = 0; i < numLogLines; ++i) {
             uint8_t idx = (logHead_ + LOG_LINES - logFill_ + i) % LOG_LINES;
-            // Raw-string log: [len:1][bytes...]
             size_t llen = strnlen(log_[idx], LOG_WIDTH);
-            if (w + 1 + llen > BATTLELINK_MAX_PAYLOAD) break;
+            if (w + 1 + llen > logBudgetEnd) break;
             pkt->payload[w++] = (uint8_t)llen;
             memcpy(pkt->payload + w, log_[idx], llen);
             w += llen;
+            shippedLines++;
         }
-        // Once shipped, clear so we don't ship the same lines next turn.
+        pkt->payload[countSlot] = shippedLines;
+        // Lines that didn't fit stay in the log buffer? — no, simpler to
+        // drop the whole buffer; rarely matters in practice since the
+        // truncated lines are usually low-priority "engine emitted N
+        // status messages in one turn" overflow. Keep the existing
+        // clear semantics so logFill_ resets after each UPDATE.
         logFill_ = 0; logHead_ = 0;
     }
     if (flags & TB_UPD_BENCH) {

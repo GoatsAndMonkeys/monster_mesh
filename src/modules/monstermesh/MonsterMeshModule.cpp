@@ -3341,15 +3341,17 @@ int32_t MonsterMeshModule::runOnce()
             textBattle_.setEndPrompt("");
         }
         textBattle_.tick(millis());
-        // Repaint on dirty (normal case) OR once every 3 s as a
-        // recovery sweep so any LVGL/Meshtastic intrusion that snuck
-        // past our flush_cb park gets overwritten without us doing a
-        // full repaint on every 50 ms tick (which caused the screen
-        // to flicker visibly and contended the spiLock hard enough to
-        // crash the deck during a battle).
+        // Repaint on dirty (normal case) OR every 500 ms as a recovery
+        // sweep so Meshtastic UI intrusions clear in under a second.
+        // 3 s was visibly too long (user could read incoming chat lines
+        // overlaid on the battle screen); 50 ms (always-redraw) flickered
+        // and crashed from spiLock contention. 500 ms is the sweet
+        // spot — 2 Hz repaint is invisible to the eye, doesn't starve
+        // the LoRa thread for spiLock, and overwrites intruders fast
+        // enough that they barely register.
         uint32_t nowTb = millis();
         if (textBattle_.dirty() ||
-            (nowTb - lastTbRecoveryDrawMs_ >= 3000)) {
+            (nowTb - lastTbRecoveryDrawMs_ >= 500)) {
             if (g_deviceUiLgfx) {
                 concurrency::LockGuard g(spiLock);
                 textBattle_.render(g_deviceUiLgfx);
