@@ -964,7 +964,9 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
                     clientAuthSendActionV2(1 /*SWITCH*/, switchCursor_);
                 } else {
                     engine_.submitAction(0, 1 /*SWITCH*/, switchCursor_);
-                    if (mode_ == Mode::NETWORKED) sendAction(1, switchCursor_);
+                    if (mode_ == Mode::NETWORKED && role_ == Role::LEGACY) {
+                        sendAction(1, switchCursor_);
+                    }
                 }
                 phase_ = Phase::WAIT_REMOTE;
             }
@@ -1032,7 +1034,11 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
                 clientAuthSendActionV2(0 /*USE_MOVE*/, 0xFE /*STRUGGLE*/);
             } else {
                 engine_.submitAction(0, 0 /*USE_MOVE*/, 0xFE /*STRUGGLE*/);
-                if (mode_ == Mode::NETWORKED) sendAction(0, 0xFE);
+                // Server-auth: client doesn't listen on the legacy ACTION
+                // wire; UPDATE conveys whatever happened post-resolve.
+                if (mode_ == Mode::NETWORKED && role_ == Role::LEGACY) {
+                    sendAction(0, 0xFE);
+                }
             }
             phase_ = Phase::WAIT_REMOTE;
             return;
@@ -1050,7 +1056,9 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
             clientAuthSendActionV2(0 /*USE_MOVE*/, cursor_);
         } else {
             engine_.submitAction(0, 0 /*USE_MOVE*/, cursor_);
-            if (mode_ == Mode::NETWORKED) sendAction(0, cursor_);
+            if (mode_ == Mode::NETWORKED && role_ == Role::LEGACY) {
+                sendAction(0, cursor_);
+            }
         }
         phase_ = Phase::WAIT_REMOTE;
         return;
