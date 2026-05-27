@@ -306,6 +306,20 @@ private:
     uint8_t  lastAppliedUpdateSeq_   = 0;
     bool     clientNeedsFullState_   = false;
 
+    // CLIENT: between ACCEPT-tx and first UPDATE-rx, retransmit ACCEPT on
+    // the same 4 s cadence the server uses for CHALLENGE. Cleared on the
+    // first applied UPDATE. Prevents the deadlock where the server's last
+    // CHALLENGE retransmit lost contact with our ACCEPT.
+    bool     awaitingFirstUpdate_    = false;
+    uint32_t lastAcceptSendMs_       = 0;
+
+    // CLIENT: current turn tracker. We never call engine_.executeTurn, so
+    // engine_.turn() stays at 0 forever on the client. The server reports
+    // the current turn in every UPDATE; we mirror it here so ACTION_V2
+    // packets carry the right turn number for the server's
+    // "this is for the open turn" check.
+    uint8_t  clientTurn_             = 0;
+
     // SERVER helpers.
     void serverAuthSendChallenge();
     void serverAuthOnAcceptPkt(uint32_t fromId,

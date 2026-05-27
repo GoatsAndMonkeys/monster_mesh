@@ -280,9 +280,11 @@ void MonsterMeshTextBattle::exit()
     phase_ = Phase::IDLE;
     role_  = Role::LEGACY;
     awaitingAccept_ = false;
+    awaitingFirstUpdate_ = false;
     unackedUpdate_  = false;
     challengeTries_ = 0;
     clientActionType_ = 0xFF;
+    clientTurn_ = 0;
     clientNeedsFullState_ = false;
     dirty_ = true;
 }
@@ -1318,9 +1320,10 @@ void MonsterMeshTextBattle::drawHeader(lgfx::LGFX_Device *g)
         const char *tag = (role_ == Role::SERVER) ? "MMB-S"
                         : (role_ == Role::CLIENT) ? "MMB-C"
                                                   : "LoRa";
+        unsigned t = (role_ == Role::CLIENT) ? (unsigned)clientTurn_
+                                              : (unsigned)engine_.turn();
         g->printf("%s vs %.6s  T%u", tag,
-                  peerTbName_[0] ? peerTbName_ : "?",
-                  engine_.turn());
+                  peerTbName_[0] ? peerTbName_ : "?", t);
     } else {
         g->printf("Roguelike  T%u",  engine_.turn());
     }
@@ -1875,6 +1878,19 @@ void MonsterMeshTextBattle::clientAuthOnChallengePkt(uint32_t fromId,
     if (nameLen > TB_MAX_NAME_LEN) nameLen = TB_MAX_NAME_LEN;
     if (len < (size_t)BATTLELINK_HDR_SIZE + 2 + nameLen + TB_PARTY_MIN_BYTES) return;
 
+    // Duplicate CHALLENGE arriving after we've already ACCEPTed — server's
+    // CHALLENGE-retransmit ran longer than our ACCEPT made it back, or
+    // both arrived in the same cycle. Re-emit ACCEPT and don't reset
+    // state.
+    if (mode_ != Mode::OFF && role_ == Role::CLIENT &&
+        awaitingFirstUpdate_ && pkt->sessionId() == session_) {
+        Serial.printf("[MMB] CHALLENGE re-rx for our active session "
+                      "(0x%04X) — re-emitting ACCEPT\n",
+                      (unsigned)session_);
+        clientAuthSendAccept(true);
+        return;
+    }
+
     mode_     = Mode::NETWORKED;
     role_     = Role::CLIENT;
     phase_    = Phase::WAIT_CHALLENGE_OVERLAY;
@@ -1924,16 +1940,25 @@ void MonsterMeshTextBattle::clientAuthSendAccept(bool accepted)
 
     size_t payloadLen = 2 + nameLen + TB_PARTY_MIN_BYTES;
     transport_.queueSend(buf, BATTLELINK_HDR_SIZE + payloadLen);
+    lastAcceptSendMs_ = millis();
 
     if (!accepted) {
         appendLog("Declined.");
         phase_ = Phase::FINISHED;
+        awaitingFirstUpdate_ = false;
         return;
     }
 
-    // Init engine_ with both parties so the existing renderer has the
-    // static data it needs (maxHp, move tables, nicknames). We never call
-    // executeTurn — UPDATEs mutate engine_.party() fields directly.
+    // Retransmit path: engine already started, just re-emit the wire
+    // packet so the server gets it if the first ACCEPT was lost.
+    if (awaitingFirstUpdate_) {
+        Serial.printf("[MMB] server-auth ACCEPT(1) re-tx\n");
+        return;
+    }
+
+    // First-time path: init engine_ with both parties so the existing
+    // renderer has the static data it needs (maxHp, move tables, nicknames).
+    // We never call executeTurn — UPDATEs mutate engine_.party() fields.
     engine_.start(pendingMyParty_, pendingServerParty_, /*rngSeed*/0);
     for (uint8_t side = 0; side < 2; ++side) {
         auto &p = engine_.party(side);
@@ -1949,6 +1974,7 @@ void MonsterMeshTextBattle::clientAuthSendAccept(bool accepted)
     }
 
     phase_ = Phase::WAIT_REMOTE;   // await first UPDATE
+    awaitingFirstUpdate_ = true;
     appendLog("Battle begins!");
     lastRecvMs_ = millis();
     dirty_ = true;
@@ -1962,6 +1988,8 @@ void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len
     if (len < BATTLELINK_HDR_SIZE + 6) return;  // turn(1)+flags(2)+hash(3)
     const BattlePacket *pkt = (const BattlePacket *)buf;
     if (pkt->sessionId() != session_) return;
+    // First UPDATE proves the server got our ACCEPT — stop retransmitting it.
+    awaitingFirstUpdate_ = false;
 
     // Idempotent dedupe: same seq already applied → still ACK so server
     // can clear unackedUpdate_, but don't reapply state.
@@ -1973,6 +2001,7 @@ void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len
 
     size_t r = 0;
     uint8_t  turn   = pkt->payload[r++];
+    clientTurn_ = turn;   // mirror so ACTION_V2 carries the right turn
     uint16_t flags  = ((uint16_t)pkt->payload[r] << 8) | pkt->payload[r + 1];
     r += 2;
     uint8_t  h0 = pkt->payload[r++];
@@ -2208,10 +2237,9 @@ void MonsterMeshTextBattle::clientAuthSendActionV2(uint8_t actionType, uint8_t i
     pkt->type = (uint8_t)PktType::TEXT_BATTLE_ACTION_V2;
     pkt->setSessionId(session_);
     pkt->seq = 0;
-    // Server-auth turn is tracked by the server; client snapshots last-
-    // applied UPDATE's turn (from engine.turn() if engine started, else 0).
-    uint8_t curTurn = (uint8_t)(engine_.turn() & 0xFF);
-    tbPackAction(pkt->payload, curTurn, actionType, index,
+    // Use clientTurn_ (mirrored from each UPDATE) — engine_.turn() never
+    // advances on the client since we don't call executeTurn.
+    tbPackAction(pkt->payload, clientTurn_, actionType, index,
                  lastAppliedUpdateSeq_);
     transport_.queueSend(buf, BATTLELINK_HDR_SIZE + TB_ACTION_BYTES);
     if (actionType != 0xFE) {  // 0xFE = pure-ACK sentinel
@@ -2236,6 +2264,13 @@ void MonsterMeshTextBattle::clientAuthSendStateRequest()
 
 void MonsterMeshTextBattle::clientAuthRetransmit(uint32_t nowMs)
 {
+    // ACCEPT retransmit until first UPDATE lands. Matches the server's
+    // CHALLENGE retransmit cadence so a single lost ACCEPT doesn't lock
+    // us in WAIT_REMOTE for the full 30 s no-traffic timeout.
+    if (awaitingFirstUpdate_ &&
+        (nowMs - lastAcceptSendMs_) >= TB_CHALLENGE_RESEND_MS) {
+        clientAuthSendAccept(true);
+    }
     // ACTION_V2 retransmit while waiting for next UPDATE.
     if (clientActionType_ != 0xFF &&
         (nowMs - lastClientActionSendMs_) >= TB_ACTION_RESEND_MS) {
