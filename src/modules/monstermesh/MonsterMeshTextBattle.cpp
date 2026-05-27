@@ -1569,13 +1569,11 @@ void MonsterMeshTextBattle::serverAuthSendUpdate()
     uint8_t board[80];
     size_t blen = packClientStateFromEngine(board);
     uint32_t h24 = tbBoardHash24(board, blen);
-    // Diagnostic: dump the hash-input buffer so we can compare against
-    // what the client recomputes. If the bytes differ, that's where the
-    // desync source is.
-    Serial.printf("[MMB] server board (blen=%u h=0x%06X): ",
-                  (unsigned)blen, (unsigned)h24);
-    for (size_t i = 0; i < blen; ++i) Serial.printf("%02X ", board[i]);
-    Serial.printf("\n");
+    // Heavy server-side buffer dump removed — was producing ~150 B of
+    // serial output PER UPDATE, which over 27+ turns saturated the
+    // USB-CDC and probably contributed to a watchdog reset. The client
+    // still dumps its own board on hash mismatch, which is rare enough
+    // to be diagnostic without being lethal.
 
     uint8_t buf[BATTLELINK_MAX_PKT];
     memset(buf, 0, sizeof(buf));
