@@ -678,7 +678,9 @@ class Screen : public concurrency::OSThread
         bool wifi = false;
         bool system = false;
         bool home = false;
-        bool clock = false;
+        // Pen-test Pikachu build: hide the clock / bearings / position frames
+        // by default — the user wants Warwalker + battle frames front-and-center.
+        bool clock = true;
 #ifndef USE_EINK
         bool nodelist = false;
 #endif
@@ -688,8 +690,8 @@ class Screen : public concurrency::OSThread
         bool nodelist_distance = false;
 #endif
 #if HAS_GPS
-        bool nodelist_bearings = false;
-        bool gps = false;
+        bool nodelist_bearings = true;
+        bool gps = true;
 #endif
         bool lora = false;
         bool show_favorites = false;

@@ -66,7 +66,15 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     virtual ~MonsterMeshModule() {}
 
     // Which channel we use for MonsterMesh traffic
+    // Channel index for MonsterMesh broadcasts. Default = 1, but
+    // ensureMonsterMeshChannel() may pick a different index at boot if
+    // channel 1 is already in use by a user-configured channel — we
+    // prefer to add MonsterMesh as an additional channel rather than
+    // overwrite anything. All TX/RX paths reference mmChannel_ at
+    // runtime; the static constant is preserved as a default literal
+    // for header-only consumers (none currently use it as a value).
     static constexpr uint8_t MONSTERMESH_CHANNEL = 1;
+    uint8_t mmChannel_ = MONSTERMESH_CHANNEL;
 
     // Is the emulator view currently active (vs Meshtastic UI)?
     bool isEmulatorActive()  const { return emulatorActive_; }
@@ -196,6 +204,12 @@ public:
     uint32_t lastKeyMs_ = 0;
     void handleKeyFromLVGL(uint8_t c);
     void handleKeyPress(uint8_t ascii);
+    // Called by the LVGL kb hook when the user types Y+Enter while an MMT
+    // challenger window is armed. Locks this device into the receiver
+    // ("slave") role so it doesn't need to wait for TEXT_BATTLE_START to
+    // know it's the challengee — needed because that START packet can be
+    // lost over MQTT QoS 0.
+    void onLocalYReply();
     void toggleSound();
     void adjustVolume(int8_t delta);
     void adjustBrightness(int8_t delta);
@@ -263,6 +277,12 @@ public:
     // terminal-fn lambda can call it (terminal_ is private otherwise).
     void challengePeerByShortName(const char *peerShort);
 
+    // Server-authoritative challenge — single CHALLENGE packet carries our
+    // party (no DM / party-exchange round trip). Receiver-side overlay
+    // activates automatically on inbound CHALLENGE. Terminal command:
+    //   `mmb2 <short_name>` or `mmt2 <short_name>`
+    void challengePeerByShortNameV2(const char *peerShort);
+
     // Fill `buf` with a multi-line daycare status report (newline-separated).
     // Used by the terminal `daycare` command.
     void daycareStatusString(char *buf, size_t bufLen);
@@ -272,7 +292,22 @@ public:
     const char *getSetupStatus() const { return setupStatus_; }
     // RAW mode: set joypad directly from bitmask (bypasses press/release timer)
     void setJoypadDirect(uint8_t mask) { joypadState_ = mask; kbMask_ = 0; }
+    // Phone-originated outbound DM sniff: called from MeshService::handleToRadio
+    // BEFORE sendToMesh. Unicast outbound from phone never reaches MeshModule
+    // callModules (Router::sendLocal only re-dispatches broadcasts), so this is
+    // the only place we can intercept a "MMB ON" typed in the phone DM chat.
+    void sniffPhoneOutboundDM(meshtastic_MeshPacket *p);
 private:
+    // Publish a broadcast packet to MQTT only (skip LoRa iface->send). Used
+    // by the beacon-response feature: a remote deck triggers reply with
+    // DaycareBeacon.requestResponse=1; we echo back beacon + NodeInfo via
+    // the broker without consuming LoRa airtime on every deck.
+    // p is a router-allocated packet with decoded payload + portnum + channel
+    // already set. This helper encrypts in place, calls mqtt->onSend with
+    // both versions, and releases both copies.
+    void publishMqttOnlyBroadcast(meshtastic_MeshPacket *p);
+
+public:
 
     // Joypad state
     volatile uint8_t joypadState_ = 0;
@@ -410,6 +445,19 @@ private:
     volatile bool pendingReplyBeacon_ = false;
     uint32_t lastReplyBeaconMs_ = 0;
 
+    // Set true just before forceBeacon() when the beacon is user-triggered
+    // (boot, manual `beacon`/`bc`). The setSendBeacon callback reads this
+    // and stuffs DaycareBeacon::requestResponse so peers know to reply
+    // MQTT-only. Cleared after one beacon goes out.
+    volatile bool nextBeaconRequestsResponse_ = false;
+
+    // Set in handleReceived when an incoming beacon's requestResponse flag
+    // is true. runOnce on the LoRa thread builds + publishes our reciprocal
+    // beacon and NodeInfo via MQTT only — no LoRa fan-out. Stores the
+    // requesting peer's node id so we can rate-limit per-peer if needed.
+    volatile uint32_t pendingMqttResponseTo_ = 0;
+    uint32_t lastMqttResponseMs_ = 0;
+
     // ── MMB direct-party-exchange protocol ──────────────────────────────
     // Beacon-derived opponent parties were producing self-fights when both
     // T-Decks ran the same SAV (or when the neighbor table had stale data).
@@ -428,6 +476,20 @@ private:
     volatile uint32_t mmbPartyRxFrom_    = 0;
     Gen1Party         mmbOppParty_       = {};
     volatile bool     mmbOppPartyReady_  = false;
+    // Retransmit state: keeps party chunks publishing every ~5 s until the
+    // peer signals receipt (mmbOppPartyReady_ or battle launch) or the
+    // overall window elapses. Needed because the MQTT bridge is QoS 0 and
+    // a peer's brief WiFi outage drops chunks silently.
+    uint32_t          mmbPartyTxLastMs_  = 0;
+    uint32_t          mmbPartyTxStartMs_ = 0;
+    uint8_t           mmbPartyTxAttempts_ = 0;
+    static constexpr uint32_t MMB_PARTY_RETRY_INTERVAL_MS = 5000;
+    // Bumped from 30s to 90s on 2026-05-20: deck-to-deck testing showed
+    // 6 retransmits (= 30s) wasn't enough — observed mask=0x1D (4 of 5
+    // chunks) after 6 attempts, missing one specific chunk. Broker drops
+    // are stochastic so we need more attempts (18 = 90s) to fill 5 slots
+    // with high probability.
+    static constexpr uint32_t MMB_PARTY_RETRY_TIMEOUT_MS  = 90000;
     // Chunk reassembly buffer — Gen1Party = 404 bytes, with 100 bytes per
     // chunk that's 5 chunks. 8 * 100 = 800 bytes max. Lazy-allocated in
     // PSRAM on first incoming chunk so it doesn't take heap from the emu

@@ -95,6 +95,7 @@ class MonsterMeshTerminal {
         beaconCtx_ = ctx;
     }
 
+
     // `mmt` (no args) lists peers we've recently heard a daycare beacon
     // from. Module fills the buffer with newline-separated lines.
     typedef void (*MmtListFn)(void *ctx, char *buf, size_t bufLen);
@@ -140,6 +141,16 @@ class MonsterMeshTerminal {
     void setMmtChallengeFn(MmtChallengeFn fn, void *ctx) {
         mmtFn_ = fn;
         mmtCtx_ = ctx;
+    }
+
+    // Server-authoritative PvP entry: `mmb2 <short>`. Module resolves
+    // the peer's short_name and calls textBattle_.startServerAuthAsInitiator
+    // — single CHALLENGE packet carries our party so the receiver loads
+    // the battle screen instantly on accept.
+    typedef void (*Mmb2ChallengeFn)(void *ctx, const char *peerShortName);
+    void setMmb2ChallengeFn(Mmb2ChallengeFn fn, void *ctx) {
+        mmb2Fn_ = fn;
+        mmb2Ctx_ = ctx;
     }
 
     // Hook for `loc e4 fight` — module runs a 5-trainer Indigo Plateau
@@ -264,6 +275,8 @@ class MonsterMeshTerminal {
     void               *e4FightCtx_    = nullptr;
     MmtChallengeFn      mmtFn_         = nullptr;
     void               *mmtCtx_        = nullptr;
+    Mmb2ChallengeFn     mmb2Fn_        = nullptr;
+    void               *mmb2Ctx_       = nullptr;
 
     // ── BBS gym discovery (Phase C) ─────────────────────────────────────────
     // Small cache of gyms heard via the last `bbs` probe. Capacity is a

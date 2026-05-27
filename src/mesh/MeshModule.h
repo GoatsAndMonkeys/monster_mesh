@@ -85,6 +85,12 @@ class MeshModule
     virtual bool isRequestingFocus();                          // Checked by screen, when regenerating frameset
     virtual bool interceptingKeyboardInput() { return false; } // Can screen use keyboard for nav, or is module handling input?
 #endif
+
+    // Public read accessor for the module's debug name — Screen.cpp uses
+    // this to pick a per-module indicator icon by name. Kept inline so
+    // we don't have to ship a new .o for callers.
+    const char *getName() const { return name; }
+
   protected:
     const char *name;
 

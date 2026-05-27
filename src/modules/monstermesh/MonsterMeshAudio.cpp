@@ -1,5 +1,7 @@
 #include "MonsterMeshAudio.h"
 #include "variant.h"
+#include "main.h" // for audioThread
+#include "AudioThread.h"
 
 MonsterMeshAudio *MonsterMeshAudio::instance_ = nullptr;
 
@@ -26,6 +28,30 @@ bool MonsterMeshAudio::begin() {
     // Initialize APU
     memset(&apuCtx_, 0, sizeof(apuCtx_));
     minigb_apu_audio_init(&apuCtx_);
+
+    // Tear down any pre-existing I2S driver. Meshtastic's notification
+    // AudioThread uses I2S_NUM_1 routed to the SAME GPIO pins as us
+    // (DAC_I2S_BCK/WS/DOUT). When a DM ringtone plays, the ESP32 GPIO
+    // matrix gets repointed at port 1; our subsequent port 0 install
+    // succeeds but the pins still drive port 1 → silent emu after
+    // terminal use. Uninstalling BOTH ports frees the pins so our
+    // i2s_set_pin claim below actually takes effect.
+    //
+    // NOTE: do NOT add i2s_stop / vTaskDelay around these — that combo
+    // crashed the device on ROM-load-after-battle on b387 (see logs:
+    // device reset right after "save loaded" line, before any further
+    // emulator log). driver_uninstall is sufficient.
+    // Stop Meshtastic's ringtone AudioThread first if it's currently playing
+    // — its underlying I2S DMA on port 1 won't fully release until its driver
+    // is actually torn down by AudioOutputI2S. Without stopping it, our
+    // uninstall returns success but the GPIO matrix still routes to port 1.
+#ifdef HAS_I2S
+    if (audioThread && audioThread->isPlaying()) {
+        audioThread->stop();
+    }
+#endif
+    i2s_driver_uninstall(I2S_NUM_0);
+    i2s_driver_uninstall(I2S_NUM_1);
 
     // Configure I2S for audio output
     i2s_config_t i2s_config = {};
@@ -65,7 +91,13 @@ bool MonsterMeshAudio::begin() {
     i2s_zero_dma_buffer(I2S_NUM_0);
 
     running_ = true;
-    Serial.printf("[AUDIO] started: %dHz, 16-bit stereo\n", AUDIO_SAMPLE_RATE);
+    // Defensive: ensure the freshly-started audio is unmuted. The mic-button
+    // toggleMute() path (RAW-mode kb poll) can fire on an early bus glitch
+    // right at emulator start, which used to leave the player muted with no
+    // obvious indication.
+    muted_ = false;
+    Serial.printf("[AUDIO] started: %dHz, 16-bit stereo, vol=%u mute=0\n",
+                  AUDIO_SAMPLE_RATE, (unsigned)volume_);
     return true;
 }
 

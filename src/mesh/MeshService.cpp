@@ -196,6 +196,16 @@ void MeshService::handleToRadio(meshtastic_MeshPacket &p)
     p.rx_time = getValidTime(RTCQualityFromNet); // Record the time the packet arrived from the phone
                                                  // (so we update our nodedb for the local node)
 
+    // MonsterMesh: sniff phone-outbound DMs (e.g. "MMB ON") here, before
+    // sendToMesh. Unicast TX from phone never reaches MeshModule::callModules
+    // (Router::sendLocal only redispatches broadcasts), so this is the only
+    // place a phone-typed "MMB ON" can be observed by the module. Only
+    // wired when the MonsterMeshModule itself is compiled in.
+#if defined(T_DECK) && !MESHTASTIC_EXCLUDE_MONSTERMESH
+    extern void mmSniffPhoneOutboundDM(meshtastic_MeshPacket *p);
+    mmSniffPhoneOutboundDM(&p);
+#endif
+
     // Send the packet into the mesh
     DEBUG_HEAP_BEFORE;
     auto a = packetPool.allocCopy(p);

@@ -5,6 +5,7 @@
 #include "MeshService.h"
 #include "Router.h"
 #include "NodeDB.h"
+#include "mesh/Default.h"
 #include "mesh/Channels.h"
 #include "mesh/generated/meshtastic/portnums.pb.h"
 #include "input/InputBroker.h"
@@ -16,6 +17,10 @@
 
 #include "PowerFSM.h"
 #include "MonsterMeshAudio.h"
+#if !MESHTASTIC_EXCLUDE_MQTT
+#include "mqtt/MQTT.h"
+#endif
+#include "modules/NodeInfoModule.h"
 #include "PokemonData.h"
 #include "Gen1Species.h"
 #include "LordRoutes.h"
@@ -27,6 +32,7 @@
 #include "gauntlet/Gen1MinimalStats.h"
 #include "showdown_gen1_moves.h"
 #include "RadioLibInterface.h"
+#include "modules/NodeInfoModule.h"  // for periodic NodeInfo on MM channel
 #if HAS_TFT
 #include "graphics/view/TFT/Themes.h"
 #endif
@@ -122,6 +128,34 @@ extern bool initWifi();
 
 MonsterMeshModule *monsterMeshModule = nullptr;
 
+// Called from MeshService::handleToRadio for every TEXT_MESSAGE_APP unicast
+// the phone hands us, BEFORE it's sent. This is the only place a phone-typed
+// "MMB ON" DM can be observed — Router::sendLocal only re-dispatches broadcasts
+// through the module pipeline, so unicast outbound DMs never reach
+// MeshModule::callModules / MonsterMeshModule::handleReceived.
+static bool mmContainsIgnoreCase(const char *hay, size_t hlen,
+                                 const char *ndl, size_t nlen)
+{
+    if (nlen == 0 || hlen < nlen) return false;
+    for (size_t i = 0; i + nlen <= hlen; ++i) {
+        size_t j = 0;
+        for (; j < nlen; ++j) {
+            char a = hay[i + j];
+            char b = ndl[j];
+            if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
+            if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
+            if (a != b) break;
+        }
+        if (j == nlen) return true;
+    }
+    return false;
+}
+
+void mmSniffPhoneOutboundDM(meshtastic_MeshPacket *p)
+{
+    if (monsterMeshModule && p) monsterMeshModule->sniffPhoneOutboundDM(p);
+}
+
 // Weak default — device-ui provides the real implementation when present
 extern "C" __attribute__((weak)) void monstermesh_set_toggle_cb(void (*cb)(void)) { (void)cb; }
 
@@ -211,6 +245,16 @@ int MonsterMeshModule::handleInputEvent(const InputEvent *event)
 {
     if (!event) return 0;
 
+    // b445: wake the screen on EVERY keyboard event MM sees, including the
+    // ones we don't intercept (which then fall through to LVGL → terminal
+    // textarea). b444's fix in handleKeyPress only fired for events MM
+    // actually consumed (ALT, emu/browser, text-battle); typing in the
+    // MonsterMesh terminal goes straight to LVGL, so handleKeyPress is
+    // never called and the screen blanked while the user was typing.
+    if (event->kbchar != 0 || event->inputEvent == INPUT_BROKER_ANYKEY) {
+        powerFSM.trigger(EVENT_INPUT);
+    }
+
     // Always process Ctrl+E regardless of emulator state.
     // Share the global ALT-fire debounce window with the I2C poll and the
     // KEY-mode peek so a single press doesn't fire the handler twice
@@ -245,7 +289,8 @@ int MonsterMeshModule::handleInputEvent(const InputEvent *event)
         return 0;
     }
 
-    // Trackball events → viewport scroll
+    // Trackball events → viewport scroll (emulator only — the file browser
+    // is meant to be driven by W/S per user preference, not trackball).
     if (event->inputEvent == INPUT_BROKER_UP) {
         viewportDelta_--;
         return 0;
@@ -262,19 +307,149 @@ int MonsterMeshModule::handleInputEvent(const InputEvent *event)
 
 void MonsterMeshModule::ensureMonsterMeshChannel()
 {
-    // No-op if channel 1 already exists. The user owns the PSK setup —
-    // they configured it as the MonsterMesh chat channel and we just ride
-    // along (same path daycare beacons use).
-    auto &ch = channels.getByIndex(MONSTERMESH_CHANNEL);
-    if (ch.role == meshtastic_Channel_Role_DISABLED ||
-        strlen(ch.settings.name) == 0) {
-        // Only write if the slot is completely empty — first-boot setup.
+    // Auto-provision a "MonsterMesh" channel with a baked-in AES128 PSK +
+    // MQTT bridge so every node flashed with this firmware can talk to
+    // every other one without any phone-app setup. Privacy from accidental
+    // third parties only — anyone with the firmware binary can derive the
+    // PSK.
+    //
+    // Strategy:
+    //   1. If a channel named "MonsterMesh" already exists at any index,
+    //      use it as-is (user may have customized PSK / settings).
+    //   2. Else find the first DISABLED slot starting at index 1 and add
+    //      MonsterMesh there. We never overwrite a user-configured slot.
+    //   3. As a last resort if all 8 slots are taken, log a warning and
+    //      bail; user has to free a slot or merge manually.
+    // 16-byte AES128 PSK = ASCII "MonsterMesh!2024" — matches the PSK
+    // already configured on user's existing T-Decks so new flashes
+    // interop with the existing fleet without any phone-app setup.
+    static const uint8_t MM_PSK[16] = {
+        'M', 'o', 'n', 's', 't', 'e', 'r', 'M',
+        'e', 's', 'h', '!', '2', '0', '2', '4'
+    };
+    // Bump channels_count to 8 if needed so the auto-provision slot is a
+    // real channelFile entry, not the malloc'd stub channels::getByIndex
+    // returns for out-of-range indices. Without this, fresh devices whose
+    // NVS only has 1 channel (LongFast) get their auto-provision silently
+    // dropped, leaving anyMqttEnabled() false and MQTT never connecting.
+    if (channelFile.channels_count < 8) {
+        for (uint32_t i = channelFile.channels_count; i < 8; ++i) {
+            memset(&channelFile.channels[i], 0, sizeof(channelFile.channels[i]));
+            channelFile.channels[i].index = i;
+            channelFile.channels[i].role = meshtastic_Channel_Role_DISABLED;
+        }
+        channelFile.channels_count = 8;
+        LOG_INFO("[MonsterMesh] extended channelFile.channels_count to 8\n");
+    }
+    int existingIdx = -1;
+    int freeIdx = -1;
+    for (int i = 0; i < 8; ++i) {
+        auto &c = channels.getByIndex(i);
+        if (c.role != meshtastic_Channel_Role_DISABLED &&
+            strcmp(c.settings.name, "MonsterMesh") == 0) {
+            existingIdx = i;
+            break;
+        }
+        if (freeIdx < 0 && i >= 1 &&
+            (c.role == meshtastic_Channel_Role_DISABLED ||
+             strlen(c.settings.name) == 0)) {
+            freeIdx = i;
+        }
+    }
+    if (existingIdx >= 0) {
+        mmChannel_ = (uint8_t)existingIdx;
+        Serial.printf("[MonsterMesh] reusing existing MonsterMesh channel at index %d\n",
+                      existingIdx);
+    } else if (freeIdx < 0) {
+        Serial.println("[MonsterMesh] no free channel slot — MonsterMesh channel not provisioned");
+    } else {
+        // Modify channelFile.channels[freeIdx] directly. setChannel() copies
+        // a meshtastic_Channel into channelFile.channels[c.index] — so c.index
+        // MUST equal freeIdx, otherwise setChannel writes into the wrong slot
+        // and the auto-provision is silently lost.
+        auto &ch = channels.getByIndex(freeIdx);
+        ch.index = freeIdx;
         ch.role = meshtastic_Channel_Role_SECONDARY;
+        ch.has_settings = true;  // anyMqttEnabled() ignores channels without this
         snprintf(ch.settings.name, sizeof(ch.settings.name), "MonsterMesh");
-        ch.settings.psk.size = 1;
-        ch.settings.psk.bytes[0] = 0; // user-driven PSK setup expected
+        ch.settings.psk.size = sizeof(MM_PSK);
+        memcpy(ch.settings.psk.bytes, MM_PSK, sizeof(MM_PSK));
+        ch.settings.uplink_enabled   = true;
+        ch.settings.downlink_enabled = true;
         channels.setChannel(ch);
-        Serial.println("[MonsterMesh] channel 1 default-named 'MonsterMesh' (set PSK in app)");
+        mmChannel_ = (uint8_t)freeIdx;
+        // Persist channelFile so anyMqttEnabled() is consistent across reboots
+        // and the MQTT module sees the bridge as enabled on first runOnce.
+        nodeDB->saveToDisk(SEGMENT_CHANNELS);
+        Serial.printf("[MonsterMesh] auto-provisioned MonsterMesh channel at index %d "
+                      "(+ PSK + MQTT bridge)\n", freeIdx);
+    }
+
+    // Canonicalize moduleConfig.mqtt — force the MonsterMesh private EMQX
+    // broker on every boot so devices that came from earlier firmware with
+    // mqtt.meshtastic.org credentials auto-migrate without the user touching
+    // the phone app. Anything stuck in NVS gets healed in one cycle.
+    bool mqttDirty = false;
+    const char *desiredAddr     = default_mqtt_address;
+    const char *desiredUser     = default_mqtt_username;
+    const char *desiredPass     = default_mqtt_password;
+    const char *desiredRoot     = "kanto";
+    const bool  desiredTls      = true;
+    // MQTT must be enabled on the device-side (not phone-proxy) so the deck
+    // connects to the EMQX broker directly via WiFi. The phone app's "Send
+    // via Phone" toggle silently flips proxy_to_client_enabled=true, after
+    // which the deck no longer attempts a direct broker connect and we see
+    // "MQTT not connected, queue packet" with zero [MQTT] logs. Heal both.
+    if (!moduleConfig.mqtt.enabled) {
+        Serial.printf("[MonsterMesh] mqtt.enabled canonicalized: 0 -> 1\n");
+        moduleConfig.mqtt.enabled = true;
+        mqttDirty = true;
+    }
+    if (moduleConfig.mqtt.proxy_to_client_enabled) {
+        Serial.printf("[MonsterMesh] mqtt.proxy_to_client_enabled canonicalized: 1 -> 0\n");
+        moduleConfig.mqtt.proxy_to_client_enabled = false;
+        mqttDirty = true;
+    }
+    if (!moduleConfig.mqtt.encryption_enabled) {
+        Serial.printf("[MonsterMesh] mqtt.encryption_enabled canonicalized: 0 -> 1\n");
+        moduleConfig.mqtt.encryption_enabled = true;
+        mqttDirty = true;
+    }
+    if (strcmp(moduleConfig.mqtt.address, desiredAddr) != 0) {
+        Serial.printf("[MonsterMesh] mqtt.address canonicalized: '%s' -> '%s'\n",
+                      moduleConfig.mqtt.address, desiredAddr);
+        strncpy(moduleConfig.mqtt.address, desiredAddr,
+                sizeof(moduleConfig.mqtt.address) - 1);
+        moduleConfig.mqtt.address[sizeof(moduleConfig.mqtt.address) - 1] = '\0';
+        mqttDirty = true;
+    }
+    if (strcmp(moduleConfig.mqtt.username, desiredUser) != 0) {
+        strncpy(moduleConfig.mqtt.username, desiredUser,
+                sizeof(moduleConfig.mqtt.username) - 1);
+        moduleConfig.mqtt.username[sizeof(moduleConfig.mqtt.username) - 1] = '\0';
+        mqttDirty = true;
+    }
+    if (strcmp(moduleConfig.mqtt.password, desiredPass) != 0) {
+        strncpy(moduleConfig.mqtt.password, desiredPass,
+                sizeof(moduleConfig.mqtt.password) - 1);
+        moduleConfig.mqtt.password[sizeof(moduleConfig.mqtt.password) - 1] = '\0';
+        mqttDirty = true;
+    }
+    if (moduleConfig.mqtt.tls_enabled != desiredTls) {
+        Serial.printf("[MonsterMesh] mqtt.tls_enabled canonicalized: %d -> %d\n",
+                      (int)moduleConfig.mqtt.tls_enabled, (int)desiredTls);
+        moduleConfig.mqtt.tls_enabled = desiredTls;
+        mqttDirty = true;
+    }
+    if (strcmp(moduleConfig.mqtt.root, desiredRoot) != 0) {
+        Serial.printf("[MonsterMesh] mqtt.root canonicalized: '%s' -> '%s'\n",
+                      moduleConfig.mqtt.root, desiredRoot);
+        strncpy(moduleConfig.mqtt.root, desiredRoot, sizeof(moduleConfig.mqtt.root) - 1);
+        moduleConfig.mqtt.root[sizeof(moduleConfig.mqtt.root) - 1] = '\0';
+        mqttDirty = true;
+    }
+    if (mqttDirty) {
+        nodeDB->saveToDisk(SEGMENT_MODULECONFIG);
     }
 }
 
@@ -289,20 +464,35 @@ bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
     if (p->decoded.portnum == meshtastic_PortNum_PRIVATE_APP) {
         return true;
     }
-    // T4: peek at every TEXT_MESSAGE_APP DM addressed to us.
-    //   - sender path: parse Y/N reply to our outstanding mmt challenge.
-    //   - receiver path: detect incoming "Wanna battle?" DM and arm the
-    //     mmtChallengerPeer_ window so a matching TEXT_BATTLE_START
-    //     can auto-launch the receiver-side battle.
+    // T4: peek at every TEXT_MESSAGE_APP DM addressed to us OR sent BY us.
+    //   - inbound DM to us: parse Y/N reply to our outstanding mmt challenge,
+    //     or detect an "MMB ON" / "battle in MonsterMesh" challenge phrase
+    //     and arm the mmtChallengerPeer_ window so a matching
+    //     TEXT_BATTLE_START can auto-launch the receiver-side battle.
+    //   - outbound DM from us: if the user types "MMB ON" in their phone
+    //     to a peer, arm mmtAwaitingReplyFrom_ so the peer's Y reply
+    //     actually kicks off our side of the PvP. Without this hook, an
+    //     "MMB ON" challenge sent from the phone (instead of the terminal
+    //     `mmt @peer` command) silently went nowhere on the sender side.
     // handleReceived always returns CONTINUE so the standard text
     // pipeline still delivers the DM to the user's phone client.
     if (p->decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
-        nodeDB && p->to == nodeDB->getNodeNum() && !isBroadcast(p->to)) {
-        return true;
+        nodeDB && !isBroadcast(p->to)) {
+        // Inbound DM to us.
+        if (p->to == nodeDB->getNodeNum()) return true;
+        // Outbound DM from us. Phone-originated packets arrive at
+        // handleReceived with from=0 (not yet stamped to our node ID); by
+        // the time they reach the router rebroadcast they have from=self.
+        // Accept both so the "MMB ON" hook can see phone-typed DMs.
+        if (p->from == 0 || p->from == nodeDB->getNodeNum()) return true;
     }
     // (BBS_REPLY arrives via PRIVATE_APP, already accepted above.)
     return false;
 }
+
+// Forward decls for the minimal-party PvP wire helpers (definitions below).
+static void packPartyMin(const Gen1Party &src, uint8_t out[109]);
+static void unpackPartyMin(const uint8_t in[109], Gen1Party &dst);
 
 // ── handleReceived() — incoming mesh packet ─────────────────────────────────
 
@@ -343,6 +533,31 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             if ((PktType)bp->type == PktType::TEXT_BATTLE_START &&
                 mp.decoded.payload.size == BATTLELINK_HDR_SIZE + 14 &&
                 mp.from != nodeDB->getNodeNum()) {
+                LOG_INFO("[MonsterMesh] PvP: TEXT_BATTLE_START RX from 0x%08X "
+                         "(tb=%d recv=%d init=%d) — gate check\n",
+                         (unsigned)mp.from, (int)textBattleActive_,
+                         (int)pendingMmtBattleAsReceiver_,
+                         (int)pendingMmtBattleAsInitiator_);
+                // Already-armed receiver path (e.g. self-armed via Y press
+                // with fallback seed=1): UPDATE the seed/session from the
+                // real START so both engines run identical RNG. Without
+                // this the engines desync on the first turn.
+                if (pendingMmtBattleAsReceiver_ &&
+                    mp.from == mmtBattlePeer_ && !textBattleActive_) {
+                    uint32_t newSeed = ((uint32_t)bp->payload[0] << 24) |
+                                       ((uint32_t)bp->payload[1] << 16) |
+                                       ((uint32_t)bp->payload[2] <<  8) |
+                                                 bp->payload[3];
+                    if (newSeed != mmtBattleSeed_) {
+                        LOG_INFO("[MonsterMesh] PvP: receiver already armed; "
+                                 "updating seed 0x%08X->0x%08X session->0x%04X\n",
+                                 (unsigned)mmtBattleSeed_, (unsigned)newSeed,
+                                 (unsigned)bp->sessionId());
+                        mmtBattleSeed_    = newSeed;
+                        mmtBattleSession_ = bp->sessionId();
+                    }
+                    return ProcessMessage::CONTINUE;
+                }
                 if (!textBattleActive_ && !pendingMmtBattleAsReceiver_ &&
                     !pendingMmtBattleAsInitiator_) {
                     uint32_t seed = ((uint32_t)bp->payload[0] << 24) |
@@ -361,8 +576,55 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                     mmbOppPartyReady_  = false;
                     mmbPartyChunkMask_ = 0;
                     mmbPartyTotal_     = 0;
+                    mmbPartyTxStartMs_ = millis();
+                    mmbPartyTxLastMs_  = 0;
+                    mmbPartyTxAttempts_ = 0;
                     LOG_INFO("[MonsterMesh] PvP: TEXT_BATTLE_START rx from 0x%08X seed=0x%08X (party exchange armed)\n",
                              (unsigned)mp.from, (unsigned)seed);
+                } else {
+                    // Stale receiver state from a prior failed attempt can wedge
+                    // us into permanently ignoring new STARTs. If we have a
+                    // pending receiver flag older than 45s and no chunks have
+                    // arrived, reset and re-arm with this new START.
+                    bool staleReceiver = pendingMmtBattleAsReceiver_ &&
+                        mmtBattleReceivePendingMs_ != 0 &&
+                        (millis() - mmtBattleReceivePendingMs_) > 45000 &&
+                        !mmbOppPartyReady_;
+                    if (staleReceiver) {
+                        LOG_WARN("[MonsterMesh] PvP: clearing stale receiver "
+                                 "state (%ums old), re-arming from new START\n",
+                                 (unsigned)(millis() - mmtBattleReceivePendingMs_));
+                        pendingMmtBattleAsReceiver_  = false;
+                        pendingMmtBattleAsInitiator_ = false;
+                        mmbPartyTxTarget_  = 0;
+                        mmbPartyRxFrom_    = 0;
+                        mmbOppPartyReady_  = false;
+                        mmbPartyChunkMask_ = 0;
+                        mmbPartyTotal_     = 0;
+                        // Re-fire the arm path with this packet's seed/session.
+                        uint32_t seed2 = ((uint32_t)bp->payload[0] << 24) |
+                                         ((uint32_t)bp->payload[1] << 16) |
+                                         ((uint32_t)bp->payload[2] <<  8) |
+                                                   bp->payload[3];
+                        mmtBattlePeer_    = mp.from;
+                        mmtBattleSeed_    = seed2;
+                        mmtBattleSession_ = bp->sessionId();
+                        pendingMmtBattleAsReceiver_  = true;
+                        mmtBattleReceivePendingMs_   = millis();
+                        mmbPartyTxTarget_  = mp.from;
+                        mmbPartyRxFrom_    = mp.from;
+                        mmbPartyTxStartMs_ = millis();
+                        mmbPartyTxLastMs_  = 0;
+                        mmbPartyTxAttempts_ = 0;
+                        LOG_INFO("[MonsterMesh] PvP: re-armed from new START "
+                                 "seed=0x%08X\n", (unsigned)seed2);
+                    } else {
+                        LOG_WARN("[MonsterMesh] PvP: START gate BLOCKED "
+                                 "tb=%d recv=%d init=%d — dropping\n",
+                                 (int)textBattleActive_,
+                                 (int)pendingMmtBattleAsReceiver_,
+                                 (int)pendingMmtBattleAsInitiator_);
+                    }
                 }
                 return ProcessMessage::CONTINUE;
             }
@@ -375,6 +637,28 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                                               mp.decoded.payload.bytes,
                                               mp.decoded.payload.size);
                 }
+                return ProcessMessage::CONTINUE;
+            }
+
+            // Server-authoritative PvP packets (0x66..0x6B). CHALLENGE may
+            // arrive when no battle is active (it triggers the CLIENT
+            // overlay); the other types must hit an active textBattle_
+            // session. Self-echo filter prevents MQTT loopback (b402 fix).
+            if (((PktType)bp->type == PktType::TEXT_BATTLE_UPDATE       ||
+                 (PktType)bp->type == PktType::TEXT_BATTLE_ACTION_V2    ||
+                 (PktType)bp->type == PktType::TEXT_BATTLE_CHALLENGE    ||
+                 (PktType)bp->type == PktType::TEXT_BATTLE_ACCEPT       ||
+                 (PktType)bp->type == PktType::TEXT_BATTLE_STATE_REQUEST||
+                 (PktType)bp->type == PktType::TEXT_BATTLE_FULL_STATE)  &&
+                mp.from != nodeDB->getNodeNum()) {
+                textBattle_.handlePacket(mp.from,
+                                          mp.decoded.payload.bytes,
+                                          mp.decoded.payload.size);
+                // If the CHALLENGE just transitioned us into the CLIENT
+                // overlay, mark the module's battle-active gate so other
+                // module-side guards (sleep, browser focus, etc.) treat
+                // this like an in-progress battle.
+                if (textBattle_.isActive()) textBattleActive_ = true;
                 return ProcessMessage::CONTINUE;
             }
 
@@ -516,12 +800,141 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             // daycare-beacon party data for the engine because identical SAVs
             // produce a self-fight and stale data can mismatch the current
             // party. Reassembled into mmbOppParty_.
-            // Accept chunks from either the formally-armed peer
-            // (mmbPartyRxFrom_, set on Y or START receipt) OR the still-armed
-            // mmtChallengerPeer_ (set the moment we saw their "battle in
-            // MonsterMesh" DM). The latter covers the race where the
-            // sender's chunks arrive before the TEXT_BATTLE_START packet
-            // does — same session, just timing.
+            //
+            // Self-arm path: TEXT_BATTLE_START is sent via channel encryption
+            // on MonsterMesh (broadcast) and can be lost by the MQTT broker at
+            // QoS 0. Chunks are PKI-DMs sent 5x and retransmitted, so they
+            // survive much better. If a chunk arrives from a peer that DM'd us
+            // a challenge in the last 10 minutes (mmtChallengerPeer_ used to
+            // be 60s, but real users take longer to reply Y), treat that as
+            // evidence the START was lost and AUTO-ARM the receiver path
+            // right now. Without this, a lost START silently drops the entire
+            // PvP attempt — the user sees nothing happen.
+            if ((PktType)bp->type == PktType::TEXT_BATTLE_PARTY &&
+                mmbPartyRxFrom_ == 0 && mmtChallengerPeer_ == mp.from &&
+                !textBattleActive_ && !pendingMmtBattleAsReceiver_ &&
+                !pendingMmtBattleAsInitiator_) {
+                LOG_WARN("[MonsterMesh] PvP: chunk from challenger 0x%08X with "
+                         "no armed session — assuming START was lost, "
+                         "auto-arming receiver\n", (unsigned)mp.from);
+                mmtBattlePeer_    = mp.from;
+                mmtBattleSeed_    = 1;  // fallback seed; engine will desync if
+                                        // real seed wasn't preserved, but
+                                        // launching is better than silence
+                mmtBattleSession_ = 0;
+                pendingMmtBattleAsReceiver_  = true;
+                mmtBattleReceivePendingMs_   = millis();
+                mmbPartyTxTarget_  = mp.from;
+                mmbPartyRxFrom_    = mp.from;
+                mmbOppPartyReady_  = false;
+                mmbPartyChunkMask_ = 0;
+                mmbPartyTotal_     = 0;
+                mmbPartyTxStartMs_ = millis();
+                mmbPartyTxLastMs_  = 0;
+                mmbPartyTxAttempts_ = 0;
+            }
+            // Mirror self-arm path: if we sent a challenge to this peer
+            // (mmtAwaitingReplyFrom_ matches) and now they're sending us
+            // chunks WITHOUT us ever receiving their Y, treat the chunks
+            // themselves as implicit acceptance. Y reply over PKI/MQTT is
+            // QoS 0 so it can be lost in transit — we observed exactly this
+            // on 2026-05-20 (Blue's Y was never ACKed but Blue still
+            // self-armed and started sending chunks). Symmetric to the
+            // receiver self-arm above.
+            if ((PktType)bp->type == PktType::TEXT_BATTLE_PARTY &&
+                mmbPartyRxFrom_ == 0 && mmtAwaitingReplyFrom_ == mp.from &&
+                !textBattleActive_ && !pendingMmtBattleAsReceiver_ &&
+                !pendingMmtBattleAsInitiator_ && terminal_.hasParty()) {
+                LOG_WARN("[MonsterMesh] PvP: chunk from awaited peer 0x%08X "
+                         "but Y reply was never received — assuming Y was "
+                         "lost, auto-arming initiator\n", (unsigned)mp.from);
+                pendingMmtAccepted_   = true;
+                pendingMmtAcceptedTx_ = true;
+                mmtAcceptedTxTarget_  = mp.from;
+                mmtAwaitingReplyFrom_ = 0;
+                mmbPartyTxTarget_   = mp.from;
+                mmbPartyRxFrom_     = mp.from;
+                mmbOppPartyReady_   = false;
+                mmbPartyChunkMask_  = 0;
+                mmbPartyTotal_      = 0;
+                mmbPartyTxStartMs_  = millis();
+                mmbPartyTxLastMs_   = 0;
+                mmbPartyTxAttempts_ = 0;
+            }
+            // Single-packet minimal party (PvP path). Same self-arm
+            // gates as the chunked path: if we get one of these from an
+            // unarmed challenger/awaited peer, treat it as implicit
+            // session arming (START or Y was lost).
+            if ((PktType)bp->type == PktType::TEXT_BATTLE_PARTY_MIN &&
+                mmbPartyRxFrom_ == 0 && mmtChallengerPeer_ == mp.from &&
+                !textBattleActive_ && !pendingMmtBattleAsReceiver_ &&
+                !pendingMmtBattleAsInitiator_) {
+                LOG_WARN("[MonsterMesh] PvP: PARTY_MIN from challenger 0x%08X "
+                         "with no armed session — auto-arming receiver\n",
+                         (unsigned)mp.from);
+                mmtBattlePeer_    = mp.from;
+                mmtBattleSeed_    = 1;
+                mmtBattleSession_ = 0;
+                pendingMmtBattleAsReceiver_  = true;
+                mmtBattleReceivePendingMs_   = millis();
+                mmbPartyTxTarget_  = mp.from;
+                mmbPartyRxFrom_    = mp.from;
+                mmbOppPartyReady_  = false;
+                mmbPartyTxStartMs_ = millis();
+                mmbPartyTxLastMs_  = 0;
+                mmbPartyTxAttempts_ = 0;
+            }
+            if ((PktType)bp->type == PktType::TEXT_BATTLE_PARTY_MIN &&
+                mmbPartyRxFrom_ == 0 && mmtAwaitingReplyFrom_ == mp.from &&
+                !textBattleActive_ && !pendingMmtBattleAsReceiver_ &&
+                !pendingMmtBattleAsInitiator_ && terminal_.hasParty()) {
+                LOG_WARN("[MonsterMesh] PvP: PARTY_MIN from awaited peer "
+                         "0x%08X — auto-arming initiator\n",
+                         (unsigned)mp.from);
+                pendingMmtAccepted_   = true;
+                pendingMmtAcceptedTx_ = true;
+                mmtAcceptedTxTarget_  = mp.from;
+                mmtAwaitingReplyFrom_ = 0;
+                mmbPartyTxTarget_   = mp.from;
+                mmbPartyRxFrom_     = mp.from;
+                mmbOppPartyReady_   = false;
+                mmbPartyTxStartMs_  = millis();
+                mmbPartyTxLastMs_   = 0;
+                mmbPartyTxAttempts_ = 0;
+            }
+            if ((PktType)bp->type == PktType::TEXT_BATTLE_PARTY_MIN &&
+                ((mmbPartyRxFrom_ != 0 && mp.from == mmbPartyRxFrom_) ||
+                 (mmtChallengerPeer_ != 0 && mp.from == mmtChallengerPeer_))) {
+                if (mp.decoded.payload.size < BATTLELINK_HDR_SIZE + 109) {
+                    LOG_WARN("[MonsterMesh] PARTY_MIN too short: %u B\n",
+                             (unsigned)mp.decoded.payload.size);
+                    return ProcessMessage::CONTINUE;
+                }
+                // Session recovery: if our START was lost and we self-armed
+                // (mmtBattleSession_=0), adopt the sender's session_id from
+                // this packet so our ACTION/HASH packets pass the sender's
+                // session filter. Without this, post-launch the engines
+                // deadlock at "Waiting for opponent..." even though both
+                // battle stations opened fine.
+                uint16_t pktSession = bp->sessionId();
+                if (mmtBattleSession_ == 0 && pktSession != 0) {
+                    LOG_INFO("[MonsterMesh] PvP: adopting session 0x%04X "
+                             "from PARTY_MIN (START was lost)\n",
+                             (unsigned)pktSession);
+                    mmtBattleSession_ = pktSession;
+                }
+                unpackPartyMin(bp->payload, mmbOppParty_);
+                mmbOppPartyReady_  = true;
+                mmbPartyRxFrom_    = 0;
+                mmbPartyChunkMask_ = 0;
+                mmbPartyTotal_     = 0;
+                LOG_INFO("[MonsterMesh] MMB PARTY_MIN RX complete from "
+                         "0x%08X count=%u session=0x%04X (1 pkt)\n",
+                         (unsigned)mp.from, (unsigned)mmbOppParty_.count,
+                         (unsigned)mmtBattleSession_);
+                return ProcessMessage::CONTINUE;
+            }
+
             if ((PktType)bp->type == PktType::TEXT_BATTLE_PARTY &&
                 ((mmbPartyRxFrom_ != 0 && mp.from == mmbPartyRxFrom_) ||
                  (mmtChallengerPeer_ != 0 && mp.from == mmtChallengerPeer_))) {
@@ -554,9 +967,16 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                     return ProcessMessage::CONTINUE;
                 memcpy(mmbPartyChunks_ + off, bp->payload + 2, dataLen);
                 mmbPartyTotal_     = partTotal;
+                uint8_t prevMask = mmbPartyChunkMask_;
                 mmbPartyChunkMask_ |= (uint8_t)(1u << partIdx);
 
                 uint8_t fullMask = (uint8_t)((1u << partTotal) - 1u);
+                LOG_INFO("[MonsterMesh] MMB chunk RX from 0x%08X "
+                         "idx=%u/%u len=%u mask=0x%02X->0x%02X full=0x%02X\n",
+                         (unsigned)mp.from, (unsigned)partIdx,
+                         (unsigned)partTotal, (unsigned)dataLen,
+                         (unsigned)prevMask, (unsigned)mmbPartyChunkMask_,
+                         (unsigned)fullMask);
                 if ((mmbPartyChunkMask_ & fullMask) == fullMask) {
                     // All chunks in — parse into Gen1Party. Sender wrote
                     // it as raw memcpy(buf, &party, sizeof(Gen1Party)).
@@ -570,6 +990,16 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                                  (unsigned)partTotal);
                     }
                     mmbPartyRxFrom_ = 0;  // done collecting
+                    // Reset the chunk-assembly buffer so the NEXT session starts
+                    // clean. Without this, mmbPartyChunkMask_ stays at fullMask
+                    // and the first chunk of the next battle short-circuits the
+                    // gate, memcpy'ing 4/5ths of the prior opponent's party
+                    // into mmbOppParty_ — symptom: PvP fights launch with
+                    // "wrong" or "missing" pokemon from the previous fight.
+                    mmbPartyChunkMask_ = 0;
+                    mmbPartyTotal_     = 0;
+                    if (mmbPartyChunks_)
+                        memset(mmbPartyChunks_, 0, MMB_PARTY_CHUNKS_BYTES);
                 }
                 return ProcessMessage::CONTINUE;
             }
@@ -644,6 +1074,15 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                     // BEACON_INTERVAL_MS broadcast.
                     pendingReplyBeacon_ = true;
                 }
+                // MQTT-only response: if this is a user-triggered beacon
+                // (boot/manual), echo a beacon + NodeInfo back via MQTT
+                // only so the requester populates their neighbor list
+                // without every deck slamming LoRa.
+                if (beacon->requestResponse) {
+                    pendingMqttResponseTo_ = beacon->nodeId;
+                    LOG_INFO("[MonsterMesh] beacon requestResponse=1 → queueing MQTT-only reply to 0x%08X\n",
+                             (unsigned)beacon->nodeId);
+                }
             } else {
                 LOG_INFO("[MonsterMesh] PRIVATE_APP not daycare beacon (type=0x%02X self=%d)\n",
                          (unsigned)beacon->type,
@@ -656,32 +1095,54 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
     // BattlePackets — handled in the PRIVATE_APP block above. Nothing to
     // do here for BBS in the text-message path.)
 
-    // T4: detect an INCOMING MMT challenge DM ("Do you want to battle in
-    // MonsterMesh? Reply Y or N.") and arm a 60 s window for the
-    // matching TEXT_BATTLE_START to auto-launch the receiver-side
-    // battle. Without this gate we'd take any 0x60 packet of the right
-    // size as a battle invite (and other-agent gauntlet/dungeon code
-    // emits stray ones).
+    // T4: detect an INCOMING MMT challenge DM. Two phrases accepted:
+    //   1. "battle in MonsterMesh"  — sent by the terminal `mmt @peer` command
+    //      via sendTextDM ("Do you want to battle in MonsterMesh? Reply Y or N.")
+    //   2. "MMB ON"  (case-insensitive) — user-friendly shorthand typed
+    //      directly into the phone DM chat. Lets you initiate a fight
+    //      without opening the on-deck terminal.
+    // Either phrase arms a 10-minute window for the matching TEXT_BATTLE_START
+    // to auto-launch the receiver-side battle. Without this gate we'd take
+    // any 0x60 packet of the right size as a battle invite (and other-agent
+    // gauntlet/dungeon code emits stray ones).
+    auto containsIgnoreCase = [](const char *hay, size_t hlen,
+                                 const char *ndl, size_t nlen) -> bool {
+        if (nlen == 0 || hlen < nlen) return false;
+        for (size_t i = 0; i + nlen <= hlen; ++i) {
+            size_t j = 0;
+            for (; j < nlen; ++j) {
+                char a = hay[i + j];
+                char b = ndl[j];
+                if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
+                if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
+                if (a != b) break;
+            }
+            if (j == nlen) return true;
+        }
+        return false;
+    };
     if (mp.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
         mp.from != 0 && mp.from != nodeDB->getNodeNum()) {
         const char *txt = (const char *)mp.decoded.payload.bytes;
         size_t      len = mp.decoded.payload.size;
-        // Quick substring match for the well-known challenge phrase.
-        // "battle in MonsterMesh" is unique enough for our purposes.
-        const char *needle = "battle in MonsterMesh";
-        size_t nlen = 21;
-        if (len >= nlen) {
-            for (size_t i = 0; i + nlen <= len; ++i) {
-                if (memcmp(txt + i, needle, nlen) == 0) {
-                    mmtChallengerPeer_     = mp.from;
-                    mmtChallengerExpireMs_ = millis() + 60000;
-                    LOG_INFO("[MonsterMesh] mmt: challenge DM from 0x%08X — armed 60s\n",
-                             (unsigned)mp.from);
-                    break;
-                }
-            }
+        bool isChallenge =
+            containsIgnoreCase(txt, len, "battle in MonsterMesh", 21) ||
+            containsIgnoreCase(txt, len, "MMB ON", 6);
+        if (isChallenge) {
+            mmtChallengerPeer_     = mp.from;
+            // 10-minute window so user has reasonable time to type Y.
+            // Originally 60s, but real chat reaction time + DeviceUI
+            // input lag routinely exceeded that and the resulting
+            // chunks were silently dropped (observed b358, 4+min Y).
+            mmtChallengerExpireMs_ = millis() + 600000;
+            LOG_INFO("[MonsterMesh] mmt: challenge DM from 0x%08X — armed 10min\n",
+                     (unsigned)mp.from);
         }
     }
+    // (Outbound "MMB ON" sniff lives in sniffPhoneOutboundDM, called from
+    //  MeshService::handleToRadio. Unicast outbound DMs from the phone never
+    //  reach this function — Router::sendLocal only re-dispatches broadcasts
+    //  through the module pipeline. See feedback_mm_unicast_tx_module_blind.md.)
 
     // T4: parse the peer's Y/N reply to our outstanding challenge.
     if (mp.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP) {
@@ -729,6 +1190,9 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 mmbOppPartyReady_   = false;
                 mmbPartyChunkMask_  = 0;
                 mmbPartyTotal_      = 0;
+                mmbPartyTxStartMs_  = millis();
+                mmbPartyTxLastMs_   = 0;
+                mmbPartyTxAttempts_ = 0;
                 LOG_INFO("[MonsterMesh] mmt: ACCEPT staged from 0x%08X (party exchange armed)\n",
                          (unsigned)mp.from);
             } else if (first == 'N' || first == 'n') {
@@ -748,11 +1212,140 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
     return ProcessMessage::CONTINUE;
 }
 
+void MonsterMeshModule::onLocalYReply()
+{
+    // Only react if a challenger window is armed AND we're not already in a
+    // PvP session. Either the user actually replied Y, or they typed a stray
+    // Y outside the challenge window (in which case mmtChallengerPeer_ is 0
+    // and we drop out silently).
+    if (mmtChallengerPeer_ == 0) return;
+    if (mmtChallengerExpireMs_ != 0 &&
+        (int32_t)(millis() - mmtChallengerExpireMs_) >= 0) {
+        LOG_INFO("[MonsterMesh] onLocalYReply: challenger window expired\n");
+        return;
+    }
+    if (textBattleActive_ || pendingMmtBattleAsReceiver_ ||
+        pendingMmtBattleAsInitiator_) {
+        return;  // already armed somehow
+    }
+    LOG_INFO("[MonsterMesh] onLocalYReply: arming as RECEIVER vs 0x%08X "
+             "(local Y detected before START arrives)\n",
+             (unsigned)mmtChallengerPeer_);
+    mmtBattlePeer_    = mmtChallengerPeer_;
+    mmtBattleSeed_    = 1;          // fallback seed; overwritten when real
+                                    // TEXT_BATTLE_START packet arrives
+    mmtBattleSession_ = 0;
+    pendingMmtBattleAsReceiver_  = true;
+    mmtBattleReceivePendingMs_   = millis();
+    mmbPartyTxTarget_  = mmtChallengerPeer_;
+    mmbPartyRxFrom_    = mmtChallengerPeer_;
+    mmbOppPartyReady_  = false;
+    mmbPartyChunkMask_ = 0;
+    mmbPartyTotal_     = 0;
+    mmbPartyTxStartMs_ = millis();
+    mmbPartyTxLastMs_  = 0;
+    mmbPartyTxAttempts_ = 0;
+}
+
+// publishMqttOnlyBroadcast — publish a broadcast packet to the MQTT broker
+// ONLY. Does NOT touch the LoRa interface.
+//
+// CRITICAL — DO NOT REPLACE THIS WITH service->sendToMesh OR router->send.
+// Both of those go through Router::send → iface->send and fan the packet out
+// over LoRa airtime as well. The whole point of the beacon-response feature
+// is that N decks can quietly ack a remote beacon via the broker without
+// every one of them slamming the LoRa airwaves. Routing the response
+// through the normal mesh send path defeats the design and turns one
+// requester beacon into N×LoRa TX bursts — exactly what we're avoiding.
+//
+// Hot rules:
+//   - Anything that flows from a `requestResponse=1` daycare beacon MUST
+//     land here, never on service->sendToMesh / router->send.
+//   - If you need to send PvP or DM traffic that does require LoRa
+//     delivery, use the normal send path. That's a different design with
+//     different airtime semantics.
+//   - Keep the throttle at the call-site (currently 30 s/peer) so even a
+//     misbehaving peer flooding request beacons can't spam the broker.
+void MonsterMeshModule::publishMqttOnlyBroadcast(meshtastic_MeshPacket *p)
+{
+#if !MESHTASTIC_EXCLUDE_MQTT
+    if (!p) return;
+    if (!mqtt || !moduleConfig.mqtt.enabled) {
+        LOG_WARN("[MonsterMesh] mqtt-only TX: MQTT disabled — dropping pkt portnum=%d\n",
+                 (int)p->decoded.portnum);
+        packetPool.release(p);
+        return;
+    }
+    if (p->from == 0) p->from = nodeDB->getNodeNum();
+    ChannelIndex chIndex = p->channel;
+    // perhapsEncode mutates p (decoded → encrypted), so snapshot a decoded
+    // copy first for mqtt->onSend which wants both.
+    meshtastic_MeshPacket *pDecoded = packetPool.allocCopy(*p);
+    auto encResult = perhapsEncode(p);
+    if (encResult != meshtastic_Routing_Error_NONE) {
+        LOG_WARN("[MonsterMesh] mqtt-only encode failed: %d\n", (int)encResult);
+        packetPool.release(pDecoded);
+        packetPool.release(p);
+        return;
+    }
+    // mqtt->onSend publishes to the broker only. We deliberately do NOT call
+    // iface->send / router->send here — see the function-level note above.
+    mqtt->onSend(*p, *pDecoded, chIndex);
+    LOG_INFO("[MonsterMesh] mqtt-only TX: portnum=%d ch=%u from=0x%08X to=0x%08X\n",
+             (int)pDecoded->decoded.portnum, (unsigned)chIndex,
+             (unsigned)p->from, (unsigned)p->to);
+    packetPool.release(pDecoded);
+    packetPool.release(p);
+#else
+    if (p) packetPool.release(p);
+#endif
+}
+
+void MonsterMeshModule::sniffPhoneOutboundDM(meshtastic_MeshPacket *p)
+{
+    if (!p || !nodeDB) return;
+    if (p->which_payload_variant != meshtastic_MeshPacket_decoded_tag) return;
+    if (p->decoded.portnum != meshtastic_PortNum_TEXT_MESSAGE_APP) return;
+    if (isBroadcast(p->to) || p->to == 0 || p->to == nodeDB->getNodeNum()) return;
+    const char *txt = (const char *)p->decoded.payload.bytes;
+    size_t      len = p->decoded.payload.size;
+    if (!mmContainsIgnoreCase(txt, len, "MMB ON", 6)) return;
+    if (mmtAwaitingReplyFrom_ == p->to) return; // already armed for this peer
+    mmtAwaitingReplyFrom_ = p->to;
+    mmtOnTxTarget_        = p->to;
+    pendingMmtOnTx_       = true;
+    LOG_INFO("[MonsterMesh] mmt: phone OUT MMB ON -> 0x%08X — armed + queuing challenge DM\n",
+             (unsigned)p->to);
+}
+
 void MonsterMeshModule::challengePeerByShortName(const char *peerShort)
 {
     if (!nodeDB || !peerShort || !peerShort[0]) {
         terminal_.printLine("mmb: empty target");
         return;
+    }
+    // Nuke any stuck PvP state from a prior failed handshake so a fresh
+    // `mmb <peer>` always restarts cleanly. Without this, a stale
+    // pendingMmtBattleAsInitiator_ from a previous attempt blocks the new
+    // session and the user has no way to recover short of a reboot.
+    if (pendingMmtBattleAsInitiator_ || pendingMmtBattleAsReceiver_ ||
+        mmbPartyTxTarget_ || mmbPartyRxFrom_) {
+        LOG_INFO("[MonsterMesh] mmb: clearing prior PvP state before new challenge "
+                 "(init=%d recv=%d txTgt=0x%08X)\n",
+                 (int)pendingMmtBattleAsInitiator_,
+                 (int)pendingMmtBattleAsReceiver_,
+                 (unsigned)mmbPartyTxTarget_);
+        pendingMmtBattleAsInitiator_ = false;
+        pendingMmtBattleAsReceiver_  = false;
+        mmbPartyTxTarget_   = 0;
+        mmbPartyRxFrom_     = 0;
+        mmbOppPartyReady_   = false;
+        mmbPartyChunkMask_  = 0;
+        mmbPartyTotal_      = 0;
+        mmbPartyTxStartMs_  = 0;
+        mmbPartyTxLastMs_   = 0;
+        mmbPartyTxAttempts_ = 0;
+        mmtBattleReceivePendingMs_ = 0;
     }
     size_t total = nodeDB->getNumMeshNodes();
     uint32_t resolved = 0;
@@ -798,6 +1391,72 @@ void MonsterMeshModule::challengePeerByShortName(const char *peerShort)
     }
 }
 
+// Server-authoritative challenge — terminal command `mmb2 <short>` /
+// `mmt2 <short>`. One CHALLENGE packet carries our party so the receiver
+// can paint the battle screen instantly on K-accept (no DM, no chunked
+// party exchange). All retransmits + state machine live in textBattle_.
+void MonsterMeshModule::challengePeerByShortNameV2(const char *peerShort)
+{
+    if (!terminal_.hasParty()) {
+        terminal_.printLine("mmb2: no party loaded — load a SAV first");
+        return;
+    }
+    if (textBattleActive_) {
+        terminal_.printLine("mmb2: already in a battle");
+        return;
+    }
+    size_t total = nodeDB->getNumMeshNodes();
+    uint32_t resolved = 0;
+    char matchedShort[12] = {};
+    for (size_t i = 0; i < total; ++i) {
+        const meshtastic_NodeInfoLite *n = nodeDB->getMeshNodeByIndex(i);
+        if (!n || !n->has_user) continue;
+        if (n->num == nodeDB->getNodeNum()) continue;
+        if (strcasecmp(n->user.short_name, peerShort) == 0) {
+            resolved = n->num;
+            strncpy(matchedShort, n->user.short_name, sizeof(matchedShort) - 1);
+            break;
+        }
+    }
+    if (resolved == 0) {
+        char buf[80];
+        snprintf(buf, sizeof(buf),
+                 "mmb2: no node '%s' in NodeDB. Try after they NodeInfo.",
+                 peerShort);
+        terminal_.printLine(buf);
+        return;
+    }
+    char buf[80];
+    snprintf(buf, sizeof(buf), "mmb2: challenging %s (server-auth)...",
+             matchedShort);
+    terminal_.printLine(buf);
+    LOG_INFO("[MonsterMesh] mmb2: v2-challenging %s = 0x%08X\n",
+             matchedShort, (unsigned)resolved);
+
+    // Our trainer name: Meshtastic short_name (per the daycare convention).
+    const char *ourShort = (owner.short_name[0] != '\0') ? owner.short_name
+                                                          : "MM";
+    textBattle_.setMyTbParty(terminal_.getParty(), ourShort);
+    textBattle_.startServerAuthAsInitiator(resolved,
+                                            terminal_.getParty(),
+                                            ourShort);
+    textBattleActive_ = true;
+#if HAS_TFT
+    lv_display_t *disp = lv_display_get_default();
+    if (disp && !savedFlushCb_) {
+        savedFlushCb_ = (void *)disp->flush_cb;
+        lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
+            lv_display_flush_ready(d);
+        });
+    }
+#endif
+    if (g_deviceUiLgfx) {
+        concurrency::LockGuard g(spiLock);
+        g_deviceUiLgfx->clearClipRect();
+        g_deviceUiLgfx->fillScreen(0x0000);
+    }
+}
+
 // Send TEXT_BATTLE_START directly from the module (not via textBattle's
 // internal sendStart) so the receiver can arm its party-RX state machine
 // before our chunks arrive. The seed lives in mmtBattleSeed_ on both
@@ -812,12 +1471,19 @@ void MonsterMeshModule::sendMmbBattleStart(uint32_t seed)
         return;
     }
     p->to = NODENUM_BROADCAST;  // BATTLE_START is broadcast on MM channel
-    p->channel = channels.getPrimaryIndex();
+    p->channel = mmChannel_;  // MonsterMesh channel — MQTT-bridged (b345)
     p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
     BattlePacket *bp = (BattlePacket *)p->decoded.payload.bytes;
     memset(bp, 0, BATTLELINK_HDR_SIZE + 14);
     bp->type = (uint8_t)PktType::TEXT_BATTLE_START;
-    bp->setSessionId((uint16_t)(millis() & 0xFFFF));
+    // Record the session_id we use for THIS battle so the engine can use
+    // the same value when we later call startNetworkedAsInitiator —
+    // otherwise sender's outgoing ACTION packets (with engine session_)
+    // mismatch what the receiver captured from this START packet and get
+    // dropped on receipt. Same value flows: module session var → START
+    // packet → receiver captures from packet → both engines pin to it.
+    mmtBattleSession_ = (uint16_t)(millis() & 0xFFFF);
+    bp->setSessionId(mmtBattleSession_);
     bp->seq = 0;
     bp->payload[0] = (seed >> 24) & 0xFF;
     bp->payload[1] = (seed >> 16) & 0xFF;
@@ -827,56 +1493,107 @@ void MonsterMeshModule::sendMmbBattleStart(uint32_t seed)
     bp->payload[5] = 0;  // party count placeholder; real party comes via chunks
     p->decoded.payload.size = BATTLELINK_HDR_SIZE + 14;
     service->sendToMesh(p);
-    LOG_INFO("[MonsterMesh] mmt: sent TEXT_BATTLE_START seed=0x%08X\n",
-             (unsigned)seed);
+    LOG_INFO("[MonsterMesh] mmt: sent TEXT_BATTLE_START seed=0x%08X session=0x%04X\n",
+             (unsigned)seed, (unsigned)mmtBattleSession_);
 }
 
-// Chunk and send our current party to a peer as TEXT_BATTLE_PARTY packets
-// (point-to-point on channel 0). Format mirrors what the matching RX code
-// in handleReceived expects: BattlePacket header, then payload[0]=partIdx,
-// payload[1]=partTotal, payload[2..]=raw Gen1Party bytes for this chunk.
-// Receiver assembles via mmbPartyChunks_ + mmbPartyChunkMask_ and once full
-// memcpy's into mmbOppParty_ then flips mmbOppPartyReady_=true so the
-// engine launch can proceed. SAFE to call from runOnce/LoRa thread.
+// Pack a Gen1Party into the 109-byte minimal PvP wire format. Strips fields
+// the engine can derive at fresh-battle start: OT names, nicknames (battle
+// UI falls back to species name), current HP / PP / status (all reset to
+// healed-and-zero), and the redundant species[] header (already in mons[].
+// species). Per-mon layout = species(1) | level(1) | dvs[2] | hpExp[2] |
+// atkExp[2] | defExp[2] | spdExp[2] | spcExp[2] | moves[4] = 18 bytes.
+// Total = 1 (count) + 6*18 = 109 B, fits in one PRIVATE_APP packet.
+static void packPartyMin(const Gen1Party &src, uint8_t out[109])
+{
+    out[0] = src.count;
+    for (uint8_t i = 0; i < 6; ++i) {
+        uint8_t *p = out + 1 + (size_t)i * 18;
+        const Gen1Pokemon &m = src.mons[i];
+        p[0] = m.species;
+        p[1] = m.level ? m.level : m.boxLevel;
+        p[2] = m.dvs[0];
+        p[3] = m.dvs[1];
+        memcpy(p +  4, m.hpExp,  2);
+        memcpy(p +  6, m.atkExp, 2);
+        memcpy(p +  8, m.defExp, 2);
+        memcpy(p + 10, m.spdExp, 2);
+        memcpy(p + 12, m.spcExp, 2);
+        memcpy(p + 14, m.moves,  4);
+    }
+}
+
+// Inverse of packPartyMin. Reconstructs a Gen1Party with zeroed names,
+// current HP=0 (initBattlePokeFromSave falls through to maxHp), status=0,
+// and PP filled from the canonical move table so initBattlePokeFromSave's
+// memcpy(dst.pp, src.pp, 4) copies the right values. species[] header is
+// rebuilt from mons[].species for any consumer that still inspects it.
+static void unpackPartyMin(const uint8_t in[109], Gen1Party &dst)
+{
+    memset(&dst, 0, sizeof(dst));
+    dst.count = in[0];
+    if (dst.count > 6) dst.count = 6;
+    for (uint8_t i = 0; i < 6; ++i) {
+        const uint8_t *p = in + 1 + (size_t)i * 18;
+        Gen1Pokemon &m = dst.mons[i];
+        m.species  = p[0];
+        m.level    = p[1];
+        m.boxLevel = p[1];
+        m.dvs[0]   = p[2];
+        m.dvs[1]   = p[3];
+        memcpy(m.hpExp,  p +  4, 2);
+        memcpy(m.atkExp, p +  6, 2);
+        memcpy(m.defExp, p +  8, 2);
+        memcpy(m.spdExp, p + 10, 2);
+        memcpy(m.spcExp, p + 12, 2);
+        memcpy(m.moves,  p + 14, 4);
+        for (uint8_t k = 0; k < 4; ++k) {
+            const Gen1MoveData *md = gen1Move(m.moves[k]);
+            m.pp[k] = md ? md->pp : 0;
+        }
+    }
+    for (uint8_t i = 0; i < 7; ++i) {
+        dst.species[i] = (i < dst.count) ? dst.mons[i].species : 0xFF;
+    }
+}
+
+// Send our current party to a peer as a single TEXT_BATTLE_PARTY_MIN packet
+// (point-to-point on the MonsterMesh channel). Replaces the older 5×100B /
+// 3×200B chunked TEXT_BATTLE_PARTY exchange for PvP — drops payload from
+// ~404 B (multi-packet) to a single 113 B PRIVATE_APP frame. Receiver path
+// in handleReceived unpacks directly into mmbOppParty_ and sets
+// mmbOppPartyReady_ in one shot. SAFE to call from runOnce/LoRa thread.
 void MonsterMeshModule::sendMmbPartyChunks(uint32_t to, const Gen1Party &party)
 {
     if (!to || !router || !service) return;
-    const uint8_t *src = (const uint8_t *)&party;
-    const size_t totalBytes = sizeof(Gen1Party);
-    // Use a smaller chunk size than the LoRa max so each encrypted packet
-    // is well under the ~237-byte LoRa limit. Earlier 194-byte chunks
-    // produced 236-byte encrypted packets that were too unreliable for
-    // bidirectional exchange on busy channels. 100 bytes → 5 chunks for
-    // a 404-byte Gen1Party → ~140-byte encrypted packets that survive.
-    const size_t CHUNK = 100;
-    uint8_t total = (uint8_t)((totalBytes + CHUNK - 1) / CHUNK);
-    if (total == 0) total = 1;
-    if (total > 8) total = 8;  // RX gate rejects > 8
-    LOG_INFO("[MonsterMesh] MMB party TX → 0x%08X count=%u total=%u chunks\n",
-             (unsigned)to, (unsigned)party.count, (unsigned)total);
-    for (uint8_t i = 0; i < total; ++i) {
-        size_t off = (size_t)i * CHUNK;
-        size_t dataLen = (off + CHUNK <= totalBytes) ? CHUNK : totalBytes - off;
-        meshtastic_MeshPacket *p = router->allocForSending();
-        if (!p) {
-            LOG_WARN("[MonsterMesh] MMB party TX: allocForSending failed at chunk %u\n",
-                     (unsigned)i);
-            return;
-        }
-        p->to = to;
-        p->channel = channels.getPrimaryIndex();
-        p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
-        BattlePacket *bp = (BattlePacket *)p->decoded.payload.bytes;
-        memset(bp, 0, BATTLELINK_HDR_SIZE);
-        bp->type = (uint8_t)PktType::TEXT_BATTLE_PARTY;
-        bp->setSessionId(0);
-        bp->seq = i;
-        bp->payload[0] = i;
-        bp->payload[1] = total;
-        memcpy(bp->payload + 2, src + off, dataLen);
-        p->decoded.payload.size = BATTLELINK_HDR_SIZE + 2 + dataLen;
-        service->sendToMesh(p);
+    meshtastic_MeshPacket *p = router->allocForSending();
+    if (!p) {
+        LOG_WARN("[MonsterMesh] MMB party TX: allocForSending failed\n");
+        return;
     }
+    p->to = to;
+    p->channel = mmChannel_;
+    p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
+    BattlePacket *bp = (BattlePacket *)p->decoded.payload.bytes;
+    memset(bp, 0, BATTLELINK_HDR_SIZE);
+    bp->type = (uint8_t)PktType::TEXT_BATTLE_PARTY_MIN;
+    // Stamp the live battle session into the packet. If the START packet
+    // was lost over MQTT, the receiver self-arms with session=0 and would
+    // otherwise emit ACTION/HASH packets with a session that mismatches
+    // ours — sender drops them as stale, never sets peerReady_, blocks at
+    // "Waiting for opponent..." forever. Carrying the session in every
+    // PARTY_MIN burst lets the receiver recover it on the first chunk
+    // that lands (PARTY_MIN is retransmitted on a timer until oppReady).
+    bp->setSessionId(mmtBattleSession_);
+    bp->seq = 0;
+    packPartyMin(party, bp->payload);
+    p->decoded.payload.size = BATTLELINK_HDR_SIZE + 109;
+    LOG_INFO("[MonsterMesh] MMB party TX → 0x%08X count=%u session=0x%04X "
+             "(min, 1 pkt, %u B payload)\n",
+             (unsigned)to, (unsigned)party.count,
+             (unsigned)mmtBattleSession_,
+             (unsigned)p->decoded.payload.size);
+    service->sendToMesh(p);
 }
 
 void MonsterMeshModule::sendTextDM(uint32_t to, const char *text)
@@ -885,7 +1602,7 @@ void MonsterMeshModule::sendTextDM(uint32_t to, const char *text)
     meshtastic_MeshPacket *p = router->allocForSending();
     if (!p) return;
     p->to = to;
-    p->channel = channels.getPrimaryIndex();
+    p->channel = mmChannel_;  // MonsterMesh channel — MQTT-bridged (b345)
     p->decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
     size_t len = strlen(text);
     if (len > sizeof(p->decoded.payload.bytes)) len = sizeof(p->decoded.payload.bytes);
@@ -1119,7 +1836,21 @@ int32_t MonsterMeshModule::runOnce()
             }, this);
         terminal_.setBeaconFn(
             [](void *ctx) {
-                static_cast<MonsterMeshModule *>(ctx)->daycare_.forceBeacon();
+                auto *self = static_cast<MonsterMeshModule *>(ctx);
+                // Manual beacon → ask peers to respond MQTT-only.
+                self->nextBeaconRequestsResponse_ = true;
+                self->daycare_.forceBeacon();
+                // Also re-emit NodeInfo on the MM channel so peers across
+                // MQTT pick up our pubkey + short_name without waiting
+                // for the 15-min periodic refresh. User-triggered
+                // beacon → user expects immediate visibility.
+                if (nodeInfoModule) {
+                    nodeInfoModule->sendOurNodeInfo(NODENUM_BROADCAST,
+                                                     false,
+                                                     self->mmChannel_);
+                    LOG_INFO("[MonsterMesh] beacon cmd: also sent NodeInfo on MM ch %u\n",
+                             (unsigned)self->mmChannel_);
+                }
             }, this);
         terminal_.setMmtListFn(
             [](void *ctx, char *buf, size_t n) {
@@ -1139,15 +1870,38 @@ int32_t MonsterMeshModule::runOnce()
                 } else {
                     MMT_APPEND("Online peers (last beacon):\n");
                     const auto *neigh = self->daycare_.getNeighbors();
+                    uint8_t shown = 0;
                     for (uint8_t i = 0; i < nc && i < 6; ++i) {
-                        const char *sn = neigh[i].shortName[0] ? neigh[i].shortName : "?";
-                        const char *gn = neigh[i].gameName[0]  ? neigh[i].gameName  : "?";
+                        // Fall back to NodeDB's short_name if the daycare
+                        // beacon arrived before the peer had its own owner
+                        // info loaded (beacon shortName would be empty
+                        // → "?"). Skip the entry entirely if NEITHER source
+                        // has a name — that means we haven't received the
+                        // peer's nodeinfo yet either, so any HB row we'd
+                        // print would be "?/?" garbage.
+                        const char *sn = neigh[i].shortName[0] ? neigh[i].shortName : nullptr;
+                        if (!sn && nodeDB) {
+                            auto *node = nodeDB->getMeshNode(neigh[i].nodeId);
+                            if (node && node->has_user && node->user.short_name[0]) {
+                                sn = node->user.short_name;
+                            }
+                        }
+                        if (!sn) continue;  // wait for both beacon + nodeinfo
+                        // Peers without a loaded party can't battle, so skip
+                        // them rather than render as "SN/?" — keeps the HB
+                        // list to actionable opponents only.
+                        if (neigh[i].partyCount == 0) continue;
+                        const char *gn = neigh[i].gameName[0] ? neigh[i].gameName : "?";
                         if (neigh[i].ngPlusTier > 0) {
                             MMT_APPEND("  %s/%s NG+%u\n",
                                        sn, gn, (unsigned)neigh[i].ngPlusTier);
                         } else {
                             MMT_APPEND("  %s/%s\n", sn, gn);
                         }
+                        shown++;
+                    }
+                    if (shown == 0) {
+                        MMT_APPEND("(waiting for peer nodeinfo...)\n");
                     }
                     MMT_APPEND("\nUsage: mmb <short_name>\n");
                 }
@@ -1177,6 +1931,11 @@ int32_t MonsterMeshModule::runOnce()
             [](void *ctx, const char *peerShort) {
                 static_cast<MonsterMeshModule *>(ctx)
                     ->challengePeerByShortName(peerShort);
+            }, this);
+        terminal_.setMmb2ChallengeFn(
+            [](void *ctx, const char *peerShort) {
+                static_cast<MonsterMeshModule *>(ctx)
+                    ->challengePeerByShortNameV2(peerShort);
             }, this);
         // BBS gym discovery probe — user-initiated.  Sends a single silent
         // BBS_PING BattlePacket on MonsterMesh channel 1 / PRIVATE_APP (port
@@ -1297,17 +2056,38 @@ int32_t MonsterMeshModule::runOnce()
             LOG_INFO("[MonsterMesh] mm-ch broadcast: %s\n", msg);
         }, this);
         daycare_.setSendBeacon([](const DaycareBeacon &beaconIn, void *ctx) {
-            (void)ctx;
             DaycareBeacon beacon = beaconIn;
             beacon.nodeId     = nodeDB->getNodeNum();
             beacon.ngPlusTier = lordCurrentNgPlusTier();
+            // Short-name fallback: if owner.short_name isn't customized
+            // (factory-fresh deck), derive a name from the NodeNum so the
+            // receiver still has a human-readable handle to use in the
+            // neighbor list. Format "T-XX" where XX = last 2 hex digits of
+            // NodeNum, leaves room for the null terminator in [5].
+            if (beacon.shortName[0] == '\0') {
+                snprintf(beacon.shortName, sizeof(beacon.shortName),
+                         "T-%02X", (unsigned)(beacon.nodeId & 0xFFu));
+            }
+            // User-triggered beacons (boot, manual `beacon`/`bc`) ask peers
+            // to reply MQTT-only. Cleared after one beacon goes out so the
+            // next periodic auto-beacon doesn't carry the request flag.
+            MonsterMeshModule *mod = static_cast<MonsterMeshModule *>(ctx);
+            beacon.requestResponse = (mod && mod->nextBeaconRequestsResponse_) ? 1 : 0;
+            if (mod) mod->nextBeaconRequestsResponse_ = false;
             meshtastic_MeshPacket *p = router->allocForSending();
             if (!p) {
                 LOG_WARN("[MonsterMesh] daycare beacon: packet alloc failed\n");
                 return;
             }
             p->to = NODENUM_BROADCAST;
-            p->channel = channels.getPrimaryIndex();
+            // Beacons used to go on the primary channel (LongFast etc.)
+            // for visibility on the public mesh. That made them invisible
+            // between two decks whose primaries diverge. Send on the
+            // MonsterMesh channel instead — every node flashed with this
+            // firmware has it (b343 auto-provisions), so the daycare
+            // neighbor table actually populates.
+            MonsterMeshModule *self = static_cast<MonsterMeshModule *>(ctx);
+            p->channel = self ? self->mmChannel_ : MONSTERMESH_CHANNEL;
             p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
             size_t sz = sizeof(DaycareBeacon);
             if (sz > sizeof(p->decoded.payload.bytes)) sz = sizeof(p->decoded.payload.bytes);
@@ -1448,6 +2228,11 @@ int32_t MonsterMeshModule::runOnce()
         probeLogged = true;
         LOG_INFO("[MonsterMesh] boot complete — emu=%d browser=%d\n",
                  (int)emulatorActive_, (int)browserActive_);
+        // One-shot channel provision now that channels.* is fully ready.
+        // Adds "MonsterMesh" channel (PSK "MonsterMesh!2024", MQTT bridge
+        // on) to the first free slot if no channel by that name exists.
+        // Never overwrites a user-configured slot.
+        ensureMonsterMeshChannel();
     }
 
     // Deferred SAV save FIRST, before we touch the radio. Saving uses SD
@@ -1594,20 +2379,20 @@ int32_t MonsterMeshModule::runOnce()
                     ejectFocused_ = true;
                     browser_.markDirty();
                     renderBrowser();
-                    return 100;
+                    return 10;
                 }
                 if (ejectFocused_) {
                     if (key == 's' || key == 'S') {
                         ejectFocused_ = false;
                         browser_.markDirty();
                         renderBrowser();
-                        return 100;
+                        return 10;
                     }
                     if (key == 'k' || key == 'K' || key == '\r' || key == '\n') {
                         ejectFocused_ = false;
                         clearCart();
                         renderBrowser();
-                        return 100;
+                        return 10;
                     }
                 }
             }
@@ -1648,6 +2433,12 @@ int32_t MonsterMeshModule::runOnce()
             // Plain Meshtastic DM — recipient sees this in their phone app
             // chat. No internal MMT: state machine; the receiver just
             // reads + replies normally. Battle-start trigger lands later.
+            //
+            // NOTE: DMs don't bridge over the Meshtastic public MQTT
+            // broker (only broadcasts on uplink-enabled channels do).
+            // So MMB across LoRa range needs a different design — see
+            // future PRIVATE_APP challenge protocol. For now MMB works
+            // within LoRa range only.
             sendTextDM(mmtOnTxTarget_,
                        "Do you want to battle in MonsterMesh? Reply Y or N.");
             LOG_INFO("[MonsterMesh] mmt challenge DM → 0x%08X\n",
@@ -1695,10 +2486,12 @@ int32_t MonsterMeshModule::runOnce()
     }
     if (pendingMmtAcceptedTx_) {
         pendingMmtAcceptedTx_ = false;
-        if (mmtAcceptedTxTarget_) {
-            sendTextDM(mmtAcceptedTxTarget_,
-                       "Battle on! Open the MonsterMesh terminal.");
-        }
+        // Suppressed: the "Open the MonsterMesh terminal." DM is redundant.
+        // Receiver's local Y press already runs onLocalYReply() which arms
+        // pendingMmtBattleAsReceiver_, and runOnce auto-launches the battle
+        // station as soon as party exchange completes — no manual terminal
+        // open required.
+        (void)mmtAcceptedTxTarget_;
     }
 
     // Event-driven daycare-XP flush to .sav. Daycare bumps its
@@ -1847,8 +2640,168 @@ int32_t MonsterMeshModule::runOnce()
     if (setupDone_ && !firstBeaconDone_ && daycare_.isActive() &&
         !emulatorActive_ && !browserActive_ && millis() > 30000) {
         firstBeaconDone_ = true;
+        nextBeaconRequestsResponse_ = true; // boot beacon asks for MQTT replies
         daycare_.forceBeacon();
-        LOG_INFO("[MonsterMesh] first daycare beacon fired (30s gate)\n");
+        LOG_INFO("[MonsterMesh] first daycare beacon fired (30s gate, requestResponse=1)\n");
+    }
+
+    // NodeInfo on the MonsterMesh channel: once on MQTT connect, then
+    // every 15 minutes thereafter while WiFi stays up.
+    //
+    // Why: PKI-encrypted DMs only decrypt on the recipient if they have
+    // the sender's pubkey cached. The pubkey rides in NodeInfo packets.
+    // If we only emit NodeInfo on the primary (LongFast) channel, peers
+    // that only subscribe to MM never get it. Re-broadcast on mmChannel_
+    // so any peer that comes online within the next 15 min picks us up.
+    {
+        static bool wifiWasConnected = false;
+        static uint32_t wifiConnectAt = 0;
+        static bool announceFired = false;
+        static uint32_t lastPeriodicNodeInfoMs = 0;
+        static constexpr uint32_t PERIODIC_NODEINFO_MS = 15UL * 60UL * 1000UL;
+#if HAS_WIFI
+        bool wifiNow = (WiFi.status() == WL_CONNECTED);
+#else
+        bool wifiNow = false;
+#endif
+        if (wifiNow && !wifiWasConnected) {
+            wifiConnectAt = millis();
+            announceFired = false;
+            LOG_INFO("[MonsterMesh] WiFi connected — NodeInfo on MM channel in 3s\n");
+        }
+        if (!wifiNow) announceFired = false;
+        wifiWasConnected = wifiNow;
+        bool baseGate = wifiNow && setupDone_ &&
+                        !emulatorActive_ && !browserActive_;
+        if (baseGate && !announceFired && wifiConnectAt &&
+            (millis() - wifiConnectAt) > 3000) {
+            announceFired = true;
+            lastPeriodicNodeInfoMs = millis();
+            if (nodeInfoModule) {
+                nodeInfoModule->sendOurNodeInfo(NODENUM_BROADCAST, false, mmChannel_);
+                LOG_INFO("[MonsterMesh] MQTT-connect: sent NodeInfo on MM channel %u\n",
+                         (unsigned)mmChannel_);
+            }
+        }
+        if (baseGate && announceFired && lastPeriodicNodeInfoMs &&
+            (millis() - lastPeriodicNodeInfoMs) > PERIODIC_NODEINFO_MS) {
+            lastPeriodicNodeInfoMs = millis();
+            if (nodeInfoModule) {
+                nodeInfoModule->sendOurNodeInfo(NODENUM_BROADCAST, false, mmChannel_);
+                LOG_INFO("[MonsterMesh] periodic NodeInfo on MM channel %u (15min refresh)\n",
+                         (unsigned)mmChannel_);
+            }
+        }
+    }
+
+    // Stuck PvP state janitor — if either pendingMmt* flag has been set for
+    // longer than MMT_PENDING_TIMEOUT_MS without progress (oppParty never
+    // assembled, textBattle never launched), the prior session is dead and
+    // is blocking new challenges. Observed 2026-05-20: Blue stayed init=1
+    // for 1100+ seconds after a partial handshake, refusing every fresh
+    // mmb challenge. Reset all the related state so a new round can land.
+    {
+        // Must exceed MMB_PARTY_RETRY_TIMEOUT_MS so the janitor doesn't wipe
+        // state mid-assembly when chunks are still arriving stochastically.
+        static constexpr uint32_t MMT_PENDING_TIMEOUT_MS = 120000;
+        uint32_t now = millis();
+        bool stale = false;
+        if (pendingMmtBattleAsReceiver_ && mmtBattleReceivePendingMs_ != 0 &&
+            (now - mmtBattleReceivePendingMs_) > MMT_PENDING_TIMEOUT_MS &&
+            !mmbOppPartyReady_ && !textBattleActive_) {
+            stale = true;
+        }
+        if (pendingMmtBattleAsInitiator_ && mmbPartyTxStartMs_ != 0 &&
+            (now - mmbPartyTxStartMs_) > MMT_PENDING_TIMEOUT_MS &&
+            !mmbOppPartyReady_ && !textBattleActive_) {
+            stale = true;
+        }
+        // Also catch the case where an initiator flag is set but no timer
+        // ever started (corruption from prior firmware revs).
+        if ((pendingMmtBattleAsInitiator_ || pendingMmtBattleAsReceiver_) &&
+            mmtBattleReceivePendingMs_ == 0 && mmbPartyTxStartMs_ == 0 &&
+            !mmbOppPartyReady_ && !textBattleActive_) {
+            // Stamp the receiver timer so we time out one cycle from now.
+            mmtBattleReceivePendingMs_ = now;
+        }
+        if (stale) {
+            LOG_WARN("[MonsterMesh] PvP janitor: clearing stuck pending state "
+                     "(init=%d recv=%d age=%ums)\n",
+                     (int)pendingMmtBattleAsInitiator_,
+                     (int)pendingMmtBattleAsReceiver_,
+                     (unsigned)(now -
+                        (mmtBattleReceivePendingMs_ ? mmtBattleReceivePendingMs_
+                                                    : mmbPartyTxStartMs_)));
+            pendingMmtBattleAsInitiator_ = false;
+            pendingMmtBattleAsReceiver_  = false;
+            mmbPartyTxTarget_   = 0;
+            mmbPartyRxFrom_     = 0;
+            mmbOppPartyReady_   = false;
+            mmbPartyChunkMask_  = 0;
+            mmbPartyTotal_      = 0;
+            mmbPartyTxStartMs_  = 0;
+            mmbPartyTxLastMs_   = 0;
+            mmbPartyTxAttempts_ = 0;
+            mmtBattleReceivePendingMs_ = 0;
+        }
+    }
+
+    // MQTT-only beacon response: handleReceived set pendingMqttResponseTo_
+    // when a peer sent us a beacon with requestResponse=1. Build a beacon
+    // + NodeInfo packet on the MM channel and publish via mqtt->onSend
+    // directly, skipping LoRa iface->send so we don't fan out the response
+    // over the airwaves. Throttle to 30 s/peer so a rapid burst of request
+    // beacons can't spam the broker.
+    //
+    // CRITICAL: the beacon below MUST go via publishMqttOnlyBroadcast.
+    // Do NOT switch this to service->sendToMesh / router->send — that path
+    // also LoRa-broadcasts, which would turn N decks all responding to one
+    // request beacon into N×LoRa TX bursts (exactly the airtime storm the
+    // MQTT-only design avoids). See the function header comment on
+    // publishMqttOnlyBroadcast for the full reasoning + invariants.
+    if (pendingMqttResponseTo_ != 0 && setupDone_ &&
+        !emulatorActive_ && !browserActive_) {
+        uint32_t now = millis();
+        if (lastMqttResponseMs_ == 0 || now - lastMqttResponseMs_ > 30000) {
+            uint32_t target = pendingMqttResponseTo_;
+            pendingMqttResponseTo_ = 0;
+            lastMqttResponseMs_ = now;
+            // 1) Beacon — build the same packet the daycare's setSendBeacon
+            //    callback emits, but go straight to MQTT.
+            DaycareBeacon b;
+            memset(&b, 0, sizeof(b));
+            b.type = 0x60;
+            b.nodeId = nodeDB->getNodeNum();
+            const char *sn = owner.short_name;
+            if (sn) {
+                size_t n = strnlen(sn, sizeof(b.shortName) - 1);
+                memcpy(b.shortName, sn, n);
+            }
+            b.partyCount = 0; // server-side beacon, no party state to leak
+            b.ngPlusTier = lordCurrentNgPlusTier();
+            b.requestResponse = 0; // never request response on a response (no ping-pong)
+            meshtastic_MeshPacket *pb = router->allocForSending();
+            if (pb) {
+                pb->to = NODENUM_BROADCAST;
+                pb->channel = mmChannel_;
+                pb->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
+                size_t sz = sizeof(b);
+                if (sz > sizeof(pb->decoded.payload.bytes))
+                    sz = sizeof(pb->decoded.payload.bytes);
+                memcpy(pb->decoded.payload.bytes, &b, sz);
+                pb->decoded.payload.size = sz;
+                LOG_INFO("[MonsterMesh] MQTT-only beacon response → req 0x%08X\n",
+                         (unsigned)target);
+                publishMqttOnlyBroadcast(pb);
+            }
+            // 2) NodeInfo — sendOurNodeInfo also lands on LoRa, but it has
+            //    a 5-min cooldown so flooding is bounded. Calling it here
+            //    is the simplest way to broadcast our pubkey + short_name
+            //    via the broker. A pure-MQTT NodeInfo path could come later.
+            if (nodeInfoModule) {
+                nodeInfoModule->sendOurNodeInfo(NODENUM_BROADCAST, false, mmChannel_);
+            }
+        }
     }
 
     // Reciprocal beacon: handleReceived set pendingReplyBeacon_ when a new
@@ -1880,13 +2833,40 @@ int32_t MonsterMeshModule::runOnce()
     // the sender's challenge DM lands), so stray TEXT_BATTLE_START packets
     // from other-agent code can't bounce us into spurious PvP.
     // Drain pending MMB party TX (point-to-point). Sender sets this on Y
-    // receipt; receiver sets it on TEXT_BATTLE_START receipt. Once chunks
-    // are emitted, we wait passively for the opponent's chunks in
-    // handleReceived; mmbOppPartyReady_ flips true when assembly completes.
+    // receipt; receiver sets it on TEXT_BATTLE_START receipt. We re-publish
+    // the chunk burst every MMB_PARTY_RETRY_INTERVAL_MS until either the
+    // engine launches (clears target below) or MMB_PARTY_RETRY_TIMEOUT_MS
+    // elapses — needed because the MQTT bridge is QoS 0 and a peer's WiFi
+    // outage drops chunks silently. mmbOppPartyReady_ is the *receive*
+    // signal; the opposite direction has no ACK, so we just keep firing.
     if (mmbPartyTxTarget_ != 0 && terminal_.hasParty()) {
-        uint32_t target = mmbPartyTxTarget_;
-        mmbPartyTxTarget_ = 0;
-        sendMmbPartyChunks(target, terminal_.getParty());
+        uint32_t now = millis();
+        if (mmbPartyTxStartMs_ != 0 &&
+            (now - mmbPartyTxStartMs_) >= MMB_PARTY_RETRY_TIMEOUT_MS) {
+            LOG_WARN("[MonsterMesh] MMB party TX retries timed out after %ums "
+                     "(attempts=%u oppReady=%d); abandoning\n",
+                     (unsigned)(now - mmbPartyTxStartMs_),
+                     (unsigned)mmbPartyTxAttempts_,
+                     (int)mmbOppPartyReady_);
+            mmbPartyTxTarget_   = 0;
+            mmbPartyTxLastMs_   = 0;
+            mmbPartyTxStartMs_  = 0;
+            mmbPartyTxAttempts_ = 0;
+        } else {
+            bool firstSend  = (mmbPartyTxLastMs_ == 0);
+            bool timeToRetry = !firstSend &&
+                (now - mmbPartyTxLastMs_) >= MMB_PARTY_RETRY_INTERVAL_MS;
+            if (firstSend || timeToRetry) {
+                mmbPartyTxLastMs_ = now;
+                mmbPartyTxAttempts_++;
+                LOG_INFO("[MonsterMesh] MMB party TX attempt %u → 0x%08X "
+                         "(oppReady=%d)\n",
+                         (unsigned)mmbPartyTxAttempts_,
+                         (unsigned)mmbPartyTxTarget_,
+                         (int)mmbOppPartyReady_);
+                sendMmbPartyChunks(mmbPartyTxTarget_, terminal_.getParty());
+            }
+        }
     }
 
     // Log every tick where launch flag is set but a gate blocks. Throttled
@@ -1918,6 +2898,19 @@ int32_t MonsterMeshModule::runOnce()
         // Consume the just-arrived opponent party for the launch below; clear
         // the ready flag so a fresh exchange is required for the next fight.
         mmbOppPartyReady_ = false;
+        // Stop retransmitting our party — both engines are about to run.
+        mmbPartyTxTarget_   = 0;
+        mmbPartyTxLastMs_   = 0;
+        mmbPartyTxStartMs_  = 0;
+        mmbPartyTxAttempts_ = 0;
+        // Belt + suspenders: clear chunk-assembly state at launch too so a
+        // post-engine straggler chunk can't be ORed into a stale mask and
+        // cause the NEXT session to launch with the previous opponent's
+        // pokemon partially overwritten.
+        mmbPartyChunkMask_ = 0;
+        mmbPartyTotal_     = 0;
+        if (mmbPartyChunks_)
+            memset(mmbPartyChunks_, 0, MMB_PARTY_CHUNKS_BYTES);
 #if HAS_TFT
         lv_display_t *disp = lv_display_get_default();
         if (disp && !savedFlushCb_) {
@@ -1942,23 +2935,32 @@ int32_t MonsterMeshModule::runOnce()
                  "party (count=%u)\n", (unsigned)oppParty.count);
 
         if (asInitiator) {
-            // Pass the pre-computed seed — TEXT_BATTLE_START was already
-            // broadcast by sendMmbBattleStart() right when Y was received.
+            // Pass the pre-computed seed AND session — TEXT_BATTLE_START
+            // was already broadcast by sendMmbBattleStart() with that
+            // session_id. Engine's session_ must match so outgoing
+            // ACTION/HASH/FORFEIT packets pass the receiver's filter.
             textBattle_.startNetworkedAsInitiator(mmtBattlePeer_,
                                                    terminal_.getParty(),
                                                    oppParty,
-                                                   mmtBattleSeed_);
+                                                   mmtBattleSeed_,
+                                                   mmtBattleSession_);
             char hdr[40];
             snprintf(hdr, sizeof(hdr), "MMB vs %.4s",
                      mmtPeerShort_[0] ? mmtPeerShort_ : "Peer");
             textBattle_.setHeader(hdr);
-            LOG_INFO("[MonsterMesh] PvP: started as initiator vs 0x%08X opp=%u\n",
-                     (unsigned)mmtBattlePeer_, (unsigned)oppParty.count);
+            LOG_INFO("[MonsterMesh] PvP: started as initiator vs 0x%08X opp=%u session=0x%04X\n",
+                     (unsigned)mmtBattlePeer_, (unsigned)oppParty.count,
+                     (unsigned)mmtBattleSession_);
         } else {
+            // Pass the session_id captured from the incoming START packet
+            // (handleReceived stored it in mmtBattleSession_) so our
+            // outgoing ACTION packets match the initiator's session
+            // filter.
             textBattle_.startNetworkedAsReceiver(mmtBattlePeer_,
                                                   terminal_.getParty(),
                                                   mmtBattleSeed_,
-                                                  oppParty);
+                                                  oppParty,
+                                                  mmtBattleSession_);
             char hdr[40];
             snprintf(hdr, sizeof(hdr), "MMB incoming");
             textBattle_.setHeader(hdr);
@@ -2491,6 +3493,32 @@ int32_t MonsterMeshModule::runOnce()
                 // flag so the next render shows the new opponent.
             } else {
                 textBattleActive_ = false;
+                // Clear ALL PvP-handshake state so a leftover chunk
+                // retransmit from the peer (their mmbPartyTxTarget_ keeps
+                // firing for the full 90s retry window) can't auto-arm a
+                // new receiver session and re-launch the battle the
+                // moment the user lands back in the terminal. Without
+                // this, the launch gate (pendingMmt* && mmbOppPartyReady_
+                // && !textBattleActive_) trips on the next chunk burst.
+                pendingMmtBattleAsInitiator_ = false;
+                pendingMmtBattleAsReceiver_  = false;
+                mmbOppPartyReady_            = false;
+                mmbPartyChunkMask_           = 0;
+                mmbPartyTotal_               = 0;
+                mmbPartyRxFrom_              = 0;
+                mmbPartyTxTarget_            = 0;
+                mmbPartyTxStartMs_           = 0;
+                mmbPartyTxLastMs_            = 0;
+                mmbPartyTxAttempts_          = 0;
+                mmtChallengerPeer_           = 0;
+                mmtChallengerExpireMs_       = 0;
+                mmtAwaitingReplyFrom_        = 0;
+                mmtBattlePeer_               = 0;
+                mmtBattleSeed_               = 0;
+                mmtBattleSession_            = 0;
+                mmtBattleReceivePendingMs_   = 0;
+                if (mmbPartyChunks_)
+                    memset(mmbPartyChunks_, 0, MMB_PARTY_CHUNKS_BYTES);
 #if HAS_TFT
                 // Wipe the lgfx-rendered battle frame so the terminal doesn't
                 // have to fight through press-any-key pixels. lgfx ops are
@@ -2628,6 +3656,10 @@ int32_t MonsterMeshModule::runOnce()
     }
 
     drainTxQueue();
+    // While the browser is open, run runOnce more often so the buffered
+    // key drain (pendingBrowserKey_ → browser_.handleKey) feels snappy
+    // instead of stacking up at the default 50 ms cadence.
+    if (browserActive_) return 10;
     return 50;
 }
 
@@ -2641,7 +3673,9 @@ void MonsterMeshModule::drainTxQueue()
 
         meshtastic_MeshPacket *p = router->allocForSending();
         p->to = NODENUM_BROADCAST;
-        p->channel = MONSTERMESH_CHANNEL;
+        // MMB engine traffic (TEXT_BATTLE_ACTION/HASH/FORFEIT) on the
+        // MonsterMesh channel so it MQTT-bridges across LoRa range.
+        p->channel = mmChannel_;
         p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
         p->decoded.payload.size = len;
         memcpy(p->decoded.payload.bytes, buf, len);
@@ -2710,18 +3744,13 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
 {
     data->state = LV_INDEV_STATE_RELEASED;
 
-    // Keep device-ui backlight alive while emulator, browser, or text battle
-    // is active. The text-battle screen renders via lgfx (not LVGL), so the
-    // device-ui inactivity monitor doesn't see those frames as activity —
-    // we have to poke it explicitly here so playing a fight doesn't blank
-    // the screen mid-turn.
-    bool keepAlive = (monsterMeshModule &&
-                      (monsterMeshModule->isEmulatorActive() ||
-                       monsterMeshModule->isBrowserActive() ||
-                       monsterMeshModule->isTextBattleActive()));
-    if (keepAlive) {
-        lv_display_trigger_activity(NULL);
-    }
+    // Keep device-ui backlight alive on EVERY keyboard read — used to gate
+    // on emu/browser/textbattle but that left the terminal blanking while
+    // the user was actively typing: typing keystrokes don't show up as LVGL
+    // input until LVGL routes them, so the inactivity monitor saw nothing.
+    // Poking activity here keeps both the terminal scrollback and the lgfx-
+    // direct text-battle screen lit while the user is at the keyboard.
+    lv_display_trigger_activity(NULL);
 
     // Pick up any SAV-loaded party that runOnce staged for us — this runs on
     // the LVGL thread, so it's safe to mutate widgets here.
@@ -2892,6 +3921,28 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
     if (key == 0) return;
 
     LOG_DEBUG("[MonsterMesh] key=0x%02X emu=%d\n", key, monsterMeshModule ? (int)monsterMeshModule->isEmulatorActive() : -1);
+
+    // Preemptive receiver arm — when an MMT challenger is armed and the user
+    // types 'y'/'Y' followed by Enter, assume the user is replying Y to the
+    // challenge and arm the receiver path immediately. This makes the
+    // challengee deterministically the "slave" (receiver), so even if Red's
+    // TEXT_BATTLE_START packet is lost over MQTT, Blue is already in the
+    // right state when chunks arrive.
+    if (monsterMeshModule) {
+        static uint32_t yPressedAtMs = 0;
+        if (key == 'y' || key == 'Y') {
+            yPressedAtMs = millis();
+        } else if (key == 0x0D && yPressedAtMs != 0 &&
+                   (millis() - yPressedAtMs) < 5000) {
+            // 'y' then Enter within 5s → user is sending Y reply.
+            yPressedAtMs = 0;
+            monsterMeshModule->onLocalYReply();
+        } else if (key != 0 && key != 'y' && key != 'Y' && key != 0x0D) {
+            // any other character cancels the pending Y (user typed
+            // something other than a single Y before Enter).
+            yPressedAtMs = 0;
+        }
+    }
 
     // ── ALT+E (0x05 = Ctrl+E) toggles emulator on/off ───────────────────
     // On T-Deck, ALT+letter produces control codes (ALT+E = 0x05).
@@ -3419,6 +4470,14 @@ void MonsterMeshModule::tryConsumeStagedParty()
     if (terminalActive_) {
         terminal_.refreshParty();
     }
+    // Also stage into textBattle_ so the server-auth CLIENT path can
+    // respond to an inbound CHALLENGE without an additional round-trip
+    // — ACCEPT carries our party straight from this staged copy.
+    {
+        const char *ourShort = (owner.short_name[0] != '\0')
+                                 ? owner.short_name : "MM";
+        textBattle_.setMyTbParty(terminalStagedParty_, ourShort);
+    }
     terminalPartyStaged_ = false;
 }
 
@@ -3652,12 +4711,18 @@ void MonsterMeshModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *stat
 
 void MonsterMeshModule::handleKeyPress(uint8_t ascii)
 {
+    // b444: unconditionally wake the screen on ANY keystroke. The per-branch
+    // EVENT_INPUT triggers below missed the path where the terminal panel is
+    // up but doesn't currently hold LVGL focus (e.g. user pressed a key but
+    // focus was on a hidden chat widget), so the screen blanked while the
+    // user was actively typing in the MonsterMesh terminal.
+    powerFSM.trigger(EVENT_INPUT);
+
     // Text battle steals all keys while it's foreground. ESC (0x1B) ends the
     // battle and returns to the terminal scrollback that was preserved in the
     // background.
     if (textBattleActive_) {
         textBattle_.handleKey(ascii);
-        powerFSM.trigger(EVENT_INPUT);
         return;
     }
 
@@ -3720,14 +4785,10 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
     if (terminalActive_ && !emulatorActive_ && !browserActive_ &&
         ascii != 0x05 && terminal_.hasInputFocus()) {
         terminal_.onKey(ascii);
-        powerFSM.trigger(EVENT_INPUT);
         return;
     }
-
-    // Keep screen awake on any keypress while emulator or browser is active
-    if (emulatorActive_ || browserActive_) {
-        powerFSM.trigger(EVENT_INPUT);
-    }
+    // b444: per-branch EVENT_INPUT removed — now triggered unconditionally
+    // at the top of handleKeyPress.
 
     // ── ALT / mic button: toggle display modes ─────────────────────────
     // ALT semantics:

@@ -31,7 +31,10 @@
 #define SIDEBAR_W   (SCREEN_W - SIDEBAR_X)     // 54
 
 // ── WiFi / NTP ────────────────────────────────────────────────────────────────
-#include "secrets.h"           // defines WIFI_SSID and WIFI_PASS
+// Meshtastic owns WiFi + NTP in this build — these are kept for reference only
+// and not actually used. The standalone Pocket Pikachu firmware (separate PIO
+// project) does its own WiFi/NTP via secrets.h.
+// #include "secrets.h"        // standalone-only — not present in firmware tree
 #define NTP_SERVER  "pool.ntp.org"
 #define GMT_OFFSET  -18000     // UTC-5 (Eastern); adjust as needed
 #define DST_OFFSET  3600

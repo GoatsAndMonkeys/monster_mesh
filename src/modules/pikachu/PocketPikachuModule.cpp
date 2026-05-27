@@ -3,8 +3,8 @@
 #if HAS_SCREEN && !MESHTASTIC_EXCLUDE_POCKETPIKACHU
 
 #include "PocketPikachuModule.h"
-#include "pikachu/game.h"
-#include "pikachu/config.h"
+#include "game.h"
+#include "config.h"
 #include <time.h>
 
 PocketPikachuModule *pikachuModule;
@@ -25,13 +25,19 @@ PocketPikachuModule::PocketPikachuModule()
 // OSThread: advance game logic ~20 fps; auto-exit menu if frame not drawn.
 int32_t PocketPikachuModule::runOnce()
 {
+    // (Boot-focus now owned by PentestModule — user wants the Warwalker
+    // frame to be the first screen at startup.)
     game_update();
 
-    // If menu is open but our drawFrame hasn't been called for 2 s, the user
-    // navigated away. Auto-close so carousel navigation isn't stuck.
-    if (menuActive_ && millis() - lastDrawMs_ > 2000) {
-        menuActive_ = false;
-        game_on_long_press(); // enter_idle() when in menu state
+    // If a Pikachu menu is open but drawFrame hasn't been called for 2 s,
+    // the user has navigated away — auto-close so carousel navigation isn't
+    // stuck on the menu state when they come back.
+    bool inMenu = (gameState == GS_GIFT_MENU ||
+                   gameState == GS_CLOCK_MENU ||
+                   gameState == GS_STATUS_MENU);
+    if (inMenu && lastDrawMs_ != 0 && millis() - lastDrawMs_ > 2000) {
+        // game_on_long_press exits any of those menu states back to idle.
+        game_on_long_press();
     }
 
     return 50;
@@ -49,21 +55,37 @@ ProcessMessage PocketPikachuModule::handleReceived(const meshtastic_MeshPacket &
 
 int PocketPikachuModule::handleInputEvent(const InputEvent *event)
 {
-    if (event->inputEvent == INPUT_BROKER_SELECT) {
-        // Long press: toggle menu open/close
-        menuActive_ = !menuActive_;
-        game_on_long_press();   // enters clock menu from game, or enter_idle() from menu
-        if (gameState != GS_CLOCK_MENU && gameState != GS_STATUS_MENU)
-            menuActive_ = false; // ensure flag matches actual state
+    // Only act on input when Pikachu's frame is currently being drawn — i.e.
+    // the user is on the Pikachu carousel page. Otherwise pass through so the
+    // active frame (Messages/Nodes/etc.) gets the event.
+    //
+    // 3 s window: when the carousel parks on Pikachu it stops re-rendering
+    // between presses, so lastDrawMs_ can be a few seconds stale even though
+    // we're the active frame. 250 ms was too tight — long-press to open the
+    // menu would silently no-op.
+    if (lastDrawMs_ == 0 || (millis() - lastDrawMs_) > 3000) {
+        return 0;
+    }
 
-    } else if (event->inputEvent == INPUT_BROKER_USER_PRESS && menuActive_) {
-        // Short press while menu open: cycle clock → status → exit
+    auto inMenu = []() {
+        return gameState == GS_GIFT_MENU ||
+               gameState == GS_CLOCK_MENU ||
+               gameState == GS_STATUS_MENU;
+    };
+
+    if (event->inputEvent == INPUT_BROKER_SELECT) {
+        game_on_long_press();
+        return 1;
+    } else if (event->inputEvent == INPUT_BROKER_USER_PRESS && inMenu()) {
+        // Only consume short press while a menu is actually open. Otherwise
+        // pass through so the Meshtastic carousel can advance.
         game_on_short_press();
-        if (gameState != GS_CLOCK_MENU && gameState != GS_STATUS_MENU)
-            menuActive_ = false; // cycled all the way back to game
+        return 1;
     }
     return 0;
 }
+
+
 
 // ─── Draw helpers ─────────────────────────────────────────────────────────────
 
@@ -76,6 +98,13 @@ static inline void drawScaledPixel(OLEDDisplay *d, int16_t x, int16_t y)
 
 void PocketPikachuModule::drawGameArea(OLEDDisplay *display, int16_t ox, int16_t oy)
 {
+    // Invert ONLY the Pikachu game area: white field, black line art. The rest
+    // of the Meshtastic carousel (sidebar, clock/status menus, other module
+    // frames) keeps the standard white-on-black scheme.
+    display->setColor(WHITE);
+    display->fillRect(ox + GAME_X, oy + GAME_Y, GAME_W, GAME_H);
+    display->setColor(BLACK);
+
     const uint8_t *frame = game_current_frame();
     for (int row = 0; row < PIKA_ROWS; row++) {
         for (int col = 0; col < PIKA_COLS; col++) {
@@ -86,6 +115,9 @@ void PocketPikachuModule::drawGameArea(OLEDDisplay *display, int16_t ox, int16_t
                     oy + GAME_Y + row * GAME_SCALE);
         }
     }
+
+    // Restore default color so the sidebar (drawn next) renders normally.
+    display->setColor(WHITE);
 }
 
 void PocketPikachuModule::drawSidebar(OLEDDisplay *display, int16_t ox, int16_t oy)
@@ -148,6 +180,56 @@ void PocketPikachuModule::drawClockScreen(OLEDDisplay *display, int16_t ox, int1
     display->drawString(ox + 64, oy + 46, t.tm_hour >= 12 ? "PM" : "AM");
 }
 
+void PocketPikachuModule::drawGiftMenu(OLEDDisplay *display, int16_t ox, int16_t oy)
+{
+    // POW! flash takes the whole screen for ~600 ms after a gift is selected.
+    if (giftPowUntil != 0 && millis() < giftPowUntil) {
+        display->setFont(ArialMT_Plain_24);
+        display->setTextAlignment(TEXT_ALIGN_CENTER);
+        display->drawString(ox + SCREEN_W / 2, oy + 18, "POW!");
+        display->setFont(ArialMT_Plain_10);
+        char buf[20];
+        snprintf(buf, sizeof(buf), "%ldW left", (long)pikaStatus.watts);
+        display->drawString(ox + SCREEN_W / 2, oy + 46, buf);
+        return;
+    }
+
+    display->setFont(ArialMT_Plain_10);
+    display->setTextAlignment(TEXT_ALIGN_LEFT);
+
+    char hdr[20];
+    snprintf(hdr, sizeof(hdr), "Gift Pikachu  %ldW", (long)pikaStatus.watts);
+    display->drawString(ox + 2, oy, hdr);
+
+    // Render up to 5 visible rows centred on the cursor so it's always in view.
+    constexpr uint8_t VISIBLE = 5;
+    uint8_t first;
+    if (GIFT_OPTION_COUNT <= VISIBLE) {
+        first = 0;
+    } else if (giftMenuCursor < VISIBLE / 2) {
+        first = 0;
+    } else if (giftMenuCursor + (VISIBLE - VISIBLE / 2) >= GIFT_OPTION_COUNT) {
+        first = (uint8_t)(GIFT_OPTION_COUNT - VISIBLE);
+    } else {
+        first = (uint8_t)(giftMenuCursor - VISIBLE / 2);
+    }
+    uint8_t last = (uint8_t)((first + VISIBLE < GIFT_OPTION_COUNT)
+                                  ? first + VISIBLE : GIFT_OPTION_COUNT);
+
+    for (uint8_t i = first; i < last; i++) {
+        int row = i - first;
+        int yy  = oy + 12 + row * 10;
+        if (i == giftMenuCursor) {
+            display->fillRect(ox + 0, yy, SCREEN_W, 10);
+            display->setColor(BLACK);
+            display->drawString(ox + 6, yy, GIFT_OPTIONS[i].label);
+            display->setColor(WHITE);
+        } else {
+            display->drawString(ox + 6, yy, GIFT_OPTIONS[i].label);
+        }
+    }
+}
+
 void PocketPikachuModule::drawStatusScreen(OLEDDisplay *display, int16_t ox, int16_t oy)
 {
     display->setFont(ArialMT_Plain_10);
@@ -179,11 +261,24 @@ void PocketPikachuModule::drawStatusScreen(OLEDDisplay *display, int16_t ox, int
 void PocketPikachuModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *state,
                                     int16_t x, int16_t y)
 {
-    lastDrawMs_ = millis();
+    uint32_t now = millis();
+    // Auto-wake on focus: first visit (lastDrawMs_ == 0) AND any return
+    // after a >2 s gap. If Pikachu is asleep, wake to a looping idle stand.
+    bool focusEvent = (lastDrawMs_ == 0 || (now - lastDrawMs_) > 2000);
+    if (focusEvent && gameState == GS_SLEEPING) {
+        gameState = GS_STAND;
+        if      (pikaStatus.friendshipLevel >= FRIENDSHIP_LOVES) game_play_anim(&Anims::standLove,      true);
+        else if (pikaStatus.friendshipLevel >= FRIENDSHIP_LIKES) game_play_anim(&Anims::standLike,      true);
+        else if (pikaStatus.friendshipLevel <= FRIENDSHIP_MAD)   game_play_anim(&Anims::standMad,       true);
+        else                                                     game_play_anim(&Anims::standBasicIdle, true);
+        screenOn = true;
+    }
+    lastDrawMs_ = now;
     display->clear();
     if (!screenOn) return;
 
     switch (gameState) {
+        case GS_GIFT_MENU:    drawGiftMenu(display, x, y);     break;
         case GS_CLOCK_MENU:   drawClockScreen(display, x, y);  break;
         case GS_STATUS_MENU:  drawStatusScreen(display, x, y); break;
         default:              drawGameArea(display, x, y);

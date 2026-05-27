@@ -217,6 +217,31 @@ const uint8_t icon_module[] PROGMEM = {
     0b00011000  // ░░░██░░░
 };
 
+// 8x8 mini-Pikachu silhouette — ears, face, body, feet. Used for the
+// Pocket Pikachu virtual-pet carousel frame indicator.
+const uint8_t icon_pikachu[] PROGMEM = {
+    0b10000001, // █......█   ear tips
+    0b11000011, // ██....██   ears
+    0b01111110, // .######.
+    0b11111111, // ########   face / cheeks
+    0b01111110, // .######.   body
+    0b11111111, // ########
+    0b01101100, // .##.##..   feet
+    0b11000011  // ##....██
+};
+
+// 8x8 Pokéball — used for the gauntlet (gym battles) carousel frame.
+const uint8_t icon_pokeball[] PROGMEM = {
+    0b00111100, // ..####..
+    0b01111110, // .######.
+    0b11000011, // ##....##
+    0b11111111, // ########
+    0b11111111, // ########
+    0b11000011, // ##....##
+    0b01111110, // .######.
+    0b00111100  // ..####..
+};
+
 #define mute_symbol_width 8
 #define mute_symbol_height 8
 const uint8_t mute_symbol[] PROGMEM = {

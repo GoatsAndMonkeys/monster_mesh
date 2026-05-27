@@ -31,12 +31,28 @@
 #endif
 #define default_network_ipv6_enabled false
 
-#define default_mqtt_address "mqtt.meshtastic.org"
-#define default_mqtt_username "meshdev"
-#define default_mqtt_password "large4cats"
-#define default_mqtt_root "msh"
+// MonsterMesh private EMQX serverless broker (TLS only, port 8883). Replaces
+// the public mqtt.meshtastic.org broker, which aggressively rate-limits per
+// client and silently drops bursts > ~1 msg/sec — fatal for MMB's chunked
+// party exchange. Our private broker has no rate limits and supports the
+// full QoS spectrum.
+// Custom domain mqtt.cableclub.net CNAMEs here, but EMQX Serverless is
+// multi-tenant and uses TLS SNI to route to your tenant — connecting to the
+// custom hostname makes the broker abort the TLS handshake with
+// "unrecognized_name" within ~1s. Connect to the EMQX-native hostname so
+// the SNI matches. Upgrade to Dedicated tier (with BYO cert) to use
+// mqtt.cableclub.net properly.
+#define default_mqtt_address "sf17b671.ala.us-east-1.emqxsl.com"
+#define default_mqtt_username "ash"
+#define default_mqtt_password "large4meowth"
+// MonsterMesh private namespace on the EMQX broker. The framework's auto-
+// append-region logic (MenuHandler / AdminModule) may turn this into
+// "kanto/US" on a menu touch, but the canonicalizer in
+// MonsterMeshModule::ensureMonsterMeshChannel() forces it back to "kanto"
+// every boot, so the broker-side topics stay flat and predictable.
+#define default_mqtt_root "kanto"
 #define default_mqtt_encryption_enabled true
-#define default_mqtt_tls_enabled false
+#define default_mqtt_tls_enabled true
 
 #define IF_ROUTER(routerVal, normalVal)                                                                                          \
     ((config.device.role == meshtastic_Config_DeviceConfig_Role_ROUTER) ? (routerVal) : (normalVal))

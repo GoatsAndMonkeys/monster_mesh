@@ -771,9 +771,19 @@ void setup()
     rp2040Setup();
 #endif
 
+#if defined(ARCH_ESP32)
+#define HEAP_LOG(stage)                                                                                                          \
+    LOG_INFO("HEAP_DIFF [" stage "]: free=%u min=%u largest=%u\n", (unsigned)esp_get_free_heap_size(),                           \
+             (unsigned)esp_get_minimum_free_heap_size(),                                                                          \
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT))
+#else
+#define HEAP_LOG(stage) ((void)0)
+#endif
+    HEAP_LOG("pre-nodeDB");
     // We do this as early as possible because this loads preferences from flash
     // but we need to do this after main cpu init (esp32setup), because we need the random seed set
     nodeDB = new NodeDB;
+    HEAP_LOG("post-nodeDB");
 
 #if HAS_TFT
     if (config.display.displaymode == meshtastic_Config_DisplayConfig_DisplayMode_COLOR) {
@@ -947,11 +957,15 @@ void setup()
     }
 #endif
 #endif
+    HEAP_LOG("pre-service");
     service = new MeshService();
     service->init();
+    HEAP_LOG("post-service");
 
     // Now that the mesh service is created, create any modules
+    HEAP_LOG("pre-modules");
     setupModules();
+    HEAP_LOG("post-modules");
 
 #if !MESHTASTIC_EXCLUDE_I2C
     // Inform modules about I2C devices

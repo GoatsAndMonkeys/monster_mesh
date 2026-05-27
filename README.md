@@ -1,40 +1,60 @@
 <div align="center" markdown="1">
 
-<img src=".github/meshtastic_logo.png" alt="Meshtastic Logo" width="80"/>
-<h1>Meshtastic Firmware</h1>
+<h1>Pokemesh</h1>
 
-![GitHub release downloads](https://img.shields.io/github/downloads/meshtastic/firmware/total)
-[![CI](https://img.shields.io/github/actions/workflow/status/meshtastic/firmware/main_matrix.yml?branch=master&label=actions&logo=github&color=yellow)](https://github.com/meshtastic/firmware/actions/workflows/ci.yml)
-[![CLA assistant](https://cla-assistant.io/readme/badge/meshtastic/firmware)](https://cla-assistant.io/meshtastic/firmware)
-[![Fiscal Contributors](https://opencollective.com/meshtastic/tiers/badge.svg?label=Fiscal%20Contributors&color=deeppink)](https://opencollective.com/meshtastic/)
-[![Vercel](https://img.shields.io/static/v1?label=Powered%20by&message=Vercel&style=flat&logo=vercel&color=000000)](https://vercel.com?utm_source=meshtastic&utm_campaign=oss)
-
-<a href="https://trendshift.io/repositories/5524" target="_blank"><img src="https://trendshift.io/api/badge/repositories/5524" alt="meshtastic%2Ffirmware | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+<i>Pokemon battles for your LoRa mesh.</i>
 
 </div>
 
-</div>
+A fork of [meshtastic/firmware](https://github.com/meshtastic/firmware)
+that turns a Heltec V3 or T114 into a Pokemon battle pager. Every WiFi
+handshake, rogue BLE advertiser, or fellow Pikachu node you encounter
+triggers a Gen-1 battle whose outcome levels up your pet, fills your
+Pokedex, and earns gym badges. The underlying Meshtastic mesh protocol
+is untouched — the radio still acts as a normal Meshtastic node.
 
-<div align="center">
-	<a href="https://meshtastic.org">Website</a>
-	-
-	<a href="https://meshtastic.org/docs/">Documentation</a>
-</div>
+| Board       | Env                | Role |
+|-------------|--------------------|------|
+| Heltec V3   | `heltec-v3`        | "Warwalker" — 802.11 WiFi pentester + 128×64 mono Pikachu pet |
+| Heltec T114 | `heltec-t114-pet`  | "BLE Stalker" — Bluetooth peripheral scanner + 240×135 colour Pikachu pet |
 
-## Overview
+## Docs
 
-This repository contains the official device firmware for Meshtastic, an open-source LoRa mesh networking project designed for long-range, low-power communication without relying on internet or cellular infrastructure. The firmware supports various hardware platforms, including ESP32, nRF52, RP2040/RP2350, and Linux-based devices.
+- 📖 **[docs/POKEMESH.md](docs/POKEMESH.md)** — top-level overview, build & flash
+- 🔫 **[src/modules/pentest/README.md](src/modules/pentest/README.md)** — Pentest / Stalker module
+- 🐭 **[src/modules/pikachu/README.md](src/modules/pikachu/README.md)** — V3 mono pet game
+- 🌈 **[src/modules/pikachu2/README.md](src/modules/pikachu2/README.md)** — T114 colour pet renderer
+- 🥊 **[src/modules/monstermesh/gauntlet/](src/modules/monstermesh/gauntlet/)** — Gym-leader gauntlet over DM
 
-Meshtastic enables text messaging, location sharing, and telemetry over a decentralized mesh network, making it ideal for outdoor adventures, emergency preparedness, and remote operations.
+## Quick build & flash
 
-### Get Started
+```bash
+pip install -U platformio
 
-- 🔧 **[Building Instructions](https://meshtastic.org/docs/development/firmware/build)** – Learn how to compile the firmware from source.
-- ⚡ **[Flashing Instructions](https://meshtastic.org/docs/getting-started/flashing-firmware/)** – Install or update the firmware on your device.
+# Heltec V3
+pio run -e heltec-v3 -t upload
 
-Join our community and help improve Meshtastic! 🚀
+# Heltec T114 (double-tap RESET first, then drag the .uf2)
+pio run -e heltec-t114-pet
+cp .pio/build/heltec-t114-pet/firmware.uf2 /Volumes/HT-n5262/
+```
 
-## Stats
+## Upstream
 
-![Alt](https://repobeats.axiom.co/api/embed/8025e56c482ec63541593cc5bd322c19d5c0bdcf.svg "Repobeats analytics image")
+This is a downstream of upstream Meshtastic. For the canonical
+Meshtastic firmware, docs, and community:
 
+- Website: <https://meshtastic.org>
+- Docs: <https://meshtastic.org/docs/>
+- Upstream repo: <https://github.com/meshtastic/firmware>
+
+Issues / PRs for this fork live in **monstermesh** (this repo), not
+upstream — the upstream maintainers haven't asked for Pikachu battles
+in their tracker and probably shouldn't have to.
+
+## License
+
+MIT for our additions, matching upstream Meshtastic where applicable.
+Pokemon assets are property of Nintendo / Game Freak / The Pokemon
+Company — sprite data is sourced from PokeAPI's open sheets and used
+for personal hardware-hobby purposes only. Don't sell this firmware.

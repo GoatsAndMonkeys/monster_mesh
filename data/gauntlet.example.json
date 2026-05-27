@@ -1,0 +1,71 @@
+{
+  "_comment": "Sample input for scripts/gen_gauntlet.py. Pack with: python3 scripts/gen_gauntlet.py data/gauntlet.example.json -o src/modules/monstermesh/gauntlet/GauntletDataPacked.h",
+
+  "elite_four": [
+    {
+      "name": "Lorelei",
+      "_type": "Ice",
+      "party": [
+        { "dex": 87,  "level": 52, "moves": [55, 58, 145, 48] },
+        { "dex": 91,  "level": 53, "moves": [58, 11, 48, 45]  },
+        { "dex": 80,  "level": 54, "moves": [50, 8, 95, 54]   },
+        { "dex": 124, "level": 56, "moves": [8, 95, 50, 1]    },
+        { "dex": 131, "level": 56, "moves": [58, 32, 48, 156] }
+      ]
+    },
+    {
+      "name": "Bruno",
+      "_type": "Fighting",
+      "party": [
+        { "dex": 95,  "level": 53, "moves": [88, 20, 21, 89]   },
+        { "dex": 107, "level": 55, "moves": [4, 9, 5, 41]      },
+        { "dex": 106, "level": 55, "moves": [98, 71, 66, 25]   },
+        { "dex": 95,  "level": 56, "moves": [88, 20, 21, 89]   },
+        { "dex": 68,  "level": 58, "moves": [70, 66, 5, 25]    }
+      ]
+    },
+    {
+      "name": "Agatha",
+      "_type": "Ghost",
+      "party": [
+        { "dex": 94,  "level": 56, "moves": [101, 109, 95, 138] },
+        { "dex": 42,  "level": 56, "moves": [44, 109, 100, 50]  },
+        { "dex": 93,  "level": 55, "moves": [101, 138, 109, 95] },
+        { "dex": 24,  "level": 56, "moves": [40, 50, 35, 108]   },
+        { "dex": 94,  "level": 60, "moves": [94, 95, 7, 138]    }
+      ]
+    },
+    {
+      "name": "Lance",
+      "_type": "Dragon",
+      "party": [
+        { "dex": 130, "level": 58, "moves": [82, 56, 23, 36]  },
+        { "dex": 148, "level": 56, "moves": [82, 86, 35, 21]  },
+        { "dex": 142, "level": 60, "moves": [17, 36, 21, 9]   },
+        { "dex": 149, "level": 56, "moves": [82, 86, 35, 21]  },
+        { "dex": 149, "level": 60, "moves": [82, 86, 7, 89]   },
+        { "dex": 6,   "level": 60, "moves": [53, 17, 36, 7]   }
+      ]
+    }
+  ],
+
+  "default_moves": {
+    "_comment": "Fallback moveset assigned to player-submitted Pokémon by primary type. Move IDs come from showdown_gen1_moves.h.",
+    "normal":   [33, 34, 98, 63],
+    "fighting": [2,  67, 66, 69],
+    "flying":   [17, 64, 65, 19],
+    "poison":   [40, 124, 123, 51],
+    "ground":   [89, 91, 28, 31],
+    "rock":     [88, 157, 89, 33],
+    "bird":     [17, 64, 65, 19],
+    "bug":      [42, 41, 141, 33],
+    "ghost":    [122, 109, 101, 95],
+    "fire":     [52, 53, 126, 7],
+    "water":    [55, 57, 56, 145],
+    "grass":    [22, 75, 76, 79],
+    "electric": [84, 85, 87, 86],
+    "psychic":  [93, 94, 95, 60],
+    "ice":      [58, 59, 62, 8],
+    "dragon":   [82, 63, 21, 33]
+  }
+}

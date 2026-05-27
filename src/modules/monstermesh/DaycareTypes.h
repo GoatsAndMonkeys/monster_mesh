@@ -411,6 +411,12 @@ struct DaycareBeacon {
         uint8_t moves[4];
     } pokemon[6];
     uint8_t  ngPlusTier;    // 0 = base game; 1..5 = Legend of Charizard NG+
+    // Set on boot beacons and manual `beacon` / `bc` commands. When a peer
+    // sees this true, they respond MQTT-only with their own beacon +
+    // NodeInfo so the requester populates their neighbor list without
+    // every deck slamming the LoRa airwaves. Periodic auto-beacons leave
+    // this zero so they don't trigger fan-out.
+    uint8_t  requestResponse;
 };
 #pragma pack(pop)
 

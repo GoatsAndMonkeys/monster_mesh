@@ -27,6 +27,11 @@ public:
     static constexpr uint16_t SCREEN_H = 240;
 
     enum class Mode  : uint8_t { OFF, NETWORKED, LOCAL_ROGUELIKE };
+    // Server-authoritative PvP role. LEGACY = the old lockstep dual-engine
+    // path (Mode::NETWORKED + sendHash/HASH abort). SERVER = initiator runs
+    // the only engine and ships UPDATE packets. CLIENT = receiver renders
+    // state from UPDATE packets; runs no engine.
+    enum class Role  : uint8_t { LEGACY, SERVER, CLIENT };
     enum class Phase : uint8_t {
         IDLE,           // not in a battle
         WAIT_ACTION,    // waiting for player input
@@ -35,12 +40,41 @@ public:
         WAIT_FLEE,      // F pressed; "Flee? K=yes L=no" overlay
         ANIMATING,      // turn just resolved, scrolling messages
         FINISHED,       // result_ != ONGOING; press any key to exit
+        WAIT_CHALLENGE_OVERLAY,  // server-auth CLIENT: "X challenges you! K=accept L=decline"
     };
 
     explicit MonsterMeshTextBattle(MeshtasticTransport &transport)
       : transport_(transport) {}
 
     // ── Lifecycle ───────────────────────────────────────────────────────────
+    // ── Server-authoritative PvP entry point ──────────────────────────────
+    // Initiator's only call. Stages our party, generates a session id, and
+    // broadcasts CHALLENGE. Battle proper starts when ACCEPT arrives (in
+    // handlePacket → onServerAuthAcceptPkt). Returns immediately.
+    //
+    // `myName` is the trainer name shown in the opponent's "X challenges
+    // you!" overlay (truncated to TB_MAX_NAME_LEN).
+    void startServerAuthAsInitiator(uint32_t remoteId,
+                                    const Gen1Party &myParty,
+                                    const char *myName);
+
+    // Pre-stage our party + trainer name so the CLIENT path can respond to
+    // an inbound CHALLENGE without an additional round-trip. Module calls
+    // this whenever the loaded SAV's party changes. SAFE to call any time;
+    // overwrites the previous staging.
+    void setMyTbParty(const Gen1Party &p, const char *name) {
+        pendingMyParty_ = p;
+        myTbName_[0] = '\0';
+        if (name && *name) {
+            snprintf(myTbName_, sizeof(myTbName_), "%.*s",
+                     (int)TB_MAX_NAME_LEN, name);
+        }
+    }
+
+    // Role of the current battle (LEGACY by default; SERVER/CLIENT only for
+    // server-authoritative path).
+    Role role() const { return role_; }
+
     // Networked initiator. `myParty` is our current save's party; `oppParty`
     // is the peer's party (reconstructed from their daycare beacon — both
     // sides build the same party locally from the same beacon data so we
@@ -51,14 +85,22 @@ public:
     // If existingSeed != 0, use it and skip the internal sendStart (caller
     // already broadcast TEXT_BATTLE_START with the same seed). Otherwise
     // a seed is generated and the engine emits its own start packet.
+    // existingSession non-zero: set engine session_ to that value (must
+    // match the session_id the caller used in the START packet so the
+    // receiver's ACTION/HASH/FORFEIT packets pass our session check).
     void startNetworkedAsInitiator(uint32_t remoteId, const Gen1Party &myParty,
                                    const Gen1Party &oppParty,
-                                   uint32_t existingSeed = 0);
+                                   uint32_t existingSeed = 0,
+                                   uint16_t existingSession = 0);
 
     // Networked receiver. Called by handlePacket() on TEXT_BATTLE_START.
+    // existingSession is the session_id captured from the START packet —
+    // must be passed so our outgoing ACTION packets match the initiator's
+    // session check.
     void startNetworkedAsReceiver(uint32_t remoteId, const Gen1Party &myParty,
                                   uint32_t rngSeed,
-                                  const Gen1Party &oppParty);
+                                  const Gen1Party &oppParty,
+                                  uint16_t existingSession = 0);
 
     // Local roguelike battle. CPU runs side 1. trainerTags[2] are the short
     // names prepended to each pokemon's nickname so messages like
@@ -138,6 +180,15 @@ private:
     uint16_t lastSentTurn_   = 0;
     uint32_t lastSendMs_     = 0;
     uint8_t  fleeAttempts_   = 0;
+    // One-turn history of our last submitted action, used to catch up a
+    // peer who's stuck waiting on us. If peer ACTION lands with a turn
+    // we've already passed, we re-broadcast our prevSent* for THAT turn
+    // (not the current one) so peer can advance. Without this, asymmetric
+    // packet loss locks one side at "Waiting for opponent..." until the
+    // 60s forfeit timer fires.
+    uint8_t  prevSentAction_ = 0xFF;
+    uint8_t  prevSentIndex_  = 0;
+    uint16_t prevSentTurn_   = 0;
 
     // ── Per-faint XP tracking ────────────────────────────────────────────
     // participantMask_ marks player slots that have been active during the
@@ -201,6 +252,12 @@ private:
 
     // Timeouts
     uint32_t lastRecvMs_ = 0;
+    // Peer-ready handshake: initiator waits for any packet from the remote
+    // peer before unblocking move submission. Without this gate, sending a
+    // move at engine.turn()=0 while the receiver was still loading its
+    // battle station made the receiver miss the START race and the engines
+    // desynced from turn 0.
+    bool peerReady_ = false;
     static constexpr uint32_t REMOTE_TIMEOUT_MS = 60000;   // 60s w/o packet → forfeit
     static constexpr uint32_t SCROLL_INTERVAL_MS = 600;    // text reveal cadence
     static constexpr uint32_t RESEND_INTERVAL_MS = 4000;   // re-broadcast our action
@@ -216,6 +273,81 @@ private:
 
     // After both sides submitted, run executeTurn and prep next phase.
     void resolveTurn();
+
+    // ── Server-authoritative PvP wire handlers ────────────────────────────
+    //
+    // role_ governs whether the server-auth code paths run instead of the
+    // legacy lockstep ones. SERVER/CLIENT each touch only their own helpers.
+    Role     role_ = Role::LEGACY;
+    char     myTbName_[TB_MAX_NAME_LEN + 1] = {};
+    char     peerTbName_[TB_MAX_NAME_LEN + 1] = {};
+    Gen1Party pendingMyParty_      = {};   // staged for CHALLENGE / ACCEPT
+    Gen1Party pendingClientParty_  = {};   // server: filled from ACCEPT
+    Gen1Party pendingServerParty_  = {};   // client: filled from CHALLENGE
+
+    // SERVER: CHALLENGE retransmit until ACCEPT arrives.
+    uint32_t lastChallengeMs_ = 0;
+    uint8_t  challengeTries_  = 0;
+    bool     awaitingAccept_  = false;
+
+    // SERVER: UPDATE retransmit until client's next ACTION_V2 acks the seq.
+    uint8_t  updateSeq_         = 0;     // monotonic across UPDATEs (header.seq)
+    bool     unackedUpdate_     = false; // set on send, cleared on matching ACK
+    uint32_t lastUpdateSendMs_  = 0;
+    uint8_t  lastUpdateBuf_[BATTLELINK_MAX_PKT] = {};
+    size_t   lastUpdateLen_     = 0;
+
+    // CLIENT: ACTION_V2 retransmit + last seq we acked (echoed back as
+    // lastAckedSeq in every ACTION_V2 we emit).
+    uint8_t  clientActionType_       = 0xFF;
+    uint8_t  clientActionIndex_      = 0;
+    uint8_t  clientActionTurn_       = 0;
+    uint32_t lastClientActionSendMs_ = 0;
+    uint8_t  lastAppliedUpdateSeq_   = 0;
+    bool     clientNeedsFullState_   = false;
+
+    // CLIENT: between ACCEPT-tx and first UPDATE-rx, retransmit ACCEPT on
+    // the same 4 s cadence the server uses for CHALLENGE. Cleared on the
+    // first applied UPDATE. Prevents the deadlock where the server's last
+    // CHALLENGE retransmit lost contact with our ACCEPT.
+    bool     awaitingFirstUpdate_    = false;
+    uint32_t lastAcceptSendMs_       = 0;
+
+    // CLIENT: current turn tracker. We never call engine_.executeTurn, so
+    // engine_.turn() stays at 0 forever on the client. The server reports
+    // the current turn in every UPDATE; we mirror it here so ACTION_V2
+    // packets carry the right turn number for the server's
+    // "this is for the open turn" check.
+    uint8_t  clientTurn_             = 0;
+
+    // SERVER helpers.
+    void serverAuthSendChallenge();
+    void serverAuthOnAcceptPkt(uint32_t fromId,
+                               const uint8_t *buf, size_t len);
+    void serverAuthOnActionV2Pkt(uint32_t fromId,
+                                 const uint8_t *buf, size_t len);
+    void serverAuthOnStateRequestPkt(uint32_t fromId,
+                                     const uint8_t *buf, size_t len);
+    void serverAuthSendUpdate();
+    void serverAuthSendFullState();
+    void serverAuthRetransmit(uint32_t nowMs);
+
+    // CLIENT helpers (implemented in P3).
+    void clientAuthOnChallengePkt(uint32_t fromId,
+                                  const uint8_t *buf, size_t len);
+    void clientAuthOnUpdatePkt(const uint8_t *buf, size_t len);
+    void clientAuthOnFullStatePkt(const uint8_t *buf, size_t len);
+    void clientAuthSendAccept(bool accepted);
+    void clientAuthSendActionV2(uint8_t actionType, uint8_t index);
+    void clientAuthSendStateRequest();
+    void clientAuthRetransmit(uint32_t nowMs);
+
+    // Canonical client-visible board buffer (single source of truth for
+    // hash + FULL_STATE body). Layout matches the FULL_STATE wire format:
+    //   [0..1] turn (BE)  [2] result  per side {active, count,
+    //   count×(hp BE, status)}  then clientActivePP[4].
+    // Returns bytes written (≤ ~64).
+    size_t packClientStateFromEngine(uint8_t out[]);
 
     // Auto-replace a fainted active mon at the start of each input phase.
     void handleFaints();

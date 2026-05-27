@@ -461,6 +461,7 @@ inline char gen1CharToAscii(uint8_t c) {
 }
 #endif
 
+__attribute__((unused))
 static uint8_t asciiToGen1Char(char c) {
     if (c >= 'A' && c <= 'Z') return 0x80 + (c - 'A');
     if (c >= 'a' && c <= 'z') return 0xA0 + (c - 'a');
