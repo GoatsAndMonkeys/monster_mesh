@@ -1029,6 +1029,14 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
             return;
         }
         if (mon.moves[cursor_] == 0 || mon.pp[cursor_] == 0) return;
+        // Disabled move (Disable, mostly) — block selection so the user
+        // can't burn the K-accept on a move that won't fire. The greyed
+        // "DIS N" label in drawMoveMenu signals this visually.
+        if (mon.disabledSlot == cursor_ && mon.disabledTurns > 0) {
+            appendLog("That move is disabled.");
+            dirty_ = true;
+            return;
+        }
         if (role_ == Role::CLIENT) {
             clientAuthSendActionV2(0 /*USE_MOVE*/, cursor_);
         } else {
@@ -1039,8 +1047,19 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
         return;
     }
 
-    // P = switch (Pokemon menu — X is reserved for exit).
+    // P = switch (Pokemon menu — X is reserved for exit). If the active
+    // mon is wrapped/bound (trapTurns > 0), block the switch — Gen 1's
+    // trapping moves prevent the target from switching out.
     if (c == 'p' || c == 'P') {
+        const auto &activeMon = engine_.party(0).mons[engine_.party(0).active];
+        if (activeMon.trapTurns > 0) {
+            char buf[40];
+            snprintf(buf, sizeof(buf), "Can't switch — trapped for %u!",
+                     (unsigned)activeMon.trapTurns);
+            appendLog(buf);
+            dirty_ = true;
+            return;
+        }
         switchCursor_ = engine_.party(0).active;
         phase_ = Phase::WAIT_SWITCH;
     }
@@ -1082,7 +1101,16 @@ void MonsterMeshTextBattle::drawHpPanel(lgfx::LGFX_Device *g, uint8_t side, int 
     g->setCursor(8, y);
     g->print(hdr);
     drawHpBar(g, 8, y + 14, SCREEN_W - 16, 8, m.hp, m.maxHp);
-    // Status badge.
+    // Substitute HP overlay: when sub is up, draw a second smaller bar in
+    // accent color just above the HP bar. Lets the player see the sub
+    // taking damage independently of HP.
+    if (m.substituteHp > 0) {
+        // Sub max in Gen 1 = maxHp / 4 (set on Substitute use).
+        uint16_t subMax = m.maxHp / 4;
+        if (subMax == 0) subMax = 1;
+        drawHpBar(g, 8, y + 8, SCREEN_W - 16, 4, m.substituteHp, subMax);
+    }
+    // Status badge + sleep/confuse counter when applicable.
     const char *st = nullptr;
     if      (m.status & Gen1BattleEngine::ST_SLP) st = "SLP";
     else if (m.status & Gen1BattleEngine::ST_PSN) st = "PSN";
@@ -1090,9 +1118,69 @@ void MonsterMeshTextBattle::drawHpPanel(lgfx::LGFX_Device *g, uint8_t side, int 
     else if (m.status & Gen1BattleEngine::ST_PAR) st = "PAR";
     else if (m.status & Gen1BattleEngine::ST_FRZ) st = "FRZ";
     if (st) {
-        g->setCursor(SCREEN_W - 38, y);
+        char badge[12];
+        if (m.status & Gen1BattleEngine::ST_SLP && m.sleepTurns)
+            snprintf(badge, sizeof(badge), "SLP%u", (unsigned)m.sleepTurns);
+        else
+            snprintf(badge, sizeof(badge), "%s", st);
+        g->setCursor(SCREEN_W - 50, y);
         g->setTextColor(rgb565(0xC03020), BG);
-        g->print(st);
+        g->print(badge);
+    } else if (m.confuseTurns) {
+        char badge[12];
+        snprintf(badge, sizeof(badge), "CNF%u", (unsigned)m.confuseTurns);
+        g->setCursor(SCREEN_W - 50, y);
+        g->setTextColor(rgb565(0xC09020), BG);
+        g->print(badge);
+    }
+
+    // Stat-boost mini-badges: print non-zero stages in a compact row right
+    // under the HP bar. Only show on side 0 (the player's own panel) to
+    // avoid revealing the opponent's stage tracking — Gen 1 messages tell
+    // the player about boosts as they happen but don't surface a board.
+    if (side == 0) {
+        char row[40] = {};
+        size_t rl = 0;
+        auto append = [&](const char *lbl, int8_t v) {
+            if (!v) return;
+            int n = snprintf(row + rl, sizeof(row) - rl,
+                             "%s%s%d ", lbl, v > 0 ? "+" : "", (int)v);
+            if (n > 0) rl += (size_t)n;
+        };
+        append("A", m.atkBoost);
+        append("D", m.defBoost);
+        append("S", m.spdBoost);
+        append("C", m.spcBoost);
+        if (rl > 0) {
+            g->setTextColor(ACC, BG);
+            g->setCursor(8, y + 24);
+            g->print(row);
+        }
+        // Field effects on our side (active screens / mist / focused).
+        char fx[24] = {};
+        size_t fl = 0;
+        if (p.reflect)     fl += snprintf(fx+fl, sizeof(fx)-fl, "REF ");
+        if (p.lightScreen) fl += snprintf(fx+fl, sizeof(fx)-fl, "LSC ");
+        if (p.mist)        fl += snprintf(fx+fl, sizeof(fx)-fl, "MIST ");
+        if (p.focused)     fl += snprintf(fx+fl, sizeof(fx)-fl, "FOC ");
+        if (fl > 0) {
+            g->setTextColor(DIM, BG);
+            g->setCursor(SCREEN_W - 96, y + 24);
+            g->print(fx);
+        }
+    } else {
+        // Opponent side: just show field effects (visible in Gen 1) but
+        // not stat boost stages.
+        char fx[24] = {};
+        size_t fl = 0;
+        if (p.reflect)     fl += snprintf(fx+fl, sizeof(fx)-fl, "REF ");
+        if (p.lightScreen) fl += snprintf(fx+fl, sizeof(fx)-fl, "LSC ");
+        if (p.mist)        fl += snprintf(fx+fl, sizeof(fx)-fl, "MIST ");
+        if (fl > 0) {
+            g->setTextColor(DIM, BG);
+            g->setCursor(SCREEN_W - 96, y);
+            g->print(fx);
+        }
     }
 }
 
@@ -1114,7 +1202,8 @@ void MonsterMeshTextBattle::drawMoveMenu(lgfx::LGFX_Device *g)
         int cx = colX[i % 2];
         int cy = rowY[i / 2];
         bool selected = (i == cursor_);
-        bool usable   = mon.pp[i] > 0;
+        bool disabled = (mon.disabledSlot == i && mon.disabledTurns > 0);
+        bool usable   = mon.pp[i] > 0 && !disabled;
 
         // Highlight the selected slot with a DARK background bar.
         if (selected) g->fillRect(cx - 2, cy - 1, colW - 8, rowH, DARK);
@@ -1126,9 +1215,17 @@ void MonsterMeshTextBattle::drawMoveMenu(lgfx::LGFX_Device *g)
         static const char *kLabel[4] = { "1.", "2.", "3.", "4." };
         g->setTextColor(fg, bg);
         g->setCursor(cx, cy);
-        if (mv) g->printf("%s %-9.9s %u/%u",
+        if (mv) {
+            if (disabled) {
+                g->printf("%s %-9.9s DIS%u",
+                          kLabel[i], mv->name, (unsigned)mon.disabledTurns);
+            } else {
+                g->printf("%s %-9.9s %u/%u",
                           kLabel[i], mv->name, mon.pp[i], mv->pp);
-        else    g->printf("%s ---",  kLabel[i]);
+            }
+        } else {
+            g->printf("%s ---",  kLabel[i]);
+        }
     }
 
     // Footer: K=accept, S=switch, F=flee, L=cancel — all on one row.

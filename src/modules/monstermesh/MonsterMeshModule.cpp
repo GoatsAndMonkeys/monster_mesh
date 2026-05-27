@@ -1932,7 +1932,7 @@ int32_t MonsterMeshModule::runOnce()
                 static_cast<MonsterMeshModule *>(ctx)
                     ->challengePeerByShortName(peerShort);
             }, this);
-        terminal_.setMmt2ChallengeFn(
+        terminal_.setMmb2ChallengeFn(
             [](void *ctx, const char *peerShort) {
                 static_cast<MonsterMeshModule *>(ctx)
                     ->challengePeerByShortNameV2(peerShort);

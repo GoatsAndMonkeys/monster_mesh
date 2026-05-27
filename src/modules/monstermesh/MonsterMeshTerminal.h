@@ -143,15 +143,14 @@ class MonsterMeshTerminal {
         mmtCtx_ = ctx;
     }
 
-    // Server-authoritative PvP entry: `mmt2 <short>` / `mmb2 <short>`.
-    // Module resolves the peer's short_name and calls
-    // textBattle_.startServerAuthAsInitiator — single CHALLENGE packet
-    // carries our party so the receiver loads the battle screen instantly
-    // on accept.
-    typedef void (*Mmt2ChallengeFn)(void *ctx, const char *peerShortName);
-    void setMmt2ChallengeFn(Mmt2ChallengeFn fn, void *ctx) {
-        mmt2Fn_ = fn;
-        mmt2Ctx_ = ctx;
+    // Server-authoritative PvP entry: `mmb2 <short>`. Module resolves
+    // the peer's short_name and calls textBattle_.startServerAuthAsInitiator
+    // — single CHALLENGE packet carries our party so the receiver loads
+    // the battle screen instantly on accept.
+    typedef void (*Mmb2ChallengeFn)(void *ctx, const char *peerShortName);
+    void setMmb2ChallengeFn(Mmb2ChallengeFn fn, void *ctx) {
+        mmb2Fn_ = fn;
+        mmb2Ctx_ = ctx;
     }
 
     // Hook for `loc e4 fight` — module runs a 5-trainer Indigo Plateau
@@ -276,8 +275,8 @@ class MonsterMeshTerminal {
     void               *e4FightCtx_    = nullptr;
     MmtChallengeFn      mmtFn_         = nullptr;
     void               *mmtCtx_        = nullptr;
-    Mmt2ChallengeFn     mmt2Fn_        = nullptr;
-    void               *mmt2Ctx_       = nullptr;
+    Mmb2ChallengeFn     mmb2Fn_        = nullptr;
+    void               *mmb2Ctx_       = nullptr;
 
     // ── BBS gym discovery (Phase C) ─────────────────────────────────────────
     // Small cache of gyms heard via the last `bbs` probe. Capacity is a

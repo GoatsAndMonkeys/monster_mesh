@@ -1002,16 +1002,14 @@ void MonsterMeshTerminal::executeLine(const char *line)
         mmtFn_(mmtCtx_, p);
         return;
     }
-    // `mmb2 <short>` / `mmt2 <short>` — server-authoritative PvP. Single
+    // `mmb2 <short>` — server-authoritative MonsterMesh Battle. Single
     // CHALLENGE packet carries our party; the receiver's screen lights up
     // instantly on K-accept (no party-exchange round-trip).
-    bool isBattle2Cmd = (strncasecmp(line, "mmb2 ", 5) == 0 ||
-                         strncasecmp(line, "mmt2 ", 5) == 0);
-    if (isBattle2Cmd) {
+    if (strncasecmp(line, "mmb2 ", 5) == 0) {
         const char *p = line + 5;
         while (*p == ' ' || *p == '@') ++p;
         if (!*p) { println("usage: mmb2 <short_name>"); return; }
-        if (!mmt2Fn_) { println("mmb2 not wired"); return; }
+        if (!mmb2Fn_) { println("mmb2 not wired"); return; }
         if (!partyLoaded_) {
             println("no party loaded — load a SAV first");
             return;
@@ -1019,7 +1017,7 @@ void MonsterMeshTerminal::executeLine(const char *line)
         char buf[64];
         snprintf(buf, sizeof(buf), "v2-Challenging %s...", p);
         println(buf);
-        mmt2Fn_(mmt2Ctx_, p);
+        mmb2Fn_(mmb2Ctx_, p);
         return;
     }
     if (strncmp(line, "explore", 7) == 0) {
