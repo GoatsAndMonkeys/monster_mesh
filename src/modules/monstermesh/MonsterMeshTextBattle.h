@@ -301,6 +301,10 @@ private:
     uint32_t lastUpdateSendMs_  = 0;
     uint8_t  lastUpdateBuf_[BATTLELINK_MAX_PKT] = {};
     size_t   lastUpdateLen_     = 0;
+    // Lines added to log_[] since the last UPDATE shipped them out.
+    // Lets the server render its own log text (we no longer wipe log_
+    // on send — that was leaving the server's screen blank).
+    uint8_t  unshippedLogLines_ = 0;
 
     // CLIENT: ACTION_V2 retransmit + last seq we acked (echoed back as
     // lastAckedSeq in every ACTION_V2 we emit).

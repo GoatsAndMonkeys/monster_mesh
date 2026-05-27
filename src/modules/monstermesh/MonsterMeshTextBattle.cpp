@@ -40,6 +40,7 @@ void MonsterMeshTextBattle::appendLog(const char *line)
     snprintf(log_[logHead_], sizeof(log_[logHead_]), "%s", line);
     logHead_ = (logHead_ + 1) % LOG_LINES;
     if (logFill_ < LOG_LINES) logFill_++;
+    if (unshippedLogLines_ < LOG_LINES) unshippedLogLines_++;
     dirty_ = true;
 }
 
@@ -286,6 +287,7 @@ void MonsterMeshTextBattle::exit()
     clientActionType_ = 0xFF;
     clientTurn_ = 0;
     clientNeedsFullState_ = false;
+    unshippedLogLines_ = 0;
     dirty_ = true;
 }
 
@@ -1589,8 +1591,8 @@ void MonsterMeshTextBattle::serverAuthSendUpdate()
 
     // Drain the log buffer into the packet if there's room.
     uint8_t numLogLines = 0;
-    if (logFill_ > 0) {
-        numLogLines = logFill_;
+    if (unshippedLogLines_ > 0) {
+        numLogLines = unshippedLogLines_;
         if (numLogLines > TB_UPDATE_MAX_LOG_LINES) {
             numLogLines = TB_UPDATE_MAX_LOG_LINES;
         }
@@ -1660,8 +1662,13 @@ void MonsterMeshTextBattle::serverAuthSendUpdate()
         size_t countSlot = w;
         pkt->payload[w++] = 0;
         uint8_t shippedLines = 0;
-        for (uint8_t i = 0; i < numLogLines; ++i) {
-            uint8_t idx = (logHead_ + LOG_LINES - logFill_ + i) % LOG_LINES;
+        // Walk back from the newest line by `numLogLines` so we ship
+        // exactly the lines that haven't been shipped yet, in oldest →
+        // newest order.
+        uint8_t startOffset = unshippedLogLines_;
+        if (startOffset > numLogLines) startOffset = numLogLines;
+        for (uint8_t i = 0; i < startOffset; ++i) {
+            uint8_t idx = (logHead_ + LOG_LINES - startOffset + i) % LOG_LINES;
             size_t llen = strnlen(log_[idx], LOG_WIDTH);
             if (w + 1 + llen > logBudgetEnd) break;
             pkt->payload[w++] = (uint8_t)llen;
@@ -1670,12 +1677,11 @@ void MonsterMeshTextBattle::serverAuthSendUpdate()
             shippedLines++;
         }
         pkt->payload[countSlot] = shippedLines;
-        // Lines that didn't fit stay in the log buffer? — no, simpler to
-        // drop the whole buffer; rarely matters in practice since the
-        // truncated lines are usually low-priority "engine emitted N
-        // status messages in one turn" overflow. Keep the existing
-        // clear semantics so logFill_ resets after each UPDATE.
-        logFill_ = 0; logHead_ = 0;
+        // Keep log_[] / logHead_ / logFill_ alive so the server's own
+        // drawLog() still has lines to render — without this the server
+        // screen went blank between turns. Just mark the lines as
+        // shipped so the next UPDATE doesn't re-ship them.
+        unshippedLogLines_ = 0;
     }
     if (flags & TB_UPD_BENCH) {
         // CLIENT-side party state (wire 0 = engine P1). Keeps the client's
@@ -2065,6 +2071,20 @@ void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len
     // First UPDATE proves the server got our ACCEPT — stop retransmitting it.
     awaitingFirstUpdate_ = false;
 
+    // Snapshot server-side mons' HP BEFORE applying this UPDATE so we can
+    // detect any server mon that faints (= our kill) and credit XP / level
+    // up the corresponding active mon on our side. The server's
+    // resolveTurn only awards XP to side 0 (server's player); without
+    // this mirror on the client, the client never levels up from a
+    // PvP win.
+    uint16_t preEnemyHp[6] = {};
+    {
+        const auto &ep = engine_.party(1);
+        for (uint8_t i = 0; i < ep.count && i < 6; ++i) {
+            preEnemyHp[i] = ep.mons[i].hp;
+        }
+    }
+
     // Idempotent dedupe: same seq already applied → ACK so server can
     // clear unackedUpdate_, but don't reapply state. If the user hasn't
     // picked an action yet (clientActionType_ == 0xFF), send a pure-ACK
@@ -2222,6 +2242,72 @@ void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len
         }
     }
     bool needSwitch = (flags & TB_UPD_NEED_PLAYER_SWITCH) != 0;
+
+    // ── Mirror the server's XP / in-battle level-up bookkeeping ─────────
+    // For every server-side mon that transitioned HP > 0 → 0 in this
+    // UPDATE, the corresponding kill belongs to one of OUR active mons.
+    // Apply the same Gen 1 formula the server uses in resolveTurn so
+    // the client's party levels up in sync with what we'd see on a
+    // local battle. Uses Gen1 base stats + level → baseYield, plus
+    // the legacy participantMask_ for share splitting.
+    {
+        const auto &ep = engine_.party(1);
+        for (uint8_t i = 0; i < ep.count && i < 6; ++i) {
+            if (preEnemyHp[i] == 0)            continue;  // already dead
+            if (ep.mons[i].hp != 0)            continue;  // still alive
+            // Just fainted — credit XP.
+            uint8_t pcount = (uint8_t)__builtin_popcount(participantMask_);
+            if (pcount == 0) pcount = 1;
+            uint32_t lvl = ep.mons[i].level ? ep.mons[i].level : 1;
+            uint8_t  dex = ep.mons[i].species;
+            const Gen1BaseStats &b =
+                GEN1_BASE_STATS[dex < 152 ? dex : 0];
+            uint32_t baseYield = (uint32_t)(b.hp + b.atk + b.def +
+                                            b.spd + b.spc) / 3;
+            if (baseYield < 20) baseYield = 20;
+            // PvP counts as a trainer battle (1.5× multiplier → ×3/×2
+            // to keep integer math).
+            uint32_t numerMult = 3u;
+            uint32_t xpThisFaint =
+                (baseYield * lvl * numerMult) /
+                (uint32_t)(14u * pcount);
+            if (xpThisFaint == 0) xpThisFaint = 1;
+            pendingXpDrops_++;
+            char line[40];
+            snprintf(line, sizeof(line), "Each earned %u XP!",
+                     (unsigned)xpThisFaint);
+            appendLog(line);
+            const auto &mp = engine_.party(0);
+            for (uint8_t s = 0; s < mp.count && s < 6; ++s) {
+                if (!(participantMask_ & (1u << s))) continue;
+                if (mp.mons[s].hp == 0) continue;
+                pendingXpPerSlot_[s] += xpThisFaint;
+                slotXpAccum_[s]      += xpThisFaint;
+                while (true) {
+                    uint8_t curLvl = engine_.party(0).mons[s].level;
+                    if (curLvl >= 100) break;
+                    uint32_t threshold =
+                        3u * (uint32_t)curLvl * curLvl +
+                        3u * (uint32_t)curLvl + 1u;
+                    if (slotXpAccum_[s] < threshold) break;
+                    slotXpAccum_[s] -= threshold;
+                    inBattleLevelUp(s);
+                }
+            }
+            // Reset participant mask to whoever's currently active — only
+            // mons present for the NEXT enemy share that one's XP.
+            participantMask_ = (uint8_t)(1u << engine_.party(0).active);
+        }
+    }
+    // Track new-active on our side too so participant mask grows when
+    // we switch in mid-battle.
+    {
+        uint8_t curActive = engine_.party(0).active;
+        if (curActive != lastPlayerActive_) {
+            participantMask_ |= (uint8_t)(1u << curActive);
+            lastPlayerActive_ = curActive;
+        }
+    }
 
     // After applying, re-hash the canonical buffer and compare with the
     // server's inline hash. Mismatch → STATE_REQUEST (P4). Match → ACK.
