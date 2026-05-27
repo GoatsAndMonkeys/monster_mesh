@@ -1391,10 +1391,13 @@ void MonsterMeshModule::challengePeerByShortName(const char *peerShort)
     }
 }
 
-// Server-authoritative challenge — terminal command `mmb2 <short>` /
-// `mmt2 <short>`. One CHALLENGE packet carries our party so the receiver
-// can paint the battle screen instantly on K-accept (no DM, no chunked
-// party exchange). All retransmits + state machine live in textBattle_.
+// Server-authoritative challenge — terminal command `mmb2 <short>`.
+// Resolves the peer + stages the request; the actual engine start +
+// LVGL flush_cb swap + screen clear happen later in runOnce on the LoRa
+// thread. Running them inline from this context (terminal input → LVGL
+// thread) deadlocks against the LVGL render lock and trips the t-deck
+// watchdog (observed: deck freezes mid-print right after the first
+// "[MMB] server-auth CHALLENGE" log line).
 void MonsterMeshModule::challengePeerByShortNameV2(const char *peerShort)
 {
     if (!terminal_.hasParty()) {
@@ -1403,6 +1406,10 @@ void MonsterMeshModule::challengePeerByShortNameV2(const char *peerShort)
     }
     if (textBattleActive_) {
         terminal_.printLine("mmb2: already in a battle");
+        return;
+    }
+    if (pendingMmb2Initiator_) {
+        terminal_.printLine("mmb2: challenge already pending");
         return;
     }
     size_t total = nodeDB->getNumMeshNodes();
@@ -1426,35 +1433,17 @@ void MonsterMeshModule::challengePeerByShortNameV2(const char *peerShort)
         terminal_.printLine(buf);
         return;
     }
+    pendingMmb2Target_ = resolved;
+    strncpy(pendingMmb2PeerShort_, matchedShort,
+            sizeof(pendingMmb2PeerShort_) - 1);
+    pendingMmb2PeerShort_[sizeof(pendingMmb2PeerShort_) - 1] = '\0';
+    pendingMmb2Initiator_ = true;
     char buf[80];
-    snprintf(buf, sizeof(buf), "mmb2: challenging %s (server-auth)...",
+    snprintf(buf, sizeof(buf), "mmb2: queued challenge → %s (server-auth)",
              matchedShort);
     terminal_.printLine(buf);
-    LOG_INFO("[MonsterMesh] mmb2: v2-challenging %s = 0x%08X\n",
+    LOG_INFO("[MonsterMesh] mmb2: queued v2-challenge for %s = 0x%08X\n",
              matchedShort, (unsigned)resolved);
-
-    // Our trainer name: Meshtastic short_name (per the daycare convention).
-    const char *ourShort = (owner.short_name[0] != '\0') ? owner.short_name
-                                                          : "MM";
-    textBattle_.setMyTbParty(terminal_.getParty(), ourShort);
-    textBattle_.startServerAuthAsInitiator(resolved,
-                                            terminal_.getParty(),
-                                            ourShort);
-    textBattleActive_ = true;
-#if HAS_TFT
-    lv_display_t *disp = lv_display_get_default();
-    if (disp && !savedFlushCb_) {
-        savedFlushCb_ = (void *)disp->flush_cb;
-        lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
-            lv_display_flush_ready(d);
-        });
-    }
-#endif
-    if (g_deviceUiLgfx) {
-        concurrency::LockGuard g(spiLock);
-        g_deviceUiLgfx->clearClipRect();
-        g_deviceUiLgfx->fillScreen(0x0000);
-    }
 }
 
 // Send TEXT_BATTLE_START directly from the module (not via textBattle's
@@ -2887,6 +2876,44 @@ int32_t MonsterMeshModule::runOnce()
                      (int)terminal_.hasParty(),
                      (int)mmbOppPartyReady_);
         }
+    }
+
+    // ── Server-authoritative PvP launch (mmb2) ─────────────────────────
+    // Deferred from challengePeerByShortNameV2 so the heavy LVGL work
+    // doesn't run on the terminal/LVGL thread. Single CHALLENGE packet
+    // carries our party; no party-exchange round-trip required.
+    if (pendingMmb2Initiator_ && !textBattleActive_ && setupDone_ &&
+        !emulatorActive_ && !browserActive_ && terminal_.hasParty()) {
+        pendingMmb2Initiator_ = false;
+        uint32_t target = pendingMmb2Target_;
+        char     peerShort[12];
+        memcpy(peerShort, pendingMmb2PeerShort_, sizeof(peerShort));
+        peerShort[sizeof(peerShort) - 1] = '\0';
+
+#if HAS_TFT
+        lv_display_t *disp = lv_display_get_default();
+        if (disp && !savedFlushCb_) {
+            savedFlushCb_ = (void *)disp->flush_cb;
+            lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
+                lv_display_flush_ready(d);
+            });
+        }
+#endif
+        if (g_deviceUiLgfx) {
+            concurrency::LockGuard g(spiLock);
+            g_deviceUiLgfx->clearClipRect();
+            g_deviceUiLgfx->fillScreen(0x0000);
+        }
+        textBattleActive_ = true;
+
+        const char *ourShort = (owner.short_name[0] != '\0')
+                                 ? owner.short_name : "MM";
+        textBattle_.setMyTbParty(terminal_.getParty(), ourShort);
+        textBattle_.startServerAuthAsInitiator(target,
+                                                terminal_.getParty(),
+                                                ourShort);
+        LOG_INFO("[MonsterMesh] mmb2: launched server-auth challenge → %s "
+                 "(0x%08X)\n", peerShort, (unsigned)target);
     }
 
     if ((pendingMmtBattleAsInitiator_ || pendingMmtBattleAsReceiver_) &&

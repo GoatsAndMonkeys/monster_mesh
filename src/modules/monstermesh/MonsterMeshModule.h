@@ -400,6 +400,14 @@ public:
     // saved seed/peer.
     volatile bool pendingMmtBattleAsInitiator_ = false;
     volatile bool pendingMmtBattleAsReceiver_  = false;
+
+    // Server-authoritative PvP launch. challengePeerByShortNameV2 (called
+    // from the LVGL/terminal thread) just stages these; runOnce on the
+    // LoRa thread does the LVGL flush_cb swap + fillScreen + engine start
+    // so we don't deadlock or trip the watchdog from the terminal context.
+    volatile bool pendingMmb2Initiator_   = false;
+    uint32_t      pendingMmb2Target_      = 0;
+    char          pendingMmb2PeerShort_[12] = {};
     uint32_t      mmtBattlePeer_     = 0;
     uint32_t      mmtBattleSeed_     = 0;
     uint16_t      mmtBattleSession_  = 0;
