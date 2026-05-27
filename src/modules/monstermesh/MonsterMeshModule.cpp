@@ -2878,6 +2878,29 @@ int32_t MonsterMeshModule::runOnce()
         }
     }
 
+    // ── Server-auth CLIENT side: textBattle_ flipped to CLIENT mode when
+    // a CHALLENGE arrived. We need to swap LVGL flush_cb + clear screen
+    // (just like the SERVER launch below) so Meshtastic UI repaints don't
+    // overdraw the battle overlay.
+    if (textBattle_.isActive() && !textBattleActive_ && setupDone_) {
+        textBattleActive_ = true;
+#if HAS_TFT
+        lv_display_t *disp = lv_display_get_default();
+        if (disp && !savedFlushCb_) {
+            savedFlushCb_ = (void *)disp->flush_cb;
+            lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
+                lv_display_flush_ready(d);
+            });
+        }
+#endif
+        if (g_deviceUiLgfx) {
+            concurrency::LockGuard g(spiLock);
+            g_deviceUiLgfx->clearClipRect();
+            g_deviceUiLgfx->fillScreen(0x0000);
+        }
+        LOG_INFO("[MonsterMesh] textBattle activated externally (CLIENT overlay) — flush_cb parked\n");
+    }
+
     // ── Server-authoritative PvP launch (mmb2) ─────────────────────────
     // Deferred from challengePeerByShortNameV2 so the heavy LVGL work
     // doesn't run on the terminal/LVGL thread. Single CHALLENGE packet

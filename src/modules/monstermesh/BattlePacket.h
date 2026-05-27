@@ -183,11 +183,17 @@ static constexpr uint8_t  TB_STATE_REQUEST_BYTES  = 1;
 // Soft upper bound for log section in UPDATE (lines × bytes).
 static constexpr uint8_t  TB_UPDATE_MAX_LOG_LINES = 6;
 // Server retransmit/timeout cadences (ms).
-static constexpr uint32_t TB_CHALLENGE_RESEND_MS  = 4000;
-static constexpr uint32_t TB_CHALLENGE_MAX_TRIES  = 3;
+// Server retransmits CHALLENGE every 5 s until ACCEPT or 6 tries, then
+// cancels. 6 tries × 5 s = 30 s total — enough for the receiver's deck
+// to bring up the overlay AND for the user to read it and press K, even
+// with some LoRa packet loss on top.
+static constexpr uint32_t TB_CHALLENGE_RESEND_MS  = 5000;
+static constexpr uint32_t TB_CHALLENGE_MAX_TRIES  = 6;
 static constexpr uint32_t TB_UPDATE_RESEND_MS     = 3000;
 static constexpr uint32_t TB_ACTION_RESEND_MS     = 3000;
-static constexpr uint32_t TB_NO_TRAFFIC_TIMEOUT_MS = 30000;
+// 60 s no-traffic timeout once a battle is live — gives the user time
+// to consult the move menu without auto-forfeiting between turns.
+static constexpr uint32_t TB_NO_TRAFFIC_TIMEOUT_MS = 60000;
 
 // UPDATE flag bits (TEXT_BATTLE_UPDATE payload[1..2] — BIG-ENDIAN uint16).
 // Order in this enum doubles as the order of conditional sections in the

@@ -858,10 +858,16 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
         return;
     }
 
-    // Server-auth client: CHALLENGE overlay. K = accept, anything else = decline.
+    // Server-auth client: CHALLENGE overlay. Y accepts, N declines.
+    // (K/L are reserved for the battle UI itself — K is the move-accept
+    // button and could be hit by accident while typing in the app.)
     if (phase_ == Phase::WAIT_CHALLENGE_OVERLAY) {
-        bool accept = (c == 'k' || c == 'K' || c == '\n' || c == '\r' || c == ' ');
-        clientAuthSendAccept(accept);
+        if (c == 'y' || c == 'Y') {
+            clientAuthSendAccept(true);
+        } else if (c == 'n' || c == 'N' || c == 27 /*ESC*/) {
+            clientAuthSendAccept(false);
+        }
+        // Any other key — ignore, leave the overlay up.
         return;
     }
 
@@ -1361,7 +1367,7 @@ void MonsterMeshTextBattle::render(lgfx::LGFX_Device *g)
         g->print(party);
         g->setTextColor(FG, DARK);
         g->setCursor(34, by + 76);
-        g->print("K = ACCEPT    L = DECLINE");
+        g->print("Y = ACCEPT    N = DECLINE");
         dirty_ = false;
         return;
     }
@@ -1485,20 +1491,35 @@ void MonsterMeshTextBattle::serverAuthSendChallenge()
     challengeTries_++;
 }
 
-// Build the canonical client-visible board buffer from the server's engine.
-// Server convention: wire side 0 = engine P1 (client), wire side 1 = engine
-// P0 (us). PP shown is the CLIENT's active mon (engine P1). Layout matches
-// FULL_STATE wire format AND is fed into tbBoardHash24() for the inline
-// hash on UPDATE.
+// Build the canonical client-visible board buffer. Must be byte-identical
+// on server and client for the boardHash24 check to pass — i.e. wire side
+// 0 is "client's party" and wire side 1 is "server's party" on BOTH
+// sides. Each side initializes its local engine with itself as P0, so:
+//   on the SERVER (role=SERVER/LEGACY): wire 0 = engine P1, wire 1 = P0
+//   on the CLIENT  (role=CLIENT):       wire 0 = engine P0, wire 1 = P1
+// Similarly, the trailing "client's active mon PP" maps to engine P1 on
+// the server and engine P0 on the client. Both sides agree on which
+// 4-byte PP they're sampling.
+//
+// Same layout is the body of FULL_STATE.
 size_t MonsterMeshTextBattle::packClientStateFromEngine(uint8_t out[])
 {
     uint16_t turn = engine_.turn();
+    bool roleClient = (role_ == Role::CLIENT);
     uint8_t result;
     switch (engine_.result()) {
         case Gen1BattleEngine::Result::ONGOING: result = TB_RESULT_ONGOING; break;
-        // Client POV: client = engine P1, so P2_WIN means client won.
-        case Gen1BattleEngine::Result::P2_WIN:  result = TB_RESULT_YOU_WIN; break;
-        case Gen1BattleEngine::Result::P1_WIN:  result = TB_RESULT_YOU_LOSE; break;
+        // From the client's POV: client is wire side 0. Engine result
+        // P1_WIN means "side 1 won" — which is the server's side on the
+        // CLIENT (engine P1 = server) and the client's side on the SERVER
+        // (engine P1 = client per server's swap). Map per role so both
+        // sides hash the same result byte.
+        case Gen1BattleEngine::Result::P1_WIN:
+            result = roleClient ? TB_RESULT_YOU_LOSE : TB_RESULT_YOU_WIN;
+            break;
+        case Gen1BattleEngine::Result::P2_WIN:
+            result = roleClient ? TB_RESULT_YOU_WIN : TB_RESULT_YOU_LOSE;
+            break;
         case Gen1BattleEngine::Result::DRAW:    result = TB_RESULT_DRAW; break;
         default:                                result = TB_RESULT_ONGOING; break;
     }
@@ -1508,10 +1529,12 @@ size_t MonsterMeshTextBattle::packClientStateFromEngine(uint8_t out[])
     out[w++] =  turn       & 0xFF;
     out[w++] = result;
 
-    // Wire side 0 = engine P1 (client). Wire side 1 = engine P0 (us).
-    static const uint8_t wireToEngine[2] = { 1, 0 };
+    // Role-dependent wire→engine mapping (see comment above).
+    static const uint8_t wireToEngineSrv[2] = { 1, 0 };
+    static const uint8_t wireToEngineCli[2] = { 0, 1 };
+    const uint8_t *map = roleClient ? wireToEngineCli : wireToEngineSrv;
     for (uint8_t ws = 0; ws < 2; ++ws) {
-        const auto &party = engine_.party(wireToEngine[ws]);
+        const auto &party = engine_.party(map[ws]);
         out[w++] = party.active;
         out[w++] = party.count;
         for (uint8_t i = 0; i < party.count && i < 6; ++i) {
@@ -1522,8 +1545,10 @@ size_t MonsterMeshTextBattle::packClientStateFromEngine(uint8_t out[])
         }
     }
 
-    // CLIENT's active mon PP — wire side 0 → engine P1.
-    const auto &cp = engine_.party(1);
+    // "Client's active mon PP" — wire side 0 → engine P1 (server) or P0
+    // (client) depending on role.
+    uint8_t ppSide = roleClient ? 0 : 1;
+    const auto &cp = engine_.party(ppSide);
     const auto &cm = cp.mons[cp.active];
     for (uint8_t i = 0; i < 4; ++i) out[w++] = cm.pp[i];
 
@@ -1766,6 +1791,12 @@ void MonsterMeshTextBattle::serverAuthOnAcceptPkt(uint32_t fromId,
     remoteId_       = fromId;
     pendingRemoteAction_ = false;
     phase_          = Phase::WAIT_ACTION;
+    // Refresh the no-traffic timer: until now we were awaitingAccept_ and
+    // the timeout was gated off, but lastRecvMs_ was stamped at CHALLENGE-
+    // send time. Without this refresh the 30 s clock could expire within
+    // a few seconds of the battle actually starting if the CHALLENGE +
+    // ACCEPT round-trip took most of the budget already.
+    lastRecvMs_     = millis();
     handleFaints();
     appendLog("Battle begins!");
     char wlog[40];
@@ -1917,7 +1948,7 @@ void MonsterMeshTextBattle::clientAuthOnChallengePkt(uint32_t fromId,
     snprintf(line, sizeof(line), "%.12s wants to battle!",
              peerTbName_[0] ? peerTbName_ : "Trainer");
     appendLog(line);
-    appendLog("K=accept  L=decline");
+    appendLog("Y=accept  N=decline");
     lastRecvMs_ = millis();
     dirty_ = true;
     Serial.printf("[MMB] server-auth CHALLENGE rx from=0x%08X session=0x%04X "
