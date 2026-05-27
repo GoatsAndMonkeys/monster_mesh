@@ -48,12 +48,31 @@ extern GameState   gameState;
 extern AnimPlayer  animPlayer;
 extern bool        screenOn;
 
+// ─── Gift menu (Pocket Pikachu 1/2 canonical amounts + clock/status access) ──
+struct GiftOption {
+    const char *label;
+    int32_t     watts;   // >0 = spend exactly N watts
+                         //  0 = not a watt gift (Clock/Status/Back)
+                         // -1 = spend ALL remaining watts
+};
+
+extern const GiftOption GIFT_OPTIONS[];
+extern const uint8_t    GIFT_OPTION_COUNT;
+extern uint8_t          giftMenuCursor;     // 0..GIFT_OPTION_COUNT-1
+extern uint32_t         giftPowUntil;       // millis(); 0 when no POW flash active
+
 // ─── API ─────────────────────────────────────────────────────────────────────
 void game_init();
 void game_update();             // Call every loop()
 void game_on_short_press();     // PRG short press — advance to next screen
 void game_on_long_press();      // PRG long press  — back to game / confirm
 void game_on_mesh_message();    // Any received mesh packet (broadcast or DM) — counts as a step
+
+// Bulk-step ingest from external sources (e.g. pen-test WiFi-vuln detections).
+// Treats N steps as if they came in as N mesh messages, but only saves to
+// flash once at the end — keeps wear low for large batches like 200-step
+// WPS detections.
+void game_add_steps(uint32_t count);
 
 // Start an animation (replaces current)
 void game_play_anim(const AnimSeq* seq, bool loop = false);

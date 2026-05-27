@@ -7,6 +7,7 @@
 #include "concurrency/OSThread.h"
 #include "input/InputBroker.h"
 #include "Observer.h"
+#include "game.h"   // for GameState enum + gameState extern
 
 // ── PocketPikachuModule ──────────────────────────────────────────────────────
 // One carousel frame (game + sidebar).
@@ -24,7 +25,9 @@
 // Install in Modules.cpp setupModules():
 //   pikachuModule = new PocketPikachuModule();
 
-class PocketPikachuModule : public MeshModule, public concurrency::OSThread
+class PocketPikachuModule : public MeshModule,
+                            public Observable<const UIFrameEvent *>,
+                            public concurrency::OSThread
 {
   public:
     PocketPikachuModule();
@@ -40,15 +43,21 @@ class PocketPikachuModule : public MeshModule, public concurrency::OSThread
     virtual void drawFrame(OLEDDisplay *display, OLEDDisplayUiState *state,
                            int16_t x, int16_t y) override;
 
-    // Block carousel navigation while menu is open
-    virtual bool interceptingKeyboardInput() override { return menuActive_; }
+    // Block carousel navigation while a Pikachu menu is open. Driven by the
+    // live gameState so it always reflects reality (e.g. when the POW
+    // animation auto-times-out from GS_GIFT_MENU → GS_HAPPY → GS_STAND).
+    virtual bool interceptingKeyboardInput() override {
+        return gameState == GS_GIFT_MENU ||
+               gameState == GS_CLOCK_MENU ||
+               gameState == GS_STATUS_MENU;
+    }
+    virtual Observable<const UIFrameEvent *> *getUIFrameObservable() override { return this; }
 #endif
 
     // OSThread — game logic ~20 fps
     virtual int32_t runOnce() override;
 
   private:
-    bool     menuActive_  = false;
     uint32_t lastDrawMs_  = 0;   // millis() of last drawFrame call
 
     int handleInputEvent(const InputEvent *event);
@@ -60,6 +69,7 @@ class PocketPikachuModule : public MeshModule, public concurrency::OSThread
     static void drawSidebar(OLEDDisplay *d, int16_t ox, int16_t oy);
     static void drawClockScreen(OLEDDisplay *d, int16_t ox, int16_t oy);
     static void drawStatusScreen(OLEDDisplay *d, int16_t ox, int16_t oy);
+    static void drawGiftMenu(OLEDDisplay *d, int16_t ox, int16_t oy);
 };
 
 extern PocketPikachuModule *pikachuModule;

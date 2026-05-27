@@ -351,14 +351,15 @@ static void emitStatChange(Gen1BattleEngine::LogSink log, void *ctx,
     char buf[64];
     if (delta > 0) {
         if (stage >= 6) {
-            snprintf(buf, sizeof(buf), "%.10s's %s can't go any higher!", nick, statName);
+            // Short form fits the 32-byte log buffer.
+            snprintf(buf, sizeof(buf), "%.10s's %s maxed!", nick, statName);
         } else {
             stage++;
             snprintf(buf, sizeof(buf), "%.10s's %s rose!", nick, statName);
         }
     } else {
         if (stage <= -6) {
-            snprintf(buf, sizeof(buf), "%.10s's %s can't go any lower!", nick, statName);
+            snprintf(buf, sizeof(buf), "%.10s's %s bottomed!", nick, statName);
         } else {
             stage--;
             snprintf(buf, sizeof(buf), "%.10s's %s fell!", nick, statName);
@@ -1089,23 +1090,63 @@ void Gen1BattleEngine::hashState(uint8_t out[8]) const
             for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
         };
         mix(&p_[s].active, 1);
+        mix(&p_[s].reflect, 1); mix(&p_[s].lightScreen, 1);
+        mix(&p_[s].mist, 1);    mix(&p_[s].focused, 1);
+        mix(&p_[s].reflectTurns, 1);
+        mix(&p_[s].lightScreenTurns, 1);
         for (int i = 0; i < p_[s].count; ++i) {
             const BattlePoke &m = p_[s].mons[i];
+            // Permanent-but-mutable stats (level-up + Transform rewrite these).
+            mix(&m.species, 1); mix(&m.level, 1);
+            mix(&m.type1, 1);   mix(&m.type2, 1);
+            mix(&m.maxHp, 2);
+            mix(&m.atk, 2); mix(&m.def, 2); mix(&m.spd, 2); mix(&m.spc, 2);
+            mix(m.moves, 4);
+            // Live combat state.
             mix(&m.hp, 2); mix(&m.status, 1);
+            mix(&m.sleepTurns, 1); mix(&m.confuseTurns, 1);
             int8_t b[6] = {m.atkBoost, m.defBoost, m.spdBoost,
                            m.spcBoost, m.accBoost, m.evaBoost};
             mix(b, 6);
+            mix(&m.toxicCounter, 1);
+            uint8_t flags = (uint8_t)((m.mustRecharge ? 0x01 : 0) |
+                                       (m.thrashing    ? 0x02 : 0) |
+                                       (m.flinched     ? 0x04 : 0) |
+                                       (m.rageActive   ? 0x08 : 0) |
+                                       (m.transformed  ? 0x10 : 0));
+            mix(&flags, 1);
+            mix(&m.thrashTurns, 1);
+            mix(&m.lastMoveIdx, 1);
+            mix(&m.disabledSlot, 1);
+            mix(&m.disabledTurns, 1);
+            mix(&m.chargingSlot, 1);
+            mix(&m.trapTurns, 1);
+            mix(&m.thrashSlot, 1);
+            mix(&m.bideTurns, 2);
+            mix(&m.bideDamage, 2);
+            mix(&m.substituteHp, 2);
+            mix(&m.lastDamageTaken, 2);
+            mix(&m.mimicSlot, 1);
+            mix(&m.mimicOrigMove, 1);
+            mix(&m.mimicOrigPp, 1);
             mix(m.pp, 4);
         }
         return h;
     };
     uint64_t th = 1469598103934665603ull;
-    {
-        const uint8_t *b = (const uint8_t *)&turn_;
-        for (size_t i = 0; i < sizeof(turn_); ++i) {
-            th ^= b[i]; th *= 1099511628211ull;
-        }
-    }
+    auto thmix = [&](const void *p, size_t n) {
+        const uint8_t *b = (const uint8_t *)p;
+        for (size_t i = 0; i < n; ++i) { th ^= b[i]; th *= 1099511628211ull; }
+    };
+    thmix(&turn_, sizeof(turn_));
+    // RNG state must be in the hash. If one engine consumes random numbers
+    // a different number of times than the other (e.g. divergent code path
+    // through a status-immunity short-circuit) the RNG silently desyncs
+    // and every subsequent damage roll diverges with no signal — the
+    // narrower hash misses it because hp/status look the same on turn N
+    // but will differ on turn N+1.
+    thmix(s_, sizeof(s_));
+    thmix(&rng_, sizeof(rng_));
     uint64_t h = th ^ sideHash(0) ^ sideHash(1);
     for (int i = 0; i < 8; ++i) out[i] = (uint8_t)(h >> (i * 8));
 }

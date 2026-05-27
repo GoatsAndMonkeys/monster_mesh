@@ -1,7 +1,8 @@
 #include "game.h"
 #include "config.h"
-#include <Preferences.h>
+#include "FSCommon.h"     // cross-platform FSCom (LittleFS/SD/NoFS abstraction)
 #include <time.h>
+#include <string.h>
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
 PikaStatus  pikaStatus;
@@ -9,7 +10,18 @@ GameState   gameState    = GS_STARTING;
 AnimPlayer  animPlayer   = { nullptr, 0, 0, false };
 bool        screenOn     = true;
 
-static Preferences prefs;
+// Pikachu save lives at /pikachu/status.dat as a single binary record.
+// Cross-platform via FSCom — works on ESP32 (LittleFS) and nRF52 (LittleFS
+// over QSPI). Replaces the old ESP32-only Preferences NVS path.
+static constexpr const char *PIKA_SAVE_PATH = "/pikachu/status.dat";
+static constexpr uint32_t    PIKA_SAVE_MAGIC = 0x504B4341u;  // 'PKCA'
+
+#pragma pack(push, 1)
+struct PikaSaveBlob {
+    uint32_t magic;
+    PikaStatus status;
+};
+#pragma pack(pop)
 
 // Step / walk tracking
 static uint32_t lastStepMs         = 0;
@@ -24,29 +36,38 @@ static uint32_t cooldownBath       = 0;
 static uint32_t cooldownSleep      = 0;
 static uint32_t cooldownWalk       = 0;
 
-// ─── Persistence ─────────────────────────────────────────────────────────────
+// ─── Persistence (FSCom — cross-platform) ────────────────────────────────────
+static void pika_set_defaults()
+{
+    memset(&pikaStatus, 0, sizeof(pikaStatus));
+    pikaStatus.watts = 50;     // matches old NVS default
+}
+
 static void load_status() {
-    prefs.begin("pikachu", true);
-    pikaStatus.steps           = prefs.getULong("steps",      0);
-    pikaStatus.totalSteps      = prefs.getULong("totalSteps", 0);
-    pikaStatus.watts           = prefs.getLong ("watts",      50);
-    pikaStatus.friendshipLevel = prefs.getLong ("friendship", 0);
-    pikaStatus.todayReach150   = prefs.getBool ("reach150",   false);
-    pikaStatus.todayReach300   = prefs.getBool ("reach300",   false);
-    pikaStatus.reachEnd        = prefs.getBool ("reachEnd",   false);
-    prefs.end();
+    pika_set_defaults();
+#ifdef FSCom
+    auto f = FSCom.open(PIKA_SAVE_PATH, FILE_O_READ);
+    if (!f) return;
+    PikaSaveBlob blob{};
+    size_t n = f.read((uint8_t *)&blob, sizeof(blob));
+    f.close();
+    if (n == sizeof(blob) && blob.magic == PIKA_SAVE_MAGIC) {
+        pikaStatus = blob.status;
+    }
+#endif
 }
 
 static void save_status() {
-    prefs.begin("pikachu", false);
-    prefs.putULong("steps",      pikaStatus.steps);
-    prefs.putULong("totalSteps", pikaStatus.totalSteps);
-    prefs.putLong ("watts",      pikaStatus.watts);
-    prefs.putLong ("friendship", pikaStatus.friendshipLevel);
-    prefs.putBool ("reach150",   pikaStatus.todayReach150);
-    prefs.putBool ("reach300",   pikaStatus.todayReach300);
-    prefs.putBool ("reachEnd",   pikaStatus.reachEnd);
-    prefs.end();
+#ifdef FSCom
+    FSCom.mkdir("/pikachu");
+    if (FSCom.exists(PIKA_SAVE_PATH)) FSCom.remove(PIKA_SAVE_PATH);
+    auto f = FSCom.open(PIKA_SAVE_PATH, FILE_O_WRITE);
+    if (!f) return;
+    PikaSaveBlob blob{ PIKA_SAVE_MAGIC, pikaStatus };
+    f.write((const uint8_t *)&blob, sizeof(blob));
+    f.flush();
+    f.close();
+#endif
 }
 
 // ─── Time helpers ─────────────────────────────────────────────────────────────
@@ -184,7 +205,10 @@ static void check_scheduled_activities() {
 }
 
 // ─── Step / walk logic ────────────────────────────────────────────────────────
-static void process_step() {
+// Shared core — does ONE step's bookkeeping without flushing to flash.
+// Callers (process_step + game_add_steps) save once at the end of their
+// batch to avoid hammering LittleFS on 200-step WPS bursts.
+static void process_step_core() {
     if (pikaStatus.steps >= 99999) return;
 
     pikaStatus.steps++;
@@ -212,7 +236,6 @@ static void process_step() {
         pikaStatus.reachEnd = true;
         gameState = GS_GAME_COMPLETE;
         game_play_anim(&Anims::finalScreen, true);
-        save_status();
         return;
     }
 
@@ -222,13 +245,37 @@ static void process_step() {
         gameState = GS_WALKING;
         game_play_anim(&Anims::walkCycle1, true);
     }
+}
 
+static void process_step() {
+    process_step_core();
     save_status();
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 // Any received mesh packet (broadcast or encrypted DM) counts as a step.
+void game_add_steps(uint32_t count) {
+    if (count == 0) return;
+    uint32_t now = millis();
+    // Quiet hours: still count steps toward watts/friendship in the
+    // background, but DON'T turn the screen on or reset lastActivityMs
+    // — otherwise every BLE/WiFi detection wakes Pikachu at 3 AM.
+    bool quiet = game_is_sleep_time() || gameState == GS_SLEEPING;
+    if (!quiet) {
+        lastActivityMs = now;
+        screenOn = true;
+        lastStepMs = now;
+    }
+    // Skip the "look around" / walk-streak resets — those are for human-cadence
+    // mesh chat. WiFi-vuln batches are bursty; treat them as background activity.
+    for (uint32_t i = 0; i < count; ++i) {
+        process_step_core();
+        if (gameState == GS_GAME_COMPLETE) break;
+    }
+    save_status();
+}
+
 void game_on_mesh_message() {
     uint32_t now = millis();
     lastActivityMs = now;
@@ -258,34 +305,103 @@ void game_on_mesh_message() {
     process_step();
 }
 
-// Short press: advance one step in the screen carousel.
+// ─── Gift menu data ──────────────────────────────────────────────────────────
+// Watt amounts mirror Pocket Pikachu 1/2's canonical gift presets. Clock and
+// Status are also reachable from this menu so a single long-press surfaces
+// every screen.
+const GiftOption GIFT_OPTIONS[] = {
+    { "10W",     10 },
+    { "50W",     50 },
+    { "100W",   100 },
+    { "200W",   200 },
+    { "500W",   500 },
+    { "All",     -1 },
+    { "Clock",    0 },
+    { "Status",   0 },
+    { "Back",     0 },
+};
+const uint8_t  GIFT_OPTION_COUNT = sizeof(GIFT_OPTIONS) / sizeof(GIFT_OPTIONS[0]);
+uint8_t        giftMenuCursor    = 0;
+uint32_t       giftPowUntil      = 0;
+
+// Each watt of gift = +20 friendship (matches the original Pocket Pikachu's
+// 10W → +200 ratio).
+static void give_gift(int32_t wattAmount)
+{
+    if (wattAmount < 0) wattAmount = pikaStatus.watts;        // "All"
+    if (wattAmount <= 0 || pikaStatus.watts < wattAmount) {
+        // Not enough watts — don't spend, but still flash POW briefly so the
+        // user gets feedback. No friendship boost in that case.
+        giftPowUntil = millis() + 400;
+        return;
+    }
+    pikaStatus.watts -= wattAmount;
+    update_friendship(wattAmount * 20);
+    giftPowUntil = millis() + 600;
+    save_status();
+}
+
+// Short press: cycle inside whichever menu is open.
 void game_on_short_press() {
     screenOn = true;
     lastActivityMs = millis();
 
+    // POW flash is briefly modal — ignore presses until it clears.
+    if (giftPowUntil != 0 && millis() < giftPowUntil) return;
+
     switch (gameState) {
+        case GS_GIFT_MENU:
+            giftMenuCursor = (uint8_t)((giftMenuCursor + 1) % GIFT_OPTION_COUNT);
+            break;
         case GS_CLOCK_MENU:
             gameState = GS_STATUS_MENU;
             break;
         case GS_STATUS_MENU:
-            enter_idle();
+            // Hop back into the gift menu so the user can try another option.
+            giftMenuCursor = 0;
+            gameState = GS_GIFT_MENU;
             break;
-        default:  // any game / animation state
-            gameState = GS_CLOCK_MENU;
+        default:
+            // Outside a menu, short press should fall through to Meshtastic
+            // (carousel advance). PocketPikachuModule gates this case via
+            // menuActive_, so we shouldn't actually be reached here — but be
+            // safe and do nothing rather than open a menu surprise.
             break;
     }
 }
 
-// Long press: enter menu from game, or return to game from any menu.
+// Long press: open the gift menu from the game, select inside the gift menu,
+// or exit clock/status back to the game.
 void game_on_long_press() {
     screenOn = true;
     lastActivityMs = millis();
 
-    if (gameState == GS_CLOCK_MENU || gameState == GS_STATUS_MENU || gameState == GS_GIFT_MENU) {
-        enter_idle();
-    } else {
-        // Open the menu at the clock screen
-        gameState = GS_CLOCK_MENU;
+    if (giftPowUntil != 0 && millis() < giftPowUntil) return;
+
+    switch (gameState) {
+        case GS_GIFT_MENU: {
+            const GiftOption &opt = GIFT_OPTIONS[giftMenuCursor];
+            if (opt.watts != 0) {
+                // Watt amount or "All" — spend + boost friendship + POW flash.
+                give_gift(opt.watts);
+            } else if (strcmp(opt.label, "Clock") == 0) {
+                gameState = GS_CLOCK_MENU;
+            } else if (strcmp(opt.label, "Status") == 0) {
+                gameState = GS_STATUS_MENU;
+            } else {  // "Back"
+                enter_idle();
+            }
+            break;
+        }
+        case GS_CLOCK_MENU:
+        case GS_STATUS_MENU:
+            enter_idle();
+            break;
+        default:
+            // Open the gift menu from the game.
+            giftMenuCursor = 0;
+            gameState = GS_GIFT_MENU;
+            break;
     }
 }
 
@@ -321,6 +437,20 @@ void game_update() {
 
     // Walking: stop if no mesh message for 1 second
     if (isWalking && (now - lastStepMs) > 1000) {
+        enter_idle();
+    }
+
+    // Gift POW flash expired. give_gift() already queued the happy
+    // animation via update_friendship(); leave it playing for ~2.5 s before
+    // returning to idle so the user actually sees Pikachu react.
+    static uint32_t happyEndAt = 0;
+    if (gameState == GS_GIFT_MENU && giftPowUntil != 0 && now >= giftPowUntil) {
+        giftPowUntil = 0;
+        gameState    = GS_HAPPY;
+        happyEndAt   = now + 2500;
+    }
+    if (gameState == GS_HAPPY && happyEndAt != 0 && now >= happyEndAt) {
+        happyEndAt = 0;
         enter_idle();
     }
 

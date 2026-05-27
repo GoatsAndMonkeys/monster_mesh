@@ -4,6 +4,7 @@
 #include "MonsterMeshTextBattle.h"
 #include "showdown_gen1_moves.h"
 #include "showdown_gen1_basestats.h"
+#include "Gen1Species.h"  // gen1NameToAscii for level-up messages
 #include <string.h>
 #include <stdio.h>
 
@@ -53,6 +54,11 @@ void MonsterMeshTextBattle::startNetworkedAsInitiator(uint32_t remoteId,
     mode_     = Mode::NETWORKED;
     phase_    = Phase::WAIT_REMOTE;
     remoteId_ = remoteId;
+    // Block move submission until we hear from the peer once. Receiver
+    // sends nothing automatically, so we rely on the LoRa-thread-driven
+    // handlePacket to set this true when ANY in-session packet arrives
+    // (typically the receiver's ACTION for turn 0, or an early HASH).
+    peerReady_ = false;
     // If the caller (module's sendMmbBattleStart) already broadcast START
     // with a specific session_id, use it so our outgoing ACTION packets
     // match what the receiver is filtering on. Otherwise pick a fresh one.
@@ -71,6 +77,26 @@ void MonsterMeshTextBattle::startNetworkedAsInitiator(uint32_t remoteId,
 
     Gen1Party opp = (oppParty.count > 0) ? oppParty : myParty;
     engine_.start(myParty, opp, rngSeed);
+    // Heal both sides to full HP, refill PP from the move table, clear
+    // status. The PARTY_MIN wire format strips current HP / PP / status
+    // because "everyone starts fully healed in mesh PvP", so the
+    // *receiver's* side1 always lands at maxHp. If we leave our own side0
+    // at the SAV's actual (possibly half-played) state, side0 hashes will
+    // diverge from what our opponent sees on their side1 — instant turn-0
+    // desync. Healing both sides locally on both decks keeps the hashes
+    // aligned. Mirrors startLocal's roguelike "clean slate" setup.
+    for (uint8_t side = 0; side < 2; ++side) {
+        auto &p = engine_.party(side);
+        for (uint8_t i = 0; i < p.count && i < 6; ++i) {
+            auto &m = p.mons[i];
+            m.hp     = m.maxHp;
+            m.status = 0;
+            for (uint8_t s = 0; s < 4; ++s) {
+                const Gen1MoveData *mv = gen1Move(m.moves[s]);
+                m.pp[s] = mv ? mv->pp : 0;
+            }
+        }
+    }
 
     if (!existingSeed) sendStart(rngSeed, myParty);
     Serial.printf("[MMB] init startNetworked: session=0x%04X seed=0x%08X peer=0x%08X\n",
@@ -102,10 +128,33 @@ void MonsterMeshTextBattle::startNetworkedAsReceiver(uint32_t remoteId,
 
     Gen1Party opp = (oppParty.count > 0) ? oppParty : myParty;
     engine_.start(myParty, opp, rngSeed);
+    // Same heal/refill as the initiator path — see comment above. Without
+    // this, our own side0 starts at SAV HP while the initiator's side1
+    // (the unpacked PARTY_MIN view of us) is at maxHp, causing a turn-0
+    // hash desync.
+    for (uint8_t side = 0; side < 2; ++side) {
+        auto &p = engine_.party(side);
+        for (uint8_t i = 0; i < p.count && i < 6; ++i) {
+            auto &m = p.mons[i];
+            m.hp     = m.maxHp;
+            m.status = 0;
+            for (uint8_t s = 0; s < 4; ++s) {
+                const Gen1MoveData *mv = gen1Move(m.moves[s]);
+                m.pp[s] = mv ? mv->pp : 0;
+            }
+        }
+    }
     Serial.printf("[MMB] recv startNetworked: session=0x%04X seed=0x%08X peer=0x%08X\n",
                   (unsigned)session_, (unsigned)rngSeed, (unsigned)remoteId);
     appendLog("Battle started!");
     lastRecvMs_ = millis();
+    // Send a turn-0 hash to the initiator immediately. This serves as the
+    // "I'm ready" signal — the initiator's handlePacket sets peerReady_
+    // true on any in-session packet from us, unblocking move submission
+    // on its side. Receiver itself doesn't need peerReady_ since START
+    // already proved the initiator was ready.
+    peerReady_ = true;
+    sendHash();
     dirty_ = true;
 }
 
@@ -253,20 +302,39 @@ void MonsterMeshTextBattle::sendStart(uint32_t rngSeed, const Gen1Party &myParty
     transport_.queueSend(buf, BATTLELINK_HDR_SIZE + 14);
 }
 
-void MonsterMeshTextBattle::sendAction(uint8_t actionType, uint8_t index)
+// Internal: send an ACTION packet with an explicit turn number. Used by
+// the public sendAction for live submissions (turn = current) and by the
+// stale-ACTION recovery path in handlePacket for catch-up replays
+// (turn = the past turn the peer is still waiting on).
+static void sendActionPacket(MeshtasticTransport &transport,
+                             uint16_t session, uint16_t turn,
+                             uint8_t actionType, uint8_t index)
 {
     uint8_t buf[BATTLELINK_MAX_PKT];
     BattlePacket *pkt = (BattlePacket *)buf;
     memset(buf, 0, sizeof(buf));
     pkt->type = (uint8_t)PktType::TEXT_BATTLE_ACTION;
-    pkt->setSessionId(session_);
-    pkt->seq  = engine_.turn() & 0xFF;
-    uint16_t turn = engine_.turn();
+    pkt->setSessionId(session);
+    pkt->seq  = turn & 0xFF;
     pkt->payload[0] = (turn >> 8) & 0xFF;
     pkt->payload[1] =  turn       & 0xFF;
     pkt->payload[2] = actionType;
     pkt->payload[3] = index;
-    transport_.queueSend(buf, BATTLELINK_HDR_SIZE + 4);
+    transport.queueSend(buf, BATTLELINK_HDR_SIZE + 4);
+}
+
+void MonsterMeshTextBattle::sendAction(uint8_t actionType, uint8_t index)
+{
+    uint16_t turn = engine_.turn();
+    // Demote lastSent* to prevSent* before overwriting. The peer-catch-up
+    // path in handlePacket needs the action we submitted for a turn we've
+    // already advanced past.
+    if (lastSentAction_ != 0xFF) {
+        prevSentAction_ = lastSentAction_;
+        prevSentIndex_  = lastSentIndex_;
+        prevSentTurn_   = lastSentTurn_;
+    }
+    sendActionPacket(transport_, session_, turn, actionType, index);
     lastSentAction_ = actionType;
     lastSentIndex_  = index;
     lastSentTurn_   = turn;
@@ -333,12 +401,80 @@ bool MonsterMeshTextBattle::handlePacket(uint32_t fromId,
                       (unsigned)pkt->sessionId(), (unsigned)session_);
         return false;
     }
+    // Forward-port of b402: reject our own packets bounced back via the
+    // MQTT bridge. The broker delivers to all subscribers including the
+    // publisher, so each ACTION/HASH/FORFEIT we transmit comes back to us
+    // with from=our_nodeId. Without this filter the engine treats the echo
+    // as the opponent's submission and overwrites side 1 with our own move
+    // — silent desync that the hash check only catches several turns later
+    // once one deck's accumulated state diverges from the mirror.
+    if (remoteId_ != 0 && fromId != remoteId_) {
+        return false;
+    }
+    // First in-session packet from the peer proves their battle station is
+    // up — unblock initiator move submission. Receiver path leaves this
+    // false until it sees the initiator's own packets, which is fine
+    // because the receiver only enters the battle AFTER receiving START
+    // so it implicitly knows the initiator is ready.
+    if (!peerReady_) {
+        peerReady_ = true;
+        appendLog("Opponent ready — go!");
+        dirty_ = true;
+    }
 
     switch (t) {
         case PktType::TEXT_BATTLE_ACTION: {
             if (len < BATTLELINK_HDR_SIZE + 4) return true;
             uint16_t turn = ((uint16_t)pkt->payload[0] << 8) | pkt->payload[1];
-            if (turn != engine_.turn()) return true;  // stale or future packet
+            if (turn != engine_.turn()) {
+                // Peer is behind us — we already resolved turn `turn` and
+                // moved on. Their ACTION packet for that turn must have
+                // crossed paths with our own packet that they're still
+                // waiting on (asymmetric loss). Replay our action for
+                // THAT turn so they can finish executing it. Check both
+                // lastSent (the most recent submission) and prevSent (one
+                // turn back) — after a resolveTurn on our side that
+                // crossed a turn boundary, lastSent now holds the action
+                // for the JUST-PASSED turn the peer is stuck on. Without
+                // this, the peer sits at "Waiting for opponent…" until
+                // the 60s forfeit timer fires.
+                if (turn < engine_.turn()) {
+                    uint8_t replayAct = 0xFF, replayIdx = 0;
+                    if (lastSentAction_ != 0xFF && lastSentTurn_ == turn) {
+                        replayAct = lastSentAction_;
+                        replayIdx = lastSentIndex_;
+                    } else if (prevSentAction_ != 0xFF && prevSentTurn_ == turn) {
+                        replayAct = prevSentAction_;
+                        replayIdx = prevSentIndex_;
+                    }
+                    if (replayAct != 0xFF) {
+                        Serial.printf("[MMB] peer behind: replaying our turn-%u "
+                                      "action (act=%u idx=%u) — they're stuck "
+                                      "waiting on us\n",
+                                      (unsigned)turn,
+                                      (unsigned)replayAct,
+                                      (unsigned)replayIdx);
+                        sendActionPacket(transport_, session_, turn,
+                                         replayAct, replayIdx);
+                    } else {
+                        Serial.printf("[MMB] peer too far behind: pktTurn=%u "
+                                      "myTurn=%u (no history)\n",
+                                      (unsigned)turn,
+                                      (unsigned)engine_.turn());
+                    }
+                } else {
+                    // Peer is ahead — we're missing their action(s) for our
+                    // current turn. The retry loop in tick() will keep
+                    // re-broadcasting our own action so eventually the peer
+                    // re-replies (this same path on their side) and we
+                    // catch up. Just log so the gap is visible.
+                    Serial.printf("[MMB] peer ahead: pktTurn=%u myTurn=%u "
+                                  "— waiting for retransmit\n",
+                                  (unsigned)turn, (unsigned)engine_.turn());
+                }
+                lastRecvMs_ = millis();
+                return true;
+            }
             uint8_t act = pkt->payload[2];
             uint8_t idx = pkt->payload[3];
             engine_.submitAction(1, act, idx);
@@ -539,9 +675,17 @@ void MonsterMeshTextBattle::inBattleLevelUp(uint8_t slot)
     m.spc = scale(m.spc);
     m.level = newLvl;
 
+    // Convert nickname from Gen 1 charset bytes to ASCII before display —
+    // m.nickname is the raw SAV-loaded byte sequence (PIKACHU = 0x8F88898081...).
+    // Without conversion, snprintf("%s") only renders the rare bytes that
+    // happen to be valid ASCII, which is why the message showed "P grew to
+    // L34" instead of "PIKACHU grew to L34".
+    char ascii[16];
+    gen1NameToAscii((const uint8_t *)m.nickname, sizeof(m.nickname),
+                    ascii, sizeof(ascii));
     char line[40];
     snprintf(line, sizeof(line), "%.10s grew to L%u!",
-             m.nickname[0] ? m.nickname : "?", (unsigned)newLvl);
+             ascii[0] ? ascii : "?", (unsigned)newLvl);
     appendLog(line);
 }
 
@@ -610,6 +754,19 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
         if (mode_ == Mode::NETWORKED) sendForfeit();
         engine_.forfeit(0, engineLogCb, this);
         phase_ = Phase::FINISHED;
+        return;
+    }
+
+    // Block ALL non-ESC input while we're waiting for the opponent's
+    // action or rendering animations. Without this gate, repeated K
+    // presses after submitting a move re-call handleKey → keyAccept →
+    // engine_.submitAction(0,…) + sendAction(…) with the SAME turn,
+    // which overwrites our prevSent* history (every press demotes
+    // lastSent → prevSent, so after the second press both slots hold
+    // the same value and the peer-catch-up path can no longer help a
+    // peer stuck on the previous turn). It also floods the wire with
+    // duplicate ACTION packets out of band with the 4 s resend timer.
+    if (phase_ == Phase::WAIT_REMOTE || phase_ == Phase::ANIMATING) {
         return;
     }
 
@@ -712,6 +869,16 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
     }
 
     if (keyAccept) {
+        // Networked initiator only: block move submission until the peer
+        // has proven their battle station is up by sending us anything in
+        // this session. Without this, an initiator who presses a move
+        // before the receiver's screen finished rendering produced a
+        // turn-0 ACTION the receiver missed → engines desynced from turn 0.
+        if (mode_ == Mode::NETWORKED && !peerReady_) {
+            appendLog("Waiting for opponent...");
+            dirty_ = true;
+            return;
+        }
         const auto &mon = engine_.party(0).mons[engine_.party(0).active];
         // Out of PP across the whole moveset → Gen 1 Struggle (id sentinel
         // 0xFE on the wire). Without this, K-accept silently no-oped and the

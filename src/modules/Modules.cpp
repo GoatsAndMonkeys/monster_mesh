@@ -111,6 +111,21 @@
 #include "modules/monstermesh/MonsterMeshModule.h"
 #endif
 
+#if HAS_SCREEN && !MESHTASTIC_EXCLUDE_POCKETPIKACHU
+#include "modules/pikachu/PocketPikachuModule.h"
+#endif
+#if !MESHTASTIC_EXCLUDE_POCKETPIKACHU2
+#include "modules/pikachu2/PocketPikachu2Module.h"
+#endif
+
+#if !MESHTASTIC_EXCLUDE_GAUNTLET
+#include "modules/monstermesh/gauntlet/GauntletModule.h"
+#endif
+
+#if (defined(ARCH_ESP32) || defined(ARCH_NRF52)) && !MESHTASTIC_EXCLUDE_PENTEST
+#include "modules/pentest/PentestModule.h"
+#endif
+
 /**
  * Create module instances here.  If you are adding a new module, you must 'new' it here (or somewhere else)
  */
@@ -125,6 +140,22 @@ void setupModules()
 #endif
 #if defined(T_DECK) && !MESHTASTIC_EXCLUDE_MONSTERMESH
     monsterMeshModule = new MonsterMeshModule();
+#endif
+    // Carousel ordering: registration order = display order. Pen-test Pikachu
+    // Warwalker frame first (primary feature), then the virtual-pet Pikachu,
+    // then the gym gauntlet.
+#if (defined(ARCH_ESP32) || defined(ARCH_NRF52)) && !MESHTASTIC_EXCLUDE_PENTEST
+    pentestModule = new PentestModule();
+#endif
+#if HAS_SCREEN && !MESHTASTIC_EXCLUDE_POCKETPIKACHU
+    pikachuModule = new PocketPikachuModule();
+#endif
+#if !MESHTASTIC_EXCLUDE_POCKETPIKACHU2
+    // T114 color TFT variant with 4-color Pocket Pikachu animations.
+    pikachuModule2 = new PocketPikachu2Module();
+#endif
+#if !MESHTASTIC_EXCLUDE_GAUNTLET
+    gauntletModule = new GauntletModule();
 #endif
 #if !MESHTASTIC_EXCLUDE_ADMIN
     adminModule = new AdminModule();

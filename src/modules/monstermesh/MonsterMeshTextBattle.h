@@ -146,6 +146,15 @@ private:
     uint16_t lastSentTurn_   = 0;
     uint32_t lastSendMs_     = 0;
     uint8_t  fleeAttempts_   = 0;
+    // One-turn history of our last submitted action, used to catch up a
+    // peer who's stuck waiting on us. If peer ACTION lands with a turn
+    // we've already passed, we re-broadcast our prevSent* for THAT turn
+    // (not the current one) so peer can advance. Without this, asymmetric
+    // packet loss locks one side at "Waiting for opponent..." until the
+    // 60s forfeit timer fires.
+    uint8_t  prevSentAction_ = 0xFF;
+    uint8_t  prevSentIndex_  = 0;
+    uint16_t prevSentTurn_   = 0;
 
     // ── Per-faint XP tracking ────────────────────────────────────────────
     // participantMask_ marks player slots that have been active during the
@@ -209,6 +218,12 @@ private:
 
     // Timeouts
     uint32_t lastRecvMs_ = 0;
+    // Peer-ready handshake: initiator waits for any packet from the remote
+    // peer before unblocking move submission. Without this gate, sending a
+    // move at engine.turn()=0 while the receiver was still loading its
+    // battle station made the receiver miss the START race and the engines
+    // desynced from turn 0.
+    bool peerReady_ = false;
     static constexpr uint32_t REMOTE_TIMEOUT_MS = 60000;   // 60s w/o packet → forfeit
     static constexpr uint32_t SCROLL_INTERVAL_MS = 600;    // text reveal cadence
     static constexpr uint32_t RESEND_INTERVAL_MS = 4000;   // re-broadcast our action

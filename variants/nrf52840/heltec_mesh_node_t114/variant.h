@@ -57,8 +57,10 @@ extern "C" {
 #define TFT_OFFSET_X 0
 #define TFT_OFFSET_Y 0
 
-// T114 gets a muted yellow on black display
-#define TFT_MESH_OVERRIDE COLOR565(255, 255, 128)
+// Pokewalker B&W theme: black foreground on white background. Sprites use
+// the per-species GBC custom palette via Tft4ColorBlit; everything else is
+// rendered in pure 1-bit B&W so the UI reads like a Game Boy printout.
+#define TFT_MESH_OVERRIDE 0x0000
 
 // #define TFT_OFFSET_ROTATION 0
 // #define SCREEN_ROTATE

@@ -280,8 +280,14 @@ void MonsterMeshTerminal::creditBattleXpPerSlot(const uint32_t xp[6])
         p.exp[2] =  newExp        & 0xFF;
         uint8_t newLevel = levelFromExpMediumFast(newExp);
         if (newLevel > p.level) {
+            // party_.nicknames[i] is in Gen 1 charset (PIKACHU = 0x8F88898081...),
+            // not ASCII. Without conversion the level-up message showed "P grew
+            // to level 66" because the printf only rendered the rare bytes
+            // that happen to be valid ASCII. Convert before display.
+            char ascii[16];
+            gen1NameToAscii(party_.nicknames[i], 11, ascii, sizeof(ascii));
             snprintf(buf, sizeof(buf), "%.10s grew to level %u!",
-                     (const char *)party_.nicknames[i], (unsigned)newLevel);
+                     ascii[0] ? ascii : "?", (unsigned)newLevel);
             println(buf);
             p.level    = newLevel;
             p.boxLevel = newLevel;
@@ -476,6 +482,7 @@ void MonsterMeshTerminal::executeLine(const char *line)
         }
         println("commands:");
         println("  party       - show your loaded SAV party");
+        println("  hb          - Hollaback: ping nearby peers");
         println("  daycare     - daycare status + neighbors");
         println("  gym         - Local Kanto Gym List");
         println("  gym fight N - challenge gym N (1-9)");
@@ -914,6 +921,44 @@ void MonsterMeshTerminal::executeLine(const char *line)
         if (!beaconFn_) { println("beacon not wired"); return; }
         beaconFn_(beaconCtx_);
         println("Beacon broadcast — peers should pick you up shortly.");
+        return;
+    }
+    // `hb` (Hollaback) — initiating node broadcasts presence on mesh+MQTT
+    // (single low-impact beacon, peers respond on MQTT only so we don't
+    // pollute the LoRa airtime), then immediately dumps the currently-known
+    // daycare neighbor list. As new peer responses arrive, the module
+    // streams them through hbNeighborFn_ for live "HB SN/? Lv0 Kanto" lines.
+    if (strncasecmp(line, "hb", 2) == 0 &&
+        (line[2] == '\0' || line[2] == ' ' || line[2] == '\r' || line[2] == '\n')) {
+        if (!beaconFn_) { println("HB not wired"); return; }
+        println("HB!");
+        beaconFn_(beaconCtx_);
+        // Immediate dump of who we already know about, formatted as the
+        // streaming responses will be.
+        if (mmtListFn_) {
+            char buf[512] = {};
+            mmtListFn_(mmtListCtx_, buf, sizeof(buf));
+            // The mmtListFn output starts with a header line; skip past it
+            // and reformat each entry as "HB SN/? Lv0 Kanto" so it visually
+            // matches incoming responses.
+            const char *p = buf;
+            while (*p) {
+                const char *nl = p;
+                while (*nl && *nl != '\n') ++nl;
+                size_t n = (size_t)(nl - p);
+                // Only render the indented peer lines ("  SN/...").
+                if (n > 2 && p[0] == ' ' && p[1] == ' ') {
+                    char hbline[80];
+                    size_t copy = n - 2;
+                    if (copy >= sizeof(hbline) - 5) copy = sizeof(hbline) - 5;
+                    memcpy(hbline, "HB ", 3);
+                    memcpy(hbline + 3, p + 2, copy);
+                    hbline[3 + copy] = '\0';
+                    println(hbline);
+                }
+                p = (*nl) ? nl + 1 : nl;
+            }
+        }
         return;
     }
     // Bare `mmb` (no args) → list peers we've recently heard a daycare

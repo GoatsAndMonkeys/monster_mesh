@@ -1089,7 +1089,17 @@ void Screen::setFrames(FrameFocus focus)
             if (m && m == waypointModule)
                 fsi.positions.waypoint = numframes;
 
-            indicatorIcons.push_back(icon_module);
+            // Per-module indicator icon (pen-test Pikachu build): map
+            // known module names → custom 8x8 icons; fall back to the
+            // generic puzzle-piece for anything else.
+            const uint8_t *modIcon = icon_module;
+            if (m && m->getName()) {
+                const char *n = m->getName();
+                if      (!strcmp(n, "Pentest"))       modIcon = icon_wifi;
+                else if (!strcmp(n, "PocketPikachu")) modIcon = icon_pikachu;
+                else if (!strcmp(n, "Gauntlet"))      modIcon = icon_pokeball;
+            }
+            indicatorIcons.push_back(modIcon);
             numframes++;
         }
     }
