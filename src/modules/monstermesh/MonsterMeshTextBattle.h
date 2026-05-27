@@ -40,6 +40,7 @@ public:
         WAIT_FLEE,      // F pressed; "Flee? K=yes L=no" overlay
         ANIMATING,      // turn just resolved, scrolling messages
         FINISHED,       // result_ != ONGOING; press any key to exit
+        WAIT_CHALLENGE_OVERLAY,  // server-auth CLIENT: "X challenges you! K=accept L=decline"
     };
 
     explicit MonsterMeshTextBattle(MeshtasticTransport &transport)
@@ -56,6 +57,19 @@ public:
     void startServerAuthAsInitiator(uint32_t remoteId,
                                     const Gen1Party &myParty,
                                     const char *myName);
+
+    // Pre-stage our party + trainer name so the CLIENT path can respond to
+    // an inbound CHALLENGE without an additional round-trip. Module calls
+    // this whenever the loaded SAV's party changes. SAFE to call any time;
+    // overwrites the previous staging.
+    void setMyTbParty(const Gen1Party &p, const char *name) {
+        pendingMyParty_ = p;
+        myTbName_[0] = '\0';
+        if (name && *name) {
+            snprintf(myTbName_, sizeof(myTbName_), "%.*s",
+                     (int)TB_MAX_NAME_LEN, name);
+        }
+    }
 
     // Role of the current battle (LEGACY by default; SERVER/CLIENT only for
     // server-authoritative path).

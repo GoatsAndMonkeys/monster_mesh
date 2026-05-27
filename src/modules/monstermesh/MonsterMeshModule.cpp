@@ -640,6 +640,28 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 return ProcessMessage::CONTINUE;
             }
 
+            // Server-authoritative PvP packets (0x66..0x6B). CHALLENGE may
+            // arrive when no battle is active (it triggers the CLIENT
+            // overlay); the other types must hit an active textBattle_
+            // session. Self-echo filter prevents MQTT loopback (b402 fix).
+            if (((PktType)bp->type == PktType::TEXT_BATTLE_UPDATE       ||
+                 (PktType)bp->type == PktType::TEXT_BATTLE_ACTION_V2    ||
+                 (PktType)bp->type == PktType::TEXT_BATTLE_CHALLENGE    ||
+                 (PktType)bp->type == PktType::TEXT_BATTLE_ACCEPT       ||
+                 (PktType)bp->type == PktType::TEXT_BATTLE_STATE_REQUEST||
+                 (PktType)bp->type == PktType::TEXT_BATTLE_FULL_STATE)  &&
+                mp.from != nodeDB->getNodeNum()) {
+                textBattle_.handlePacket(mp.from,
+                                          mp.decoded.payload.bytes,
+                                          mp.decoded.payload.size);
+                // If the CHALLENGE just transitioned us into the CLIENT
+                // overlay, mark the module's battle-active gate so other
+                // module-side guards (sleep, browser focus, etc.) treat
+                // this like an in-progress battle.
+                if (textBattle_.isActive()) textBattleActive_ = true;
+                return ProcessMessage::CONTINUE;
+            }
+
             // Dungeons and MonstersMesh — route to dungeon game engine
             if ((PktType)bp->type == PktType::DUNGEON_BEACON ||
                 (PktType)bp->type == PktType::DUNGEON_JOIN   ||
