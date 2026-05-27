@@ -562,6 +562,10 @@ public:
 
     // Saved LVGL flush callback (swapped out when emulator is active)
     void *savedFlushCb_ = nullptr;
+    // Cadence for the periodic battle-screen recovery repaint that
+    // overwrites any LVGL/Meshtastic UI that snuck past flush_cb. Set
+    // in MonsterMeshModule.cpp's runOnce textBattleActive_ block.
+    uint32_t lastTbRecoveryDrawMs_ = 0;
     // Separate saved flush cb for dungeon overlay — keeps it independent of
     // emulator/browser/textbattle savedFlushCb_ so mode-detection doesn't cross.
     void *dungeonFlushCb_ = nullptr;

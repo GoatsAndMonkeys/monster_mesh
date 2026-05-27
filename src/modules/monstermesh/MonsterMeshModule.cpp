@@ -3341,14 +3341,21 @@ int32_t MonsterMeshModule::runOnce()
             textBattle_.setEndPrompt("");
         }
         textBattle_.tick(millis());
-        // Force a redraw every tick so any LVGL/Meshtastic intrusion
-        // (notification bubbles, frame switches, etc.) that snuck past
-        // our flush_cb park gets immediately overwritten with the
-        // battle screen on the next runOnce.
-        if (g_deviceUiLgfx) {
-            concurrency::LockGuard g(spiLock);
-            textBattle_.render(g_deviceUiLgfx);
-            textBattle_.clearDirty();
+        // Repaint on dirty (normal case) OR once every 3 s as a
+        // recovery sweep so any LVGL/Meshtastic intrusion that snuck
+        // past our flush_cb park gets overwritten without us doing a
+        // full repaint on every 50 ms tick (which caused the screen
+        // to flicker visibly and contended the spiLock hard enough to
+        // crash the deck during a battle).
+        uint32_t nowTb = millis();
+        if (textBattle_.dirty() ||
+            (nowTb - lastTbRecoveryDrawMs_ >= 3000)) {
+            if (g_deviceUiLgfx) {
+                concurrency::LockGuard g(spiLock);
+                textBattle_.render(g_deviceUiLgfx);
+                textBattle_.clearDirty();
+            }
+            lastTbRecoveryDrawMs_ = nowTb;
         }
         // Drain per-faint XP that the engine accumulated this turn. The
         // LVGL thread (tryConsumeStagedParty) credits each slot directly
