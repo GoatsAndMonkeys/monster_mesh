@@ -2245,7 +2245,7 @@ void MonsterMeshTextBattle::clientAuthSendActionV2(uint8_t actionType, uint8_t i
     if (actionType != 0xFE) {  // 0xFE = pure-ACK sentinel
         clientActionType_       = actionType;
         clientActionIndex_      = index;
-        clientActionTurn_       = curTurn;
+        clientActionTurn_       = clientTurn_;
         lastClientActionSendMs_ = millis();
     }
 }
