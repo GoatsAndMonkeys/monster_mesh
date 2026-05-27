@@ -1504,8 +1504,12 @@ void MonsterMeshTextBattle::serverAuthSendChallenge()
 // Same layout is the body of FULL_STATE.
 size_t MonsterMeshTextBattle::packClientStateFromEngine(uint8_t out[])
 {
-    uint16_t turn = engine_.turn();
     bool roleClient = (role_ == Role::CLIENT);
+    // Client never calls engine_.executeTurn, so engine_.turn() stays at 0
+    // forever. Use the server-mirrored clientTurn_ instead — otherwise the
+    // hash mismatches every UPDATE after turn 0 and we fall into a
+    // STATE_REQUEST → FULL_STATE loop on every move.
+    uint16_t turn = roleClient ? (uint16_t)clientTurn_ : engine_.turn();
     uint8_t result;
     switch (engine_.result()) {
         case Gen1BattleEngine::Result::ONGOING: result = TB_RESULT_ONGOING; break;

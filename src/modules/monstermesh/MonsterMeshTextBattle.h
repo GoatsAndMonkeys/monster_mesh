@@ -75,6 +75,11 @@ public:
     // server-authoritative path).
     Role role() const { return role_; }
 
+    // SERVER role only: true between CHALLENGE send and ACCEPT receive.
+    // Module uses this to gate the screen takeover so we don't blank the
+    // user's terminal panel while the challenge is still in flight.
+    bool awaitingAccept() const { return awaitingAccept_; }
+
     // Networked initiator. `myParty` is our current save's party; `oppParty`
     // is the peer's party (reconstructed from their daycare beacon — both
     // sides build the same party locally from the same beacon data so we

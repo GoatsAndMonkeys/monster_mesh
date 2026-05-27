@@ -2878,11 +2878,21 @@ int32_t MonsterMeshModule::runOnce()
         }
     }
 
-    // ── Server-auth CLIENT side: textBattle_ flipped to CLIENT mode when
-    // a CHALLENGE arrived. We need to swap LVGL flush_cb + clear screen
-    // (just like the SERVER launch below) so Meshtastic UI repaints don't
-    // overdraw the battle overlay.
-    if (textBattle_.isActive() && !textBattleActive_ && setupDone_) {
+    // ── Take over the screen ONLY when the textBattle actually needs to
+    // render battle UI on this deck. Server-auth has two pre-battle
+    // states we explicitly DO NOT take over:
+    //   - SERVER side awaiting ACCEPT: user just typed `mmb2`; CHALLENGE
+    //     is in flight. Stay in the terminal so the user sees the
+    //     "queued challenge" line and isn't locked into a black battle
+    //     screen if the peer never accepts.
+    // CLIENT-side WAIT_CHALLENGE_OVERLAY DOES take over the screen,
+    // because the overlay IS the visible Y/N prompt for the user.
+    bool shouldOwnScreen = textBattle_.isActive() && (
+        textBattle_.role() == MonsterMeshTextBattle::Role::CLIENT ||
+        textBattle_.role() == MonsterMeshTextBattle::Role::LEGACY ||
+        (textBattle_.role() == MonsterMeshTextBattle::Role::SERVER &&
+         !textBattle_.awaitingAccept()));
+    if (shouldOwnScreen && !textBattleActive_ && setupDone_) {
         textBattleActive_ = true;
 #if HAS_TFT
         lv_display_t *disp = lv_display_get_default();
@@ -2898,13 +2908,17 @@ int32_t MonsterMeshModule::runOnce()
             g_deviceUiLgfx->clearClipRect();
             g_deviceUiLgfx->fillScreen(0x0000);
         }
-        LOG_INFO("[MonsterMesh] textBattle activated externally (CLIENT overlay) — flush_cb parked\n");
+        LOG_INFO("[MonsterMesh] textBattle owning screen (role=%d) — flush_cb parked\n",
+                 (int)textBattle_.role());
     }
 
     // ── Server-authoritative PvP launch (mmb2) ─────────────────────────
-    // Deferred from challengePeerByShortNameV2 so the heavy LVGL work
-    // doesn't run on the terminal/LVGL thread. Single CHALLENGE packet
-    // carries our party; no party-exchange round-trip required.
+    // Deferred from challengePeerByShortNameV2 so the heavy work doesn't
+    // run on the terminal/LVGL thread. We DON'T take over the screen
+    // here — the textBattle goes into awaitingAccept_ state and the
+    // screen-takeover block above only fires once ACCEPT actually lands
+    // and the engine is started. Until then the user stays in the
+    // terminal panel and can see the "queued challenge" log line.
     if (pendingMmb2Initiator_ && !textBattleActive_ && setupDone_ &&
         !emulatorActive_ && !browserActive_ && terminal_.hasParty()) {
         pendingMmb2Initiator_ = false;
@@ -2913,30 +2927,15 @@ int32_t MonsterMeshModule::runOnce()
         memcpy(peerShort, pendingMmb2PeerShort_, sizeof(peerShort));
         peerShort[sizeof(peerShort) - 1] = '\0';
 
-#if HAS_TFT
-        lv_display_t *disp = lv_display_get_default();
-        if (disp && !savedFlushCb_) {
-            savedFlushCb_ = (void *)disp->flush_cb;
-            lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
-                lv_display_flush_ready(d);
-            });
-        }
-#endif
-        if (g_deviceUiLgfx) {
-            concurrency::LockGuard g(spiLock);
-            g_deviceUiLgfx->clearClipRect();
-            g_deviceUiLgfx->fillScreen(0x0000);
-        }
-        textBattleActive_ = true;
-
         const char *ourShort = (owner.short_name[0] != '\0')
                                  ? owner.short_name : "MM";
         textBattle_.setMyTbParty(terminal_.getParty(), ourShort);
         textBattle_.startServerAuthAsInitiator(target,
                                                 terminal_.getParty(),
                                                 ourShort);
-        LOG_INFO("[MonsterMesh] mmb2: launched server-auth challenge → %s "
-                 "(0x%08X)\n", peerShort, (unsigned)target);
+        LOG_INFO("[MonsterMesh] mmb2: sent CHALLENGE → %s (0x%08X), "
+                 "waiting for ACCEPT before opening battle screen\n",
+                 peerShort, (unsigned)target);
     }
 
     if ((pendingMmtBattleAsInitiator_ || pendingMmtBattleAsReceiver_) &&
