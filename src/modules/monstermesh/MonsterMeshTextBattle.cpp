@@ -872,6 +872,15 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
             phase_ = Phase::FINISHED;
             return;
         }
+        if (role_ == Role::SERVER) {
+            // Server-auth: ship a final UPDATE carrying the forfeit so the
+            // client transitions cleanly. Legacy FORFEIT packet isn't on
+            // the client's dispatch path here.
+            engine_.forfeit(0, engineLogCb, this);
+            serverAuthSendUpdate();
+            phase_ = Phase::FINISHED;
+            return;
+        }
         if (mode_ == Mode::NETWORKED) sendForfeit();
         engine_.forfeit(0, engineLogCb, this);
         phase_ = Phase::FINISHED;
@@ -1298,7 +1307,12 @@ void MonsterMeshTextBattle::drawHeader(lgfx::LGFX_Device *g)
     if (headerOverride_[0]) {
         g->print(headerOverride_);
     } else if (mode_ == Mode::NETWORKED) {
-        g->printf("LoRa Battle  T%u", engine_.turn());
+        const char *tag = (role_ == Role::SERVER) ? "MMB-S"
+                        : (role_ == Role::CLIENT) ? "MMB-C"
+                                                  : "LoRa";
+        g->printf("%s vs %.6s  T%u", tag,
+                  peerTbName_[0] ? peerTbName_ : "?",
+                  engine_.turn());
     } else {
         g->printf("Roguelike  T%u",  engine_.turn());
     }
@@ -1309,6 +1323,38 @@ void MonsterMeshTextBattle::render(lgfx::LGFX_Device *g)
     if (!g || mode_ == Mode::OFF) return;
     g->fillScreen(BG);
     drawHeader(g);
+
+    // CHALLENGE overlay: engine hasn't been initialized yet (start is
+    // deferred to ACCEPT), so the HP panels would render an empty
+    // "? L0 0/0" placeholder. Replace the whole battle UI with a
+    // centred challenge prompt instead.
+    if (phase_ == Phase::WAIT_CHALLENGE_OVERLAY) {
+        int by = SCREEN_H / 2 - 50;
+        int bh = 100;
+        g->fillRect(20, by, SCREEN_W - 40, bh, DARK);
+        g->drawRect(20, by, SCREEN_W - 40, bh, ACC);
+        g->setTextColor(FG, DARK);
+        g->setCursor(34, by + 14);
+        g->print("MonsterMesh Battle!");
+        g->setTextColor(ACC, DARK);
+        char who[40];
+        snprintf(who, sizeof(who), "%.12s wants to fight",
+                 peerTbName_[0] ? peerTbName_ : "Trainer");
+        g->setCursor(34, by + 36);
+        g->print(who);
+        char party[40];
+        snprintf(party, sizeof(party), "Party: %u mon",
+                 (unsigned)pendingServerParty_.count);
+        g->setTextColor(DIM, DARK);
+        g->setCursor(34, by + 56);
+        g->print(party);
+        g->setTextColor(FG, DARK);
+        g->setCursor(34, by + 76);
+        g->print("K = ACCEPT    L = DECLINE");
+        dirty_ = false;
+        return;
+    }
+
     // Layout reads top-down so it's obvious whose HP is whose:
     //   header → opponent HP → log text → my HP → move/switch menu
     drawHpPanel(g, 1, 18);    // opponent on top
