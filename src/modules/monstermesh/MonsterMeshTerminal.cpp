@@ -1002,6 +1002,26 @@ void MonsterMeshTerminal::executeLine(const char *line)
         mmtFn_(mmtCtx_, p);
         return;
     }
+    // `mmb2 <short>` / `mmt2 <short>` — server-authoritative PvP. Single
+    // CHALLENGE packet carries our party; the receiver's screen lights up
+    // instantly on K-accept (no party-exchange round-trip).
+    bool isBattle2Cmd = (strncasecmp(line, "mmb2 ", 5) == 0 ||
+                         strncasecmp(line, "mmt2 ", 5) == 0);
+    if (isBattle2Cmd) {
+        const char *p = line + 5;
+        while (*p == ' ' || *p == '@') ++p;
+        if (!*p) { println("usage: mmb2 <short_name>"); return; }
+        if (!mmt2Fn_) { println("mmb2 not wired"); return; }
+        if (!partyLoaded_) {
+            println("no party loaded — load a SAV first");
+            return;
+        }
+        char buf[64];
+        snprintf(buf, sizeof(buf), "v2-Challenging %s...", p);
+        println(buf);
+        mmt2Fn_(mmt2Ctx_, p);
+        return;
+    }
     if (strncmp(line, "explore", 7) == 0) {
         // `explore` — wild encounter on the route appropriate to the player's
         // current badge count. Route 0 = Viridian Forest (pre-Brock), route 7

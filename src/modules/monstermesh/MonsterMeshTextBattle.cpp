@@ -1394,7 +1394,8 @@ void MonsterMeshTextBattle::serverAuthSendUpdate()
     pkt->setSessionId(session_);
     pkt->seq = ++updateSeq_;
 
-    uint8_t flags = TB_UPD_HP | TB_UPD_PP | TB_UPD_SWITCH | TB_UPD_STATUS;
+    uint8_t flags = TB_UPD_HP | TB_UPD_PP | TB_UPD_SWITCH | TB_UPD_STATUS |
+                    TB_UPD_BENCH;
     bool finished = (engine_.result() != Gen1BattleEngine::Result::ONGOING);
     if (finished) flags |= TB_UPD_RESULT;
 
@@ -1467,6 +1468,31 @@ void MonsterMeshTextBattle::serverAuthSendUpdate()
         }
         // Once shipped, clear so we don't ship the same lines next turn.
         logFill_ = 0; logHead_ = 0;
+    }
+    if (flags & TB_UPD_BENCH) {
+        // CLIENT-side party state (wire 0 = engine P1). Keeps the client's
+        // switch menu accurate for HP, status, and per-slot PP that may
+        // have decremented while a mon was active. Also ships the active
+        // mon's stat-boost stages so the UI can show "+1 ATK" badges.
+        const auto &cp = engine_.party(1);
+        pkt->payload[w++] = cp.count;
+        for (uint8_t i = 0; i < cp.count && i < 6; ++i) {
+            const auto &m = cp.mons[i];
+            pkt->payload[w++] = (m.hp >> 8) & 0xFF;
+            pkt->payload[w++] =  m.hp       & 0xFF;
+            pkt->payload[w++] = m.status;
+            pkt->payload[w++] = m.pp[0];
+            pkt->payload[w++] = m.pp[1];
+            pkt->payload[w++] = m.pp[2];
+            pkt->payload[w++] = m.pp[3];
+        }
+        const auto &cmActive = cp.mons[cp.active];
+        pkt->payload[w++] = (uint8_t)cmActive.atkBoost;
+        pkt->payload[w++] = (uint8_t)cmActive.defBoost;
+        pkt->payload[w++] = (uint8_t)cmActive.spdBoost;
+        pkt->payload[w++] = (uint8_t)cmActive.spcBoost;
+        pkt->payload[w++] = (uint8_t)cmActive.accBoost;
+        pkt->payload[w++] = (uint8_t)cmActive.evaBoost;
     }
 
     size_t pktLen = BATTLELINK_HDR_SIZE + w;
@@ -1826,6 +1852,33 @@ void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len
             memcpy(line, lb, cp);
             line[cp] = '\0';
             appendLog(line);
+        }
+    }
+    if (flags & TB_UPD_BENCH) {
+        const uint8_t *cp = take(1); if (!cp) return;
+        uint8_t count = *cp;
+        if (count > 6) count = 6;
+        auto &mp = engine_.party(0);
+        for (uint8_t i = 0; i < count; ++i) {
+            const uint8_t *p = take(7); if (!p) return;
+            if (i < mp.count) {
+                mp.mons[i].hp     = ((uint16_t)p[0] << 8) | p[1];
+                mp.mons[i].status = p[2];
+                mp.mons[i].pp[0]  = p[3];
+                mp.mons[i].pp[1]  = p[4];
+                mp.mons[i].pp[2]  = p[5];
+                mp.mons[i].pp[3]  = p[6];
+            }
+        }
+        const uint8_t *b = take(6); if (!b) return;
+        if (mp.count) {
+            auto &m = mp.mons[mp.active];
+            m.atkBoost = (int8_t)b[0];
+            m.defBoost = (int8_t)b[1];
+            m.spdBoost = (int8_t)b[2];
+            m.spcBoost = (int8_t)b[3];
+            m.accBoost = (int8_t)b[4];
+            m.evaBoost = (int8_t)b[5];
         }
     }
     bool needSwitch = (flags & TB_UPD_NEED_PLAYER_SWITCH) != 0;

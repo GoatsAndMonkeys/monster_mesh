@@ -207,6 +207,18 @@ enum TbUpdateFlag : uint8_t {
     TB_UPD_RESULT            = 1 << 4,
     TB_UPD_LOG               = 1 << 5,
     TB_UPD_NEED_PLAYER_SWITCH = 1 << 6,
+    // CLIENT's full party state — HP+status+PP for every slot + per-stat
+    // boost stages. Lets the switch menu show accurate HP / status / PP
+    // for bench mons (would otherwise be stuck at the values frozen in
+    // at ACCEPT). Server's bench is hidden per Gen-1 information rules.
+    // Section layout when set:
+    //   [count:1]
+    //   for each slot 0..count-1:
+    //     [hp:2 BE][status:1][pp[0..3]:4]
+    //   [atkBoost:i1][defBoost:i1][spdBoost:i1][spcBoost:i1]
+    //   [accBoost:i1][evaBoost:i1]
+    // Worst case (6 mons): 1 + 6*7 + 6 = 49 bytes.
+    TB_UPD_BENCH             = 1 << 7,
 };
 
 // Client-POV result codes (TEXT_BATTLE_UPDATE result byte / FULL_STATE [2]).

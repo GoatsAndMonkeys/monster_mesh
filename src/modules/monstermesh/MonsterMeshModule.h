@@ -277,6 +277,12 @@ public:
     // terminal-fn lambda can call it (terminal_ is private otherwise).
     void challengePeerByShortName(const char *peerShort);
 
+    // Server-authoritative challenge — single CHALLENGE packet carries our
+    // party (no DM / party-exchange round trip). Receiver-side overlay
+    // activates automatically on inbound CHALLENGE. Terminal command:
+    //   `mmb2 <short_name>` or `mmt2 <short_name>`
+    void challengePeerByShortNameV2(const char *peerShort);
+
     // Fill `buf` with a multi-line daycare status report (newline-separated).
     // Used by the terminal `daycare` command.
     void daycareStatusString(char *buf, size_t bufLen);

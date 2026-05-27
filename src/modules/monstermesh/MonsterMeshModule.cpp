@@ -1391,6 +1391,72 @@ void MonsterMeshModule::challengePeerByShortName(const char *peerShort)
     }
 }
 
+// Server-authoritative challenge — terminal command `mmb2 <short>` /
+// `mmt2 <short>`. One CHALLENGE packet carries our party so the receiver
+// can paint the battle screen instantly on K-accept (no DM, no chunked
+// party exchange). All retransmits + state machine live in textBattle_.
+void MonsterMeshModule::challengePeerByShortNameV2(const char *peerShort)
+{
+    if (!terminal_.hasParty()) {
+        terminal_.printLine("mmb2: no party loaded — load a SAV first");
+        return;
+    }
+    if (textBattleActive_) {
+        terminal_.printLine("mmb2: already in a battle");
+        return;
+    }
+    size_t total = nodeDB->getNumMeshNodes();
+    uint32_t resolved = 0;
+    char matchedShort[12] = {};
+    for (size_t i = 0; i < total; ++i) {
+        const meshtastic_NodeInfoLite *n = nodeDB->getMeshNodeByIndex(i);
+        if (!n || !n->has_user) continue;
+        if (n->num == nodeDB->getNodeNum()) continue;
+        if (strcasecmp(n->user.short_name, peerShort) == 0) {
+            resolved = n->num;
+            strncpy(matchedShort, n->user.short_name, sizeof(matchedShort) - 1);
+            break;
+        }
+    }
+    if (resolved == 0) {
+        char buf[80];
+        snprintf(buf, sizeof(buf),
+                 "mmb2: no node '%s' in NodeDB. Try after they NodeInfo.",
+                 peerShort);
+        terminal_.printLine(buf);
+        return;
+    }
+    char buf[80];
+    snprintf(buf, sizeof(buf), "mmb2: challenging %s (server-auth)...",
+             matchedShort);
+    terminal_.printLine(buf);
+    LOG_INFO("[MonsterMesh] mmb2: v2-challenging %s = 0x%08X\n",
+             matchedShort, (unsigned)resolved);
+
+    // Our trainer name: Meshtastic short_name (per the daycare convention).
+    const char *ourShort = (owner.short_name[0] != '\0') ? owner.short_name
+                                                          : "MM";
+    textBattle_.setMyTbParty(terminal_.getParty(), ourShort);
+    textBattle_.startServerAuthAsInitiator(resolved,
+                                            terminal_.getParty(),
+                                            ourShort);
+    textBattleActive_ = true;
+#if HAS_TFT
+    lv_display_t *disp = lv_display_get_default();
+    if (disp && !savedFlushCb_) {
+        savedFlushCb_ = (void *)disp->flush_cb;
+        lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
+            lv_display_flush_ready(d);
+        });
+    }
+#endif
+    if (g_deviceUiLgfx) {
+        concurrency::LockGuard g(spiLock);
+        g_deviceUiLgfx->clearClipRect();
+        g_deviceUiLgfx->fillScreen(0x0000);
+    }
+}
+
 // Send TEXT_BATTLE_START directly from the module (not via textBattle's
 // internal sendStart) so the receiver can arm its party-RX state machine
 // before our chunks arrive. The seed lives in mmtBattleSeed_ on both
@@ -1865,6 +1931,11 @@ int32_t MonsterMeshModule::runOnce()
             [](void *ctx, const char *peerShort) {
                 static_cast<MonsterMeshModule *>(ctx)
                     ->challengePeerByShortName(peerShort);
+            }, this);
+        terminal_.setMmt2ChallengeFn(
+            [](void *ctx, const char *peerShort) {
+                static_cast<MonsterMeshModule *>(ctx)
+                    ->challengePeerByShortNameV2(peerShort);
             }, this);
         // BBS gym discovery probe — user-initiated.  Sends a single silent
         // BBS_PING BattlePacket on MonsterMesh channel 1 / PRIVATE_APP (port
@@ -4398,6 +4469,14 @@ void MonsterMeshModule::tryConsumeStagedParty()
     terminal_.setParty(terminalStagedParty_);
     if (terminalActive_) {
         terminal_.refreshParty();
+    }
+    // Also stage into textBattle_ so the server-auth CLIENT path can
+    // respond to an inbound CHALLENGE without an additional round-trip
+    // — ACCEPT carries our party straight from this staged copy.
+    {
+        const char *ourShort = (owner.short_name[0] != '\0')
+                                 ? owner.short_name : "MM";
+        textBattle_.setMyTbParty(terminalStagedParty_, ourShort);
     }
     terminalPartyStaged_ = false;
 }
