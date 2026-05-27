@@ -1860,34 +1860,54 @@ int32_t MonsterMeshModule::runOnce()
                     MMT_APPEND("Online peers (last beacon):\n");
                     const auto *neigh = self->daycare_.getNeighbors();
                     uint8_t shown = 0;
-                    for (uint8_t i = 0; i < nc && i < 6; ++i) {
-                        // Fall back to NodeDB's short_name if the daycare
-                        // beacon arrived before the peer had its own owner
-                        // info loaded (beacon shortName would be empty
-                        // → "?"). Skip the entry entirely if NEITHER source
-                        // has a name — that means we haven't received the
-                        // peer's nodeinfo yet either, so any HB row we'd
-                        // print would be "?/?" garbage.
-                        const char *sn = neigh[i].shortName[0] ? neigh[i].shortName : nullptr;
-                        if (!sn && nodeDB) {
-                            auto *node = nodeDB->getMeshNode(neigh[i].nodeId);
-                            if (node && node->has_user && node->user.short_name[0]) {
-                                sn = node->user.short_name;
+                    // Two passes so peers with full info (SN + game name)
+                    // print first — user wanted to see the actionable
+                    // daycare residents at the top, not buried under
+                    // "SN/?" entries we haven't fully ID'd yet.
+                    for (uint8_t pass = 0; pass < 2; ++pass) {
+                        for (uint8_t i = 0; i < nc && i < 6; ++i) {
+                            const char *sn = neigh[i].shortName[0]
+                                               ? neigh[i].shortName : nullptr;
+                            if (!sn && nodeDB) {
+                                auto *node = nodeDB->getMeshNode(neigh[i].nodeId);
+                                if (node && node->has_user &&
+                                    node->user.short_name[0]) {
+                                    sn = node->user.short_name;
+                                }
                             }
+                            bool gnKnown = neigh[i].gameName[0] != '\0';
+                            const char *gn = gnKnown ? neigh[i].gameName : "?";
+                            // Pass 0 = peers we can battle with (full info,
+                            // party loaded). Pass 1 = peers we've heard from
+                            // but don't yet have enough to challenge.
+                            if (pass == 0) {
+                                if (!sn || !gnKnown || neigh[i].partyCount == 0)
+                                    continue;
+                            } else {
+                                if (sn && gnKnown && neigh[i].partyCount > 0)
+                                    continue;  // already shown in pass 0
+                                if (!sn) {
+                                    // Render the unknown peer by nodeId so
+                                    // the user at least sees they're out
+                                    // there.
+                                    char nodeStr[12];
+                                    snprintf(nodeStr, sizeof(nodeStr),
+                                             "0x%08X",
+                                             (unsigned)neigh[i].nodeId);
+                                    MMT_APPEND("  %s/?\n", nodeStr);
+                                    shown++;
+                                    continue;
+                                }
+                            }
+                            if (neigh[i].ngPlusTier > 0) {
+                                MMT_APPEND("  %s/%s NG+%u\n",
+                                           sn, gn,
+                                           (unsigned)neigh[i].ngPlusTier);
+                            } else {
+                                MMT_APPEND("  %s/%s\n", sn, gn);
+                            }
+                            shown++;
                         }
-                        if (!sn) continue;  // wait for both beacon + nodeinfo
-                        // Peers without a loaded party can't battle, so skip
-                        // them rather than render as "SN/?" — keeps the HB
-                        // list to actionable opponents only.
-                        if (neigh[i].partyCount == 0) continue;
-                        const char *gn = neigh[i].gameName[0] ? neigh[i].gameName : "?";
-                        if (neigh[i].ngPlusTier > 0) {
-                            MMT_APPEND("  %s/%s NG+%u\n",
-                                       sn, gn, (unsigned)neigh[i].ngPlusTier);
-                        } else {
-                            MMT_APPEND("  %s/%s\n", sn, gn);
-                        }
-                        shown++;
                     }
                     if (shown == 0) {
                         MMT_APPEND("(waiting for peer nodeinfo...)\n");
@@ -3292,6 +3312,16 @@ int32_t MonsterMeshModule::runOnce()
         textBattleActive_ = true;
     }
 
+    // Drive textBattle_.tick() any time the state machine is alive —
+    // independently of whether we've taken over the screen. The SERVER
+    // sits in awaitingAccept_ (textBattle_.isActive()==true) BEFORE the
+    // screen takeover; if we only ticked when textBattleActive_ was set,
+    // CHALLENGE retransmits would never fire and a single dropped packet
+    // would leave the receiver oblivious.
+    if (textBattle_.isActive() && setupDone_ && !textBattleActive_) {
+        textBattle_.tick(millis());
+    }
+
     // Tick + render while active.
     if (textBattleActive_ && setupDone_) {
         // Mid-ladder prompt: as soon as the engine resolves a win in a
@@ -3311,7 +3341,11 @@ int32_t MonsterMeshModule::runOnce()
             textBattle_.setEndPrompt("");
         }
         textBattle_.tick(millis());
-        if (textBattle_.dirty() && g_deviceUiLgfx) {
+        // Force a redraw every tick so any LVGL/Meshtastic intrusion
+        // (notification bubbles, frame switches, etc.) that snuck past
+        // our flush_cb park gets immediately overwritten with the
+        // battle screen on the next runOnce.
+        if (g_deviceUiLgfx) {
             concurrency::LockGuard g(spiLock);
             textBattle_.render(g_deviceUiLgfx);
             textBattle_.clearDirty();

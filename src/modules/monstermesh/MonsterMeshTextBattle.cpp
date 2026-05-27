@@ -1569,6 +1569,13 @@ void MonsterMeshTextBattle::serverAuthSendUpdate()
     uint8_t board[80];
     size_t blen = packClientStateFromEngine(board);
     uint32_t h24 = tbBoardHash24(board, blen);
+    // Diagnostic: dump the hash-input buffer so we can compare against
+    // what the client recomputes. If the bytes differ, that's where the
+    // desync source is.
+    Serial.printf("[MMB] server board (blen=%u h=0x%06X): ",
+                  (unsigned)blen, (unsigned)h24);
+    for (size_t i = 0; i < blen; ++i) Serial.printf("%02X ", board[i]);
+    Serial.printf("\n");
 
     uint8_t buf[BATTLELINK_MAX_PKT];
     memset(buf, 0, sizeof(buf));
@@ -2208,8 +2215,16 @@ void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len
         clientNeedsFullState_ = true;
         clientAuthSendStateRequest();
         Serial.printf("[MMB] client UPDATE hash mismatch turn=%u "
-                      "server=0x%06X mine=0x%06X — requesting FULL_STATE\n",
-                      turn, (unsigned)serverHash, (unsigned)myHash);
+                      "server=0x%06X mine=0x%06X blen=%u\n",
+                      turn, (unsigned)serverHash, (unsigned)myHash,
+                      (unsigned)blen);
+        // Dump the byte-by-byte canonical buffer so we can compare what
+        // the client computed against the server's payload (which we
+        // can reconstruct from the UPDATE wire). The hash inputs MUST
+        // match byte-for-byte; whatever differs points at the bug.
+        Serial.printf("[MMB] client board: ");
+        for (size_t i = 0; i < blen; ++i) Serial.printf("%02X ", board[i]);
+        Serial.printf("\n");
         // Don't advance lastAppliedUpdateSeq_ — wait for FULL_STATE.
         lastRecvMs_ = millis();
         dirty_ = true;
