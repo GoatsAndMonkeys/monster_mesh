@@ -2898,6 +2898,19 @@ int32_t MonsterMeshModule::runOnce()
         }
     }
 
+    // Battle just ended on this deck — restore the LVGL flush_cb the
+    // existing pendingBattleEndCleanup_ flow uses, so the Meshtastic
+    // UI starts rendering again. Catches the case where the CLIENT
+    // (whose engine_.result() stays ONGOING because it never executes
+    // turns) dismisses the FINISHED screen and we'd otherwise leave
+    // LVGL parked forever — leading to "click on messages, nothing
+    // shows" and the deck freezing on incoming DMs.
+    if (textBattleActive_ && !textBattle_.isActive() && setupDone_) {
+        textBattleActive_ = false;
+        pendingBattleEndCleanup_ = true;
+        LOG_INFO("[MonsterMesh] textBattle exited externally — scheduling LVGL restore\n");
+    }
+
     // ── Take over the screen ONLY when the textBattle actually needs to
     // render battle UI on this deck. Server-auth has two pre-battle
     // states we explicitly DO NOT take over:
