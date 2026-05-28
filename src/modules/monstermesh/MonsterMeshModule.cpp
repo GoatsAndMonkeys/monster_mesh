@@ -2900,12 +2900,13 @@ int32_t MonsterMeshModule::runOnce()
 
     // Battle just ended on this deck — restore the LVGL flush_cb the
     // existing pendingBattleEndCleanup_ flow uses, so the Meshtastic
-    // UI starts rendering again. Catches the case where the CLIENT
-    // (whose engine_.result() stays ONGOING because it never executes
-    // turns) dismisses the FINISHED screen and we'd otherwise leave
-    // LVGL parked forever — leading to "click on messages, nothing
-    // shows" and the deck freezing on incoming DMs.
-    if (textBattleActive_ && !textBattle_.isActive() && setupDone_) {
+    // UI starts rendering again. Only fires when we actually parked
+    // flush_cb (savedFlushCb_ != null); several legacy paths set
+    // textBattleActive_=true without parking, and firing the cleanup
+    // there triggers stray lv_refr_now + refocus that collides with
+    // incoming-DM notification rendering and reboots the deck.
+    if (textBattleActive_ && !textBattle_.isActive() && setupDone_ &&
+        savedFlushCb_ != nullptr) {
         textBattleActive_ = false;
         pendingBattleEndCleanup_ = true;
         LOG_INFO("[MonsterMesh] textBattle exited externally — scheduling LVGL restore\n");
@@ -4520,17 +4521,19 @@ void MonsterMeshModule::tryConsumeStagedParty()
         pendingBattleEndCleanup_ = false;
 #if HAS_TFT
         lv_display_t *disp = lv_display_get_default();
+        // Only do the full LVGL repaint dance if we actually parked the
+        // flush_cb. Spurious cleanups (no flush_cb parking ever happened)
+        // would otherwise stomp on whatever LVGL was about to render
+        // and crash on the next incoming-DM notification.
         if (disp && savedFlushCb_) {
             lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
             savedFlushCb_ = nullptr;
-        }
-        if (disp) {
             lv_obj_invalidate(lv_screen_active());
             lv_refr_now(disp);
             lv_obj_invalidate(lv_screen_active());
             lv_refr_now(disp);
+            if (terminalActive_) terminal_.refocus();
         }
-        if (terminalActive_) terminal_.refocus();
 #endif
     }
     // Per-faint XP draining — flush whatever the engine accumulated since
