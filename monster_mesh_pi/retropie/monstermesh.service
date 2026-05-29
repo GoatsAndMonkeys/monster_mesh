@@ -1,0 +1,14 @@
+[Unit]
+Description=MonsterMesh Daemon
+After=network.target
+
+[Service]
+ExecStart=/opt/monstermesh/bin/mmd
+Restart=always
+RestartSec=5
+User=pi
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

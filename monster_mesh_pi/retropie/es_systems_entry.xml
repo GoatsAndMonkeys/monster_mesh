@@ -1,0 +1,9 @@
+<system>
+  <name>monstermesh</name>
+  <fullname>MonsterMesh</fullname>
+  <path>/home/pi/RetroPie/roms/monstermesh</path>
+  <extension>.mm</extension>
+  <command>/opt/monstermesh/bin/launch.sh %ROM%</command>
+  <platform>monstermesh</platform>
+  <theme>monstermesh</theme>
+</system>

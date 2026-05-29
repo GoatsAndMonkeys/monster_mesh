@@ -1,0 +1,18 @@
+# Build output
+build/
+*.o
+*.obj
+
+# Python venv used by the relay (regenerate with `pip install meshtastic`)
+tools/.venv/
+
+# Save files committed only by mistake — these are user data
+*.sav
+*.sav.mmtmp
+
+# Daemon runtime artifacts
+/var/lib/monstermesh/
+/tmp/monstermesh/
+
+# macOS noise
+.DS_Store
