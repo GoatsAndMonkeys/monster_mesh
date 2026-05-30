@@ -1777,15 +1777,34 @@ void MonsterMeshTextBattle::serverAuthSendFullState()
 void MonsterMeshTextBattle::serverAuthOnAcceptPkt(uint32_t fromId,
                                                   const uint8_t *buf, size_t len)
 {
-    if (!awaitingAccept_) return;
-    if (len < BATTLELINK_HDR_SIZE + 2 + TB_PARTY_MIN_BYTES) return;
+    if (!awaitingAccept_) {
+        Serial.printf("[MMB] DROP ACCEPT from=0x%08X reason=not_awaiting\n",
+                      (unsigned)fromId);
+        return;
+    }
+    if (len < BATTLELINK_HDR_SIZE + 2 + TB_PARTY_MIN_BYTES) {
+        Serial.printf("[MMB] DROP ACCEPT from=0x%08X reason=short_len=%u min=%u\n",
+                      (unsigned)fromId, (unsigned)len,
+                      (unsigned)(BATTLELINK_HDR_SIZE + 2 + TB_PARTY_MIN_BYTES));
+        return;
+    }
     const BattlePacket *pkt = (const BattlePacket *)buf;
-    if (pkt->sessionId() != session_) return;
+    if (pkt->sessionId() != session_) {
+        Serial.printf("[MMB] DROP ACCEPT from=0x%08X reason=session pkt=0x%04X our=0x%04X\n",
+                      (unsigned)fromId, (unsigned)pkt->sessionId(),
+                      (unsigned)session_);
+        return;
+    }
 
     uint8_t accepted = pkt->payload[0];
     uint8_t nameLen  = pkt->payload[1];
     if (nameLen > TB_MAX_NAME_LEN) nameLen = TB_MAX_NAME_LEN;
-    if (len < (size_t)BATTLELINK_HDR_SIZE + 2 + nameLen + TB_PARTY_MIN_BYTES) return;
+    if (len < (size_t)BATTLELINK_HDR_SIZE + 2 + nameLen + TB_PARTY_MIN_BYTES) {
+        Serial.printf("[MMB] DROP ACCEPT from=0x%08X reason=short_after_name "
+                      "nameLen=%u len=%u\n",
+                      (unsigned)fromId, nameLen, (unsigned)len);
+        return;
+    }
 
     if (!accepted) {
         appendLog("Challenge declined.");
@@ -1940,13 +1959,27 @@ void MonsterMeshTextBattle::serverAuthRetransmit(uint32_t nowMs)
 void MonsterMeshTextBattle::clientAuthOnChallengePkt(uint32_t fromId,
                                                      const uint8_t *buf, size_t len)
 {
-    if (len < BATTLELINK_HDR_SIZE + 2 + TB_PARTY_MIN_BYTES) return;
+    if (len < BATTLELINK_HDR_SIZE + 2 + TB_PARTY_MIN_BYTES) {
+        Serial.printf("[MMB] DROP CHALLENGE from=0x%08X reason=short_len=%u min=%u\n",
+                      (unsigned)fromId, (unsigned)len,
+                      (unsigned)(BATTLELINK_HDR_SIZE + 2 + TB_PARTY_MIN_BYTES));
+        return;
+    }
     const BattlePacket *pkt = (const BattlePacket *)buf;
     uint8_t gen     = pkt->payload[0];
     uint8_t nameLen = pkt->payload[1];
-    if (gen != 1) return;
+    if (gen != 1) {
+        Serial.printf("[MMB] DROP CHALLENGE from=0x%08X reason=gen=%u (expected 1)\n",
+                      (unsigned)fromId, gen);
+        return;
+    }
     if (nameLen > TB_MAX_NAME_LEN) nameLen = TB_MAX_NAME_LEN;
-    if (len < (size_t)BATTLELINK_HDR_SIZE + 2 + nameLen + TB_PARTY_MIN_BYTES) return;
+    if (len < (size_t)BATTLELINK_HDR_SIZE + 2 + nameLen + TB_PARTY_MIN_BYTES) {
+        Serial.printf("[MMB] DROP CHALLENGE from=0x%08X reason=short_after_name "
+                      "nameLen=%u len=%u\n",
+                      (unsigned)fromId, nameLen, (unsigned)len);
+        return;
+    }
 
     // Duplicate CHALLENGE arriving after we've already ACCEPTed — server's
     // CHALLENGE-retransmit ran longer than our ACCEPT made it back, or
