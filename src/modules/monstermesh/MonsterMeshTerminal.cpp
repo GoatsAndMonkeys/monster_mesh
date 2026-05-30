@@ -489,7 +489,8 @@ void MonsterMeshTerminal::executeLine(const char *line)
         println("  mmg         - discover MonsterMesh Gyms");
         println("  mmg fight N - challenge MM gym N");
         println("  mmb         - list peers online for battle");
-        println("  mmb <peer>  - MonsterMesh Battle (PvP)");
+        println("  mmb <peer>  - MonsterMesh Battle (PvP, server-auth)");
+        println("  mmbold<peer>- legacy dual-engine PvP (fallback)");
         println("  fight       - local CPU battle vs neighbor");
         println("  explore     - Wild encounters nearby");
         println("  news        - LoC news ring");
@@ -986,36 +987,37 @@ void MonsterMeshTerminal::executeLine(const char *line)
         }
         return;
     }
-    // `mmb <short>` (or backward-compat `mmt <short>`) — MonsterMesh
-    // Battle: sends a challenge DM to the peer. Module resolves the
-    // short_name via NodeDB; we just hand it the typed string.
-    bool isBattleCmd = (strncasecmp(line, "mmb ", 4) == 0 ||
+    // `mmbold <short>` (or backward-compat `mmt <short>`) — legacy
+    // dual-engine MonsterMesh Battle. Kept for testing / fallback only;
+    // the new default is the server-authoritative `mmb` below.
+    bool isBattleCmd = (strncasecmp(line, "mmbold ", 7) == 0 ||
                         strncasecmp(line, "mmt ", 4) == 0);
     if (isBattleCmd) {
-        const char *p = line + 4;
+        const char *p = line + (strncasecmp(line, "mmbold ", 7) == 0 ? 7 : 4);
         while (*p == ' ' || *p == '@') ++p;
-        if (!*p) { println("usage: mmb <short_name>"); return; }
-        if (!mmtFn_) { println("mmb not wired"); return; }
+        if (!*p) { println("usage: mmbold <short_name>"); return; }
+        if (!mmtFn_) { println("mmbold not wired"); return; }
         char buf[64];
-        snprintf(buf, sizeof(buf), "Challenging %s...", p);
+        snprintf(buf, sizeof(buf), "Challenging %s (legacy)...", p);
         println(buf);
         mmtFn_(mmtCtx_, p);
         return;
     }
-    // `mmb2 <short>` — server-authoritative MonsterMesh Battle. Single
+    // `mmb <short>` — server-authoritative MonsterMesh Battle. Single
     // CHALLENGE packet carries our party; the receiver's screen lights up
-    // instantly on K-accept (no party-exchange round-trip).
-    if (strncasecmp(line, "mmb2 ", 5) == 0) {
-        const char *p = line + 5;
+    // instantly on Y-accept (no party-exchange round-trip). This is the
+    // default; the legacy dual-engine path now lives under `mmbold`.
+    if (strncasecmp(line, "mmb ", 4) == 0) {
+        const char *p = line + 4;
         while (*p == ' ' || *p == '@') ++p;
-        if (!*p) { println("usage: mmb2 <short_name>"); return; }
-        if (!mmb2Fn_) { println("mmb2 not wired"); return; }
+        if (!*p) { println("usage: mmb <short_name>"); return; }
+        if (!mmb2Fn_) { println("mmb not wired"); return; }
         if (!partyLoaded_) {
             println("no party loaded — load a SAV first");
             return;
         }
         char buf[64];
-        snprintf(buf, sizeof(buf), "v2-Challenging %s...", p);
+        snprintf(buf, sizeof(buf), "Challenging %s...", p);
         println(buf);
         mmb2Fn_(mmb2Ctx_, p);
         return;
