@@ -3375,23 +3375,18 @@ int32_t MonsterMeshModule::runOnce()
             textBattle_.setEndPrompt("");
         }
         textBattle_.tick(millis());
-        // Repaint on dirty (normal case) OR every 500 ms as a recovery
-        // sweep so Meshtastic UI intrusions clear in under a second.
-        // 3 s was visibly too long (user could read incoming chat lines
-        // overlaid on the battle screen); 50 ms (always-redraw) flickered
-        // and crashed from spiLock contention. 500 ms is the sweet
-        // spot — 2 Hz repaint is invisible to the eye, doesn't starve
-        // the LoRa thread for spiLock, and overwrites intruders fast
-        // enough that they barely register.
-        uint32_t nowTb = millis();
-        if (textBattle_.dirty() ||
-            (nowTb - lastTbRecoveryDrawMs_ >= 500)) {
+        // Repaint ONLY on dirty (b875 behavior). The 500 ms recovery
+        // sweep added in P2.16/P2.18 to mask Meshtastic-UI leak gaps
+        // was the visible flicker source — 2 Hz full-screen re-render
+        // tears even when nothing changed. With the P2.23 empty-screen
+        // LVGL swap now in place there's nothing leaking to mask, so
+        // the sweep is unnecessary and pure cost.
+        if (textBattle_.dirty()) {
             if (g_deviceUiLgfx) {
                 concurrency::LockGuard g(spiLock);
                 textBattle_.render(g_deviceUiLgfx);
                 textBattle_.clearDirty();
             }
-            lastTbRecoveryDrawMs_ = nowTb;
         }
         // Drain per-faint XP that the engine accumulated this turn. The
         // LVGL thread (tryConsumeStagedParty) credits each slot directly
