@@ -83,6 +83,14 @@ public:
         return true;
     }
 
+    // Drop everything currently queued for send. Called when stale
+    // CHALLENGE retransmits would otherwise delay a fresh UPDATE — e.g.
+    // ACCEPT just arrived and we've got several CHALLENGE packets piled
+    // up in the queue draining at ~116 B/s.
+    void dropPendingSends() {
+        if (txQueue_) xQueueReset(txQueue_);
+    }
+
     // Legacy RadioTransport interface for BattleShim/Lobby compatibility
     bool send(const uint8_t *data, size_t len) {
         return queueSend(data, len);

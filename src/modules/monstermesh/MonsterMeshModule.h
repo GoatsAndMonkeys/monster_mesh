@@ -562,6 +562,16 @@ public:
 
     // Saved LVGL flush callback (swapped out when emulator is active)
     void *savedFlushCb_ = nullptr;
+    // Battle station screen-swap state. Replacing flush_cb with a no-op
+    // wasn't enough to stop Meshtastic UI from leaking through — LVGL
+    // kept invalidating Meshtastic widgets and repainting them in the
+    // gaps between our 2 Hz recovery sweep. Solution: also point LVGL
+    // at an empty screen for the duration of the battle so the widget
+    // tree it walks is genuinely empty. tbSavedScreen_ holds the
+    // previously active screen; tbEmptyScreen_ is the throwaway we
+    // create and load.
+    void *tbSavedScreen_ = nullptr;
+    void *tbEmptyScreen_ = nullptr;
     // Cadence for the periodic battle-screen recovery repaint that
     // overwrites any LVGL/Meshtastic UI that snuck past flush_cb. Set
     // in MonsterMeshModule.cpp's runOnce textBattleActive_ block.

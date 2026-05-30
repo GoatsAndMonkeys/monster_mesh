@@ -1857,6 +1857,12 @@ void MonsterMeshTextBattle::serverAuthOnAcceptPkt(uint32_t fromId,
              peerTbName_[0] ? peerTbName_ : "trainer");
     appendLog(wlog);
 
+    // Drop any CHALLENGE retransmits still sitting in the TX queue —
+    // ACCEPT is in, the handshake is done, those would only delay the
+    // first UPDATE (LoRa drains at ~116 B/s, queue can have 2-3 stale
+    // 127-byte CHALLENGEs from before ACCEPT made it back).
+    transport_.dropPendingSends();
+
     // Ship a turn-0 UPDATE immediately so the client renders the initial
     // board even before either side has acted.
     serverAuthSendUpdate();

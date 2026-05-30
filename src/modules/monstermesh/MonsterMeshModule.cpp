@@ -2936,13 +2936,33 @@ int32_t MonsterMeshModule::runOnce()
                 lv_display_flush_ready(d);
             });
         }
+        // Also swap LVGL onto an empty screen so its repaint walk has
+        // nothing to draw — without this, Meshtastic widgets stayed in
+        // the active screen's tree and kept getting invalidated +
+        // re-rendered into our framebuffer between recovery sweeps,
+        // showing as the "Meshtastic UI leaking through battle"
+        // symptom the user reported repeatedly.
+        if (!tbSavedScreen_) {
+            tbSavedScreen_ = (void *)lv_screen_active();
+            tbEmptyScreen_ = (void *)lv_obj_create(NULL);
+            // Paint the empty screen black, otherwise LVGL renders its
+            // default light-grey style over our battle UI between our
+            // 500 ms lgfx sweeps — visible as constant flicker. With
+            // black, even a "successful" LVGL repaint of the empty
+            // screen is invisible under the battle UI.
+            lv_obj_set_style_bg_color((lv_obj_t *)tbEmptyScreen_,
+                                       lv_color_black(), LV_PART_MAIN);
+            lv_obj_set_style_bg_opa((lv_obj_t *)tbEmptyScreen_,
+                                     LV_OPA_COVER, LV_PART_MAIN);
+            lv_screen_load((lv_obj_t *)tbEmptyScreen_);
+        }
 #endif
         if (g_deviceUiLgfx) {
             concurrency::LockGuard g(spiLock);
             g_deviceUiLgfx->clearClipRect();
             g_deviceUiLgfx->fillScreen(0x0000);
         }
-        LOG_INFO("[MonsterMesh] textBattle owning screen (role=%d) — flush_cb parked\n",
+        LOG_INFO("[MonsterMesh] textBattle owning screen (role=%d) — flush_cb parked, empty screen loaded\n",
                  (int)textBattle_.role());
     }
 
@@ -4528,6 +4548,18 @@ void MonsterMeshModule::tryConsumeStagedParty()
         if (disp && savedFlushCb_) {
             lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
             savedFlushCb_ = nullptr;
+            // Restore the previously-active LVGL screen and delete the
+            // throwaway empty one we loaded during takeover. Order
+            // matters: load saved screen FIRST (so LVGL stops referring
+            // to the empty one) THEN delete the empty one.
+            if (tbSavedScreen_) {
+                lv_screen_load((lv_obj_t *)tbSavedScreen_);
+                tbSavedScreen_ = nullptr;
+            }
+            if (tbEmptyScreen_) {
+                lv_obj_delete((lv_obj_t *)tbEmptyScreen_);
+                tbEmptyScreen_ = nullptr;
+            }
             lv_obj_invalidate(lv_screen_active());
             lv_refr_now(disp);
             lv_obj_invalidate(lv_screen_active());
