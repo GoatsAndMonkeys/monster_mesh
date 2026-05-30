@@ -167,6 +167,7 @@ public:
     // Was the screen dirtied since last render? (caller batches with spiLock.)
     bool dirty() const { return dirty_; }
     void clearDirty() { dirty_ = false; }
+    void setDirty()   { dirty_ = true; }
 
 private:
     MeshtasticTransport &transport_;

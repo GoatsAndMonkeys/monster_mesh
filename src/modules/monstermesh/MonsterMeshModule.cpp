@@ -2936,26 +2936,6 @@ int32_t MonsterMeshModule::runOnce()
                 lv_display_flush_ready(d);
             });
         }
-        // Also swap LVGL onto an empty screen so its repaint walk has
-        // nothing to draw — without this, Meshtastic widgets stayed in
-        // the active screen's tree and kept getting invalidated +
-        // re-rendered into our framebuffer between recovery sweeps,
-        // showing as the "Meshtastic UI leaking through battle"
-        // symptom the user reported repeatedly.
-        if (!tbSavedScreen_) {
-            tbSavedScreen_ = (void *)lv_screen_active();
-            tbEmptyScreen_ = (void *)lv_obj_create(NULL);
-            // Paint the empty screen black, otherwise LVGL renders its
-            // default light-grey style over our battle UI between our
-            // 500 ms lgfx sweeps — visible as constant flicker. With
-            // black, even a "successful" LVGL repaint of the empty
-            // screen is invisible under the battle UI.
-            lv_obj_set_style_bg_color((lv_obj_t *)tbEmptyScreen_,
-                                       lv_color_black(), LV_PART_MAIN);
-            lv_obj_set_style_bg_opa((lv_obj_t *)tbEmptyScreen_,
-                                     LV_OPA_COVER, LV_PART_MAIN);
-            lv_screen_load((lv_obj_t *)tbEmptyScreen_);
-        }
 #endif
         if (g_deviceUiLgfx) {
             concurrency::LockGuard g(spiLock);
@@ -2973,6 +2953,23 @@ int32_t MonsterMeshModule::runOnce()
     // screen-takeover block above only fires once ACCEPT actually lands
     // and the engine is started. Until then the user stays in the
     // terminal panel and can see the "queued challenge" log line.
+    // Throttled diag log if a launch is queued but a gate blocks. Without
+    // this the "queued v2-challenge" line lands and nothing follows; user
+    // can't tell whether the launch fired or got eaten by a gate.
+    if (pendingMmb2Initiator_ &&
+        (textBattleActive_ || !setupDone_ ||
+         emulatorActive_ || browserActive_ || !terminal_.hasParty())) {
+        static uint32_t lastMmb2BlockedMs = 0;
+        uint32_t now = millis();
+        if (now - lastMmb2BlockedMs > 1000) {
+            lastMmb2BlockedMs = now;
+            LOG_WARN("[MonsterMesh] mmb2: launch BLOCKED tb=%d setupDone=%d "
+                     "emu=%d br=%d hasParty=%d\n",
+                     (int)textBattleActive_, (int)setupDone_,
+                     (int)emulatorActive_, (int)browserActive_,
+                     (int)terminal_.hasParty());
+        }
+    }
     if (pendingMmb2Initiator_ && !textBattleActive_ && setupDone_ &&
         !emulatorActive_ && !browserActive_ && terminal_.hasParty()) {
         pendingMmb2Initiator_ = false;
@@ -3375,18 +3372,21 @@ int32_t MonsterMeshModule::runOnce()
             textBattle_.setEndPrompt("");
         }
         textBattle_.tick(millis());
-        // Repaint ONLY on dirty (b875 behavior). The 500 ms recovery
-        // sweep added in P2.16/P2.18 to mask Meshtastic-UI leak gaps
-        // was the visible flicker source — 2 Hz full-screen re-render
-        // tears even when nothing changed. With the P2.23 empty-screen
-        // LVGL swap now in place there's nothing leaking to mask, so
-        // the sweep is unnecessary and pure cost.
-        if (textBattle_.dirty()) {
+        // Repaint on dirty OR every 500 ms recovery sweep so Meshtastic
+        // UI intrusions (notifications, frame switches) clear in under
+        // a second. The empty-screen swap experiment (P2.23/P2.24) didn't
+        // hold up under mmb — Meshtastic's DeviceUI swapped screens back
+        // anyway and the swap also broke LVGL input routing. Back to the
+        // sweep that worked.
+        uint32_t nowTb = millis();
+        if (textBattle_.dirty() ||
+            (nowTb - lastTbRecoveryDrawMs_ >= 500)) {
             if (g_deviceUiLgfx) {
                 concurrency::LockGuard g(spiLock);
                 textBattle_.render(g_deviceUiLgfx);
                 textBattle_.clearDirty();
             }
+            lastTbRecoveryDrawMs_ = nowTb;
         }
         // Drain per-faint XP that the engine accumulated this turn. The
         // LVGL thread (tryConsumeStagedParty) credits each slot directly
@@ -4543,18 +4543,6 @@ void MonsterMeshModule::tryConsumeStagedParty()
         if (disp && savedFlushCb_) {
             lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
             savedFlushCb_ = nullptr;
-            // Restore the previously-active LVGL screen and delete the
-            // throwaway empty one we loaded during takeover. Order
-            // matters: load saved screen FIRST (so LVGL stops referring
-            // to the empty one) THEN delete the empty one.
-            if (tbSavedScreen_) {
-                lv_screen_load((lv_obj_t *)tbSavedScreen_);
-                tbSavedScreen_ = nullptr;
-            }
-            if (tbEmptyScreen_) {
-                lv_obj_delete((lv_obj_t *)tbEmptyScreen_);
-                tbEmptyScreen_ = nullptr;
-            }
             lv_obj_invalidate(lv_screen_active());
             lv_refr_now(disp);
             lv_obj_invalidate(lv_screen_active());
