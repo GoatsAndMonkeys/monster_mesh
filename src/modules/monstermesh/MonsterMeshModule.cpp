@@ -2935,15 +2935,12 @@ int32_t MonsterMeshModule::runOnce()
             lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
                 lv_display_flush_ready(d);
             });
-            // Disable the entire LVGL timer system — flush_cb park alone
-            // wasn't enough because LVGL kept walking the widget tree and
-            // re-rendering Meshtastic widgets (status bar, notification
-            // toasts) into our framebuffer between sweeps. Pausing just
-            // the refresh timer wasn't enough either — the terminal
-            // cursor has its own blink timer that bypassed the refresh
-            // pause via lv_refr_now() calls. lv_timer_enable(false)
-            // gates all timer dispatch globally so nothing LVGL can run.
-            lv_timer_enable(false);
+            // Pause LVGL's display refresh timer (P2.26 — the build
+            // user described as "much better"). lv_timer_enable(false)
+            // killed too much (terminal cursor blink, animations) and
+            // post-battle cleanup couldn't reliably re-render the
+            // Meshtastic UI — terminal came back full-black.
+            if (disp->refr_timer) lv_timer_pause(disp->refr_timer);
         }
 #endif
         if (g_deviceUiLgfx) {
@@ -4548,9 +4545,16 @@ void MonsterMeshModule::tryConsumeStagedParty()
             lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
             savedFlushCb_ = nullptr;
             // Re-enable the LVGL timer system that we disabled on
-            // takeover, then force two refreshes to flush out the
-            // battle framebuffer and restore Meshtastic UI.
-            lv_timer_enable(true);
+            // takeover. Just calling lv_refr_now() after isn't enough
+            // — Meshtastic's terminal cursor / status bar widgets
+            // were invalidated during the pause but their render
+            // pipelines need lv_timer_handler() to actually run the
+            // dispatch and redraw subtree. Without that, the screen
+            // came back full-black after a battle (P2.27 regression).
+            // Resume the LVGL refresh timer paused on takeover, then
+            // force two refreshes to flush the battle framebuffer and
+            // restore Meshtastic UI (P2.26 cleanup).
+            if (disp->refr_timer) lv_timer_resume(disp->refr_timer);
             lv_obj_invalidate(lv_screen_active());
             lv_refr_now(disp);
             lv_obj_invalidate(lv_screen_active());
