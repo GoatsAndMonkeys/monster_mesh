@@ -2935,13 +2935,15 @@ int32_t MonsterMeshModule::runOnce()
             lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
                 lv_display_flush_ready(d);
             });
-            // Pause LVGL's refresh timer entirely — flush_cb park alone
+            // Disable the entire LVGL timer system — flush_cb park alone
             // wasn't enough because LVGL kept walking the widget tree and
-            // re-rendering Meshtastic widgets (terminal cursor, status bar,
-            // notification toasts) into our framebuffer between sweeps.
-            // With the timer paused, lv_refr_now still works if we call
-            // it from cleanup but LVGL won't touch the screen on its own.
-            if (disp->refr_timer) lv_timer_pause(disp->refr_timer);
+            // re-rendering Meshtastic widgets (status bar, notification
+            // toasts) into our framebuffer between sweeps. Pausing just
+            // the refresh timer wasn't enough either — the terminal
+            // cursor has its own blink timer that bypassed the refresh
+            // pause via lv_refr_now() calls. lv_timer_enable(false)
+            // gates all timer dispatch globally so nothing LVGL can run.
+            lv_timer_enable(false);
         }
 #endif
         if (g_deviceUiLgfx) {
@@ -4545,10 +4547,10 @@ void MonsterMeshModule::tryConsumeStagedParty()
         if (disp && savedFlushCb_) {
             lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
             savedFlushCb_ = nullptr;
-            // Resume the LVGL refresh timer that was paused during
+            // Re-enable the LVGL timer system that we disabled on
             // takeover, then force two refreshes to flush out the
             // battle framebuffer and restore Meshtastic UI.
-            if (disp->refr_timer) lv_timer_resume(disp->refr_timer);
+            lv_timer_enable(true);
             lv_obj_invalidate(lv_screen_active());
             lv_refr_now(disp);
             lv_obj_invalidate(lv_screen_active());
