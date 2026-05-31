@@ -2935,6 +2935,13 @@ int32_t MonsterMeshModule::runOnce()
             lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
                 lv_display_flush_ready(d);
             });
+            // Pause LVGL's refresh timer entirely — flush_cb park alone
+            // wasn't enough because LVGL kept walking the widget tree and
+            // re-rendering Meshtastic widgets (terminal cursor, status bar,
+            // notification toasts) into our framebuffer between sweeps.
+            // With the timer paused, lv_refr_now still works if we call
+            // it from cleanup but LVGL won't touch the screen on its own.
+            if (disp->refr_timer) lv_timer_pause(disp->refr_timer);
         }
 #endif
         if (g_deviceUiLgfx) {
@@ -3372,21 +3379,16 @@ int32_t MonsterMeshModule::runOnce()
             textBattle_.setEndPrompt("");
         }
         textBattle_.tick(millis());
-        // Repaint on dirty OR every 500 ms recovery sweep so Meshtastic
-        // UI intrusions (notifications, frame switches) clear in under
-        // a second. The empty-screen swap experiment (P2.23/P2.24) didn't
-        // hold up under mmb — Meshtastic's DeviceUI swapped screens back
-        // anyway and the swap also broke LVGL input routing. Back to the
-        // sweep that worked.
-        uint32_t nowTb = millis();
-        if (textBattle_.dirty() ||
-            (nowTb - lastTbRecoveryDrawMs_ >= 500)) {
+        // Repaint only on dirty. We don't need the 500 ms recovery sweep
+        // anymore because LVGL's refresh timer is paused during takeover
+        // (P2.26) — Meshtastic's UI can't repaint over us, so there's
+        // nothing to mask.
+        if (textBattle_.dirty()) {
             if (g_deviceUiLgfx) {
                 concurrency::LockGuard g(spiLock);
                 textBattle_.render(g_deviceUiLgfx);
                 textBattle_.clearDirty();
             }
-            lastTbRecoveryDrawMs_ = nowTb;
         }
         // Drain per-faint XP that the engine accumulated this turn. The
         // LVGL thread (tryConsumeStagedParty) credits each slot directly
@@ -4543,6 +4545,10 @@ void MonsterMeshModule::tryConsumeStagedParty()
         if (disp && savedFlushCb_) {
             lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
             savedFlushCb_ = nullptr;
+            // Resume the LVGL refresh timer that was paused during
+            // takeover, then force two refreshes to flush out the
+            // battle framebuffer and restore Meshtastic UI.
+            if (disp->refr_timer) lv_timer_resume(disp->refr_timer);
             lv_obj_invalidate(lv_screen_active());
             lv_refr_now(disp);
             lv_obj_invalidate(lv_screen_active());
