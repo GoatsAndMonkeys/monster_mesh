@@ -2928,27 +2928,14 @@ int32_t MonsterMeshModule::runOnce()
          !textBattle_.awaitingAccept()));
     if (shouldOwnScreen && !textBattleActive_ && setupDone_) {
         textBattleActive_ = true;
-#if HAS_TFT
-        lv_display_t *disp = lv_display_get_default();
-        if (disp && !savedFlushCb_) {
-            savedFlushCb_ = (void *)disp->flush_cb;
-            lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
-                lv_display_flush_ready(d);
-            });
-            // Pause LVGL's display refresh timer (P2.26 — the build
-            // user described as "much better"). lv_timer_enable(false)
-            // killed too much (terminal cursor blink, animations) and
-            // post-battle cleanup couldn't reliably re-render the
-            // Meshtastic UI — terminal came back full-black.
-            if (disp->refr_timer) lv_timer_pause(disp->refr_timer);
-        }
-#endif
-        if (g_deviceUiLgfx) {
-            concurrency::LockGuard g(spiLock);
-            g_deviceUiLgfx->clearClipRect();
-            g_deviceUiLgfx->fillScreen(0x0000);
-        }
-        LOG_INFO("[MonsterMesh] textBattle owning screen (role=%d) — flush_cb parked, empty screen loaded\n",
+        // P2.28: LVGL-native battle screen. We lv_screen_load a
+        // dedicated battle screen whose widget tree we control, so
+        // LVGL is in charge the whole time and nothing can bleed
+        // through from Meshtastic's home screen. No more lgfx-direct
+        // draws, no more flush_cb park, no more refresh-timer pause.
+        showLvBattleScreen();
+        updateLvBattleScreen();
+        LOG_INFO("[MonsterMesh] textBattle owning screen (role=%d) — LVGL battle screen loaded\n",
                  (int)textBattle_.role());
     }
 
@@ -3378,16 +3365,13 @@ int32_t MonsterMeshModule::runOnce()
             textBattle_.setEndPrompt("");
         }
         textBattle_.tick(millis());
-        // Repaint only on dirty. We don't need the 500 ms recovery sweep
-        // anymore because LVGL's refresh timer is paused during takeover
-        // (P2.26) — Meshtastic's UI can't repaint over us, so there's
-        // nothing to mask.
+        // P2.28: LVGL-native battle screen. State changes push into
+        // LVGL widget content; LVGL handles all drawing on its own
+        // timer. No more lgfx-direct render, no more flush_cb park,
+        // no more recovery sweep. Update only on dirty.
         if (textBattle_.dirty()) {
-            if (g_deviceUiLgfx) {
-                concurrency::LockGuard g(spiLock);
-                textBattle_.render(g_deviceUiLgfx);
-                textBattle_.clearDirty();
-            }
+            updateLvBattleScreen();
+            textBattle_.clearDirty();
         }
         // Drain per-faint XP that the engine accumulated this turn. The
         // LVGL thread (tryConsumeStagedParty) credits each slot directly
@@ -4536,31 +4520,13 @@ void MonsterMeshModule::tryConsumeStagedParty()
     if (pendingBattleEndCleanup_) {
         pendingBattleEndCleanup_ = false;
 #if HAS_TFT
-        lv_display_t *disp = lv_display_get_default();
-        // Only do the full LVGL repaint dance if we actually parked the
-        // flush_cb. Spurious cleanups (no flush_cb parking ever happened)
-        // would otherwise stomp on whatever LVGL was about to render
-        // and crash on the next incoming-DM notification.
-        if (disp && savedFlushCb_) {
-            lv_display_set_flush_cb(disp, (lv_display_flush_cb_t)savedFlushCb_);
-            savedFlushCb_ = nullptr;
-            // Re-enable the LVGL timer system that we disabled on
-            // takeover. Just calling lv_refr_now() after isn't enough
-            // — Meshtastic's terminal cursor / status bar widgets
-            // were invalidated during the pause but their render
-            // pipelines need lv_timer_handler() to actually run the
-            // dispatch and redraw subtree. Without that, the screen
-            // came back full-black after a battle (P2.27 regression).
-            // Resume the LVGL refresh timer paused on takeover, then
-            // force two refreshes to flush the battle framebuffer and
-            // restore Meshtastic UI (P2.26 cleanup).
-            if (disp->refr_timer) lv_timer_resume(disp->refr_timer);
-            lv_obj_invalidate(lv_screen_active());
-            lv_refr_now(disp);
-            lv_obj_invalidate(lv_screen_active());
-            lv_refr_now(disp);
-            if (terminalActive_) terminal_.refocus();
-        }
+        // P2.28: switch LVGL back to whatever screen was active before
+        // the battle (saved in showLvBattleScreen). LVGL handles the
+        // repaint naturally — no flush_cb juggling, no manual refresh
+        // pumping. The flush_cb park / timer pause from earlier
+        // approaches isn't used anymore so nothing to undo.
+        hideLvBattleScreen();
+        if (terminalActive_) terminal_.refocus();
 #endif
     }
     // Per-faint XP draining — flush whatever the engine accumulated since
@@ -4615,6 +4581,143 @@ void MonsterMeshModule::tryConsumeStagedParty()
     }
     terminalPartyStaged_ = false;
 }
+
+// ── LVGL-native battle screen (Phase 1) ────────────────────────────────
+// Architecture: a dedicated LVGL screen holds the battle UI as widgets
+// (labels for header / mons / log / move menu). We lv_screen_load it
+// on takeover and restore the previous screen on cleanup. LVGL stays
+// in charge of the screen the entire time — Meshtastic's UI literally
+// cannot draw anywhere because it's not on the active widget tree.
+// State sync happens in updateLvBattleScreen() on every dirty tick.
+//
+// Phase 1 is text-only; sprites + HP bars + proper layout are Phase 2.
+
+#if HAS_TFT
+void MonsterMeshModule::buildLvBattleScreen()
+{
+    if (lvBattleScreen_) return;
+    lv_obj_t *scr = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(scr, 0, LV_PART_MAIN);
+    lv_obj_set_layout(scr, LV_LAYOUT_NONE);   // raw absolute positioning
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+
+    auto mkLabel = [&](int16_t x, int16_t y, int16_t w, int16_t h,
+                       lv_color_t color) {
+        lv_obj_t *l = lv_label_create(scr);
+        lv_obj_set_size(l, w, h);
+        lv_obj_align(l, LV_ALIGN_TOP_LEFT, x, y);
+        lv_obj_set_style_text_color(l, color, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(l, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_border_width(l, 0, LV_PART_MAIN);
+        lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+        lv_label_set_text(l, "");
+        return l;
+    };
+
+    // 320×240 layout, all text white on black:
+    lvBattleHeader_ = mkLabel(4,   2, 312, 18, lv_color_white());
+    lvBattleEnemy_  = mkLabel(4,  22, 312, 32, lv_color_make(0xFF, 0x80, 0x80));
+    lvBattleLog_    = mkLabel(4,  58, 312, 70, lv_color_white());
+    lvBattlePlayer_ = mkLabel(4, 132, 312, 32, lv_color_make(0x80, 0xFF, 0x80));
+    lvBattleMoves_  = mkLabel(4, 168, 312, 70, lv_color_make(0xFF, 0xFF, 0x80));
+
+    // Initial placeholder so a freshly-loaded battle screen isn't full
+    // black even before updateLvBattleScreen() fires.
+    lv_label_set_text((lv_obj_t *)lvBattleHeader_, "MMB Battle Station");
+    lv_label_set_text((lv_obj_t *)lvBattleEnemy_,  "Enemy: (waiting...)");
+    lv_label_set_text((lv_obj_t *)lvBattleLog_,    "Loading battle...");
+    lv_label_set_text((lv_obj_t *)lvBattlePlayer_, "You: (waiting...)");
+    lv_label_set_text((lv_obj_t *)lvBattleMoves_,  "(no moves yet)");
+
+    lvBattleScreen_ = scr;
+    LOG_INFO("[MonsterMesh] LVGL battle screen built\n");
+}
+
+void MonsterMeshModule::updateLvBattleScreen()
+{
+    if (!lvBattleScreen_ || !textBattle_.isActive()) return;
+    const Gen1BattleEngine &eng = textBattle_.engine();
+    const auto &me  = eng.party(0);
+    const auto &opp = eng.party(1);
+
+    // Header.
+    char hdr[64];
+    snprintf(hdr, sizeof(hdr), "MMB%s vs %s   T:%u",
+             textBattle_.role() == MonsterMeshTextBattle::Role::SERVER ? "-S"
+             : textBattle_.role() == MonsterMeshTextBattle::Role::CLIENT ? "-C"
+             : "",
+             textBattle_.peerName()[0] ? textBattle_.peerName() : "peer",
+             (unsigned)eng.turn());
+    lv_label_set_text((lv_obj_t *)lvBattleHeader_, hdr);
+
+    auto fmtMon = [](char *buf, size_t cap, const Gen1BattleEngine::BattleParty &p) {
+        if (p.count == 0 || p.active >= p.count) {
+            snprintf(buf, cap, "(no party)");
+            return;
+        }
+        const auto &m = p.mons[p.active];
+        snprintf(buf, cap, "%s  L:%u\nHP %u/%u",
+                 m.nickname[0] ? m.nickname : "???",
+                 (unsigned)m.level, (unsigned)m.hp, (unsigned)m.maxHp);
+    };
+    char enemyBuf[80], playerBuf[80];
+    fmtMon(enemyBuf,  sizeof(enemyBuf),  opp);
+    fmtMon(playerBuf, sizeof(playerBuf), me);
+    lv_label_set_text((lv_obj_t *)lvBattleEnemy_,  enemyBuf);
+    lv_label_set_text((lv_obj_t *)lvBattlePlayer_, playerBuf);
+
+    // Log (last 5 lines).
+    char logBuf[256];
+    textBattle_.getRecentLog(logBuf, sizeof(logBuf), 5);
+    lv_label_set_text((lv_obj_t *)lvBattleLog_, logBuf);
+
+    // Moves with PP, cursor-marked.
+    char moves[160] = {};
+    if (me.count > 0 && me.active < me.count) {
+        const auto &active = me.mons[me.active];
+        size_t pos = 0;
+        for (uint8_t i = 0; i < 4 && pos < sizeof(moves) - 1; ++i) {
+            const Gen1MoveData *mv = gen1Move(active.moves[i]);
+            const char *name = mv ? mv->name : "----";
+            uint8_t pp = active.pp[i];
+            uint8_t maxPp = mv ? mv->pp : 0;
+            char prefix = (textBattle_.cursorIdx() == i) ? '>' : ' ';
+            int n = snprintf(moves + pos, sizeof(moves) - pos,
+                             "%c %s  %u/%u\n", prefix, name, pp, maxPp);
+            if (n > 0) pos += (size_t)n;
+        }
+    }
+    lv_label_set_text((lv_obj_t *)lvBattleMoves_, moves);
+}
+
+void MonsterMeshModule::showLvBattleScreen()
+{
+    if (!lvBattleScreen_) buildLvBattleScreen();
+    if (lvBattleActive_) return;
+    lvBattlePrevScreen_ = (void *)lv_screen_active();
+    lv_screen_load((lv_obj_t *)lvBattleScreen_);
+    lvBattleActive_ = true;
+    LOG_INFO("[MonsterMesh] LVGL battle screen shown\n");
+}
+
+void MonsterMeshModule::hideLvBattleScreen()
+{
+    if (!lvBattleActive_) return;
+    if (lvBattlePrevScreen_) {
+        lv_screen_load((lv_obj_t *)lvBattlePrevScreen_);
+        lvBattlePrevScreen_ = nullptr;
+    }
+    lvBattleActive_ = false;
+    LOG_INFO("[MonsterMesh] LVGL battle screen hidden\n");
+}
+#else
+void MonsterMeshModule::buildLvBattleScreen() {}
+void MonsterMeshModule::updateLvBattleScreen() {}
+void MonsterMeshModule::showLvBattleScreen() {}
+void MonsterMeshModule::hideLvBattleScreen() {}
+#endif
 
 void MonsterMeshModule::toggleTerminal()
 {

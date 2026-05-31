@@ -169,6 +169,19 @@ public:
     void clearDirty() { dirty_ = false; }
     void setDirty()   { dirty_ = true; }
 
+    // ── LVGL render accessors ──────────────────────────────────────────
+    // For the upcoming LVGL-widget battle screen (replacing the lgfx-
+    // direct render). Module reads engine/log state via these getters
+    // and pushes to LVGL widgets, so LVGL stays in charge of the screen
+    // and no Meshtastic-UI bleed-through is possible.
+    const Gen1BattleEngine &engine() const { return engine_; }
+    uint8_t cursorIdx() const { return cursor_; }
+    const char *peerName() const { return peerTbName_; }
+    const char *myName()   const { return myTbName_; }
+    // Copy up to maxLines most-recent log lines into `out` (newline-
+    // separated). Returns number of lines written.
+    uint8_t getRecentLog(char *out, size_t outCap, uint8_t maxLines) const;
+
 private:
     MeshtasticTransport &transport_;
     Gen1BattleEngine     engine_;

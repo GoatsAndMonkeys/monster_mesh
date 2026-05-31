@@ -44,6 +44,29 @@ void MonsterMeshTextBattle::appendLog(const char *line)
     dirty_ = true;
 }
 
+uint8_t MonsterMeshTextBattle::getRecentLog(char *out, size_t outCap,
+                                            uint8_t maxLines) const
+{
+    if (!out || outCap == 0) return 0;
+    out[0] = '\0';
+    if (logFill_ == 0) return 0;
+    uint8_t lines = (logFill_ < maxLines) ? logFill_ : maxLines;
+    // Oldest of the kept window: walk back `lines` from logHead_.
+    int start = ((int)logHead_ - (int)lines + (int)LOG_LINES) % (int)LOG_LINES;
+    size_t pos = 0;
+    uint8_t written = 0;
+    for (uint8_t i = 0; i < lines && pos < outCap - 1; ++i) {
+        int idx = (start + i) % LOG_LINES;
+        size_t avail = outCap - 1 - pos;
+        int n = snprintf(out + pos, avail, "%s%s",
+                         (i == 0) ? "" : "\n", log_[idx]);
+        if (n <= 0) break;
+        pos += (size_t)n;
+        ++written;
+    }
+    return written;
+}
+
 // ── Networked initiator ─────────────────────────────────────────────────────
 
 void MonsterMeshTextBattle::startNetworkedAsInitiator(uint32_t remoteId,

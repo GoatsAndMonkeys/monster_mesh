@@ -572,6 +572,26 @@ public:
     // create and load.
     void *tbSavedScreen_ = nullptr;
     void *tbEmptyScreen_ = nullptr;
+
+    // ── LVGL-native battle screen (Phase 1) ───────────────────────────
+    // Replaces the old lgfx-direct render path. Battle UI lives as
+    // proper LVGL widgets on a dedicated screen we lv_screen_load on
+    // takeover and restore on cleanup. Plays by LVGL's rules so no
+    // Meshtastic-UI bleed-through is possible.
+    void *lvBattleScreen_     = nullptr;
+    void *lvBattleHeader_     = nullptr;
+    void *lvBattleEnemy_      = nullptr;
+    void *lvBattlePlayer_     = nullptr;
+    void *lvBattleLog_        = nullptr;
+    void *lvBattleMoves_      = nullptr;
+    void *lvBattlePrevScreen_ = nullptr;
+    bool  lvBattleActive_     = false;
+    uint32_t lastLvBattleUpdateMs_ = 0;
+    // Public helpers (definitions in MonsterMeshModule.cpp).
+    void buildLvBattleScreen();
+    void updateLvBattleScreen();
+    void showLvBattleScreen();
+    void hideLvBattleScreen();
     // Cadence for the periodic battle-screen recovery repaint that
     // overwrites any LVGL/Meshtastic UI that snuck past flush_cb. Set
     // in MonsterMeshModule.cpp's runOnce textBattleActive_ block.
