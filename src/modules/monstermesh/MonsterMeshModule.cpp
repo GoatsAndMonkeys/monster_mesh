@@ -1,4 +1,5 @@
 #include "MonsterMeshModule.h"
+#include "../pentest/Gen1MiniIcons.h"  // 14×14 1-bit silhouettes (152 species)
 
 #if defined(T_DECK) && !MESHTASTIC_EXCLUDE_MONSTERMESH
 
@@ -4669,33 +4670,24 @@ void MonsterMeshModule::buildLvBattleScreen()
                           lv_color_make(0x40, 0xC0, 0x40));
     lvFoePanel_ = foe;
 
-    // ── Foe sprite holder (top-right) ─────────────────────────────────
-    // Phase 2: text placeholder. Phase 3: lv_image with Gen1ColorIcons.
-    lv_obj_t *fSpr = lv_obj_create(scr);
-    lv_obj_set_size(fSpr, 130, 70);
-    lv_obj_align(fSpr, LV_ALIGN_TOP_LEFT, 188, 2);
-    lv_obj_set_style_bg_opa(fSpr, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_border_width(fSpr, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(fSpr, 0, LV_PART_MAIN);
-    lv_obj_clear_flag(fSpr, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_t *fSprLbl = lv_label_create(fSpr);
-    lv_obj_center(fSprLbl);
-    lv_obj_set_style_text_color(fSprLbl, lv_color_black(), LV_PART_MAIN);
-    lv_label_set_text(fSprLbl, "[FOE]");
-    lvFoeSprite_ = fSpr;
+    // ── Foe sprite canvas (top-right) ─────────────────────────────────
+    lv_obj_t *fSpr = lv_canvas_create(scr);
+    lv_obj_set_size(fSpr, LV_SPRITE_W, LV_SPRITE_H);
+    lv_obj_align(fSpr, LV_ALIGN_TOP_LEFT, 246, 24);
+    lv_canvas_set_buffer(fSpr, lvFoeCanvasBuf_, LV_SPRITE_W, LV_SPRITE_H,
+                         LV_COLOR_FORMAT_RGB565);
+    lv_canvas_fill_bg(fSpr, lv_color_white(), LV_OPA_COVER);
+    lvFoeCanvas_ = fSpr;
+    lvFoeSprite_ = fSpr;  // keep old pointer name in sync for any callers
 
-    // ── Player sprite holder (mid-left) ───────────────────────────────
-    lv_obj_t *pSpr = lv_obj_create(scr);
-    lv_obj_set_size(pSpr, 80, 60);
-    lv_obj_align(pSpr, LV_ALIGN_TOP_LEFT, 8, 78);
-    lv_obj_set_style_bg_opa(pSpr, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_border_width(pSpr, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(pSpr, 0, LV_PART_MAIN);
-    lv_obj_clear_flag(pSpr, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_t *pSprLbl = lv_label_create(pSpr);
-    lv_obj_center(pSprLbl);
-    lv_obj_set_style_text_color(pSprLbl, lv_color_black(), LV_PART_MAIN);
-    lv_label_set_text(pSprLbl, "[YOU]");
+    // ── Player sprite canvas (mid-left) ───────────────────────────────
+    lv_obj_t *pSpr = lv_canvas_create(scr);
+    lv_obj_set_size(pSpr, LV_SPRITE_W, LV_SPRITE_H);
+    lv_obj_align(pSpr, LV_ALIGN_TOP_LEFT, 36, 90);
+    lv_canvas_set_buffer(pSpr, lvPlayerCanvasBuf_, LV_SPRITE_W, LV_SPRITE_H,
+                         LV_COLOR_FORMAT_RGB565);
+    lv_canvas_fill_bg(pSpr, lv_color_white(), LV_OPA_COVER);
+    lvPlayerCanvas_ = pSpr;
     lvPlayerSprite_ = pSpr;
 
     // ── Player panel (mid-right) ──────────────────────────────────────
@@ -4741,6 +4733,42 @@ void MonsterMeshModule::buildLvBattleScreen()
     LOG_INFO("[MonsterMesh] LVGL battle screen built (Gen-1 layout)\n");
 }
 
+// Decode a single Gen1MiniIcon into a 28×28 RGB565 canvas at 2× scale.
+// Black silhouette pixels become `fg`, transparent stays the canvas
+// background color (white). Caller is responsible for spiLock.
+static void renderGen1Sprite(lv_obj_t *canvas, uint8_t species,
+                             uint16_t fgRgb565)
+{
+    if (!canvas) return;
+    // Out-of-range species → blank.
+    if (species == 0 || species >= 152) {
+        lv_canvas_fill_bg(canvas, lv_color_white(), LV_OPA_COVER);
+        return;
+    }
+    lv_canvas_fill_bg(canvas, lv_color_white(), LV_OPA_COVER);
+    lv_layer_t layer;
+    lv_canvas_init_layer(canvas, &layer);
+    lv_draw_rect_dsc_t dsc;
+    lv_draw_rect_dsc_init(&dsc);
+    dsc.bg_color = lv_color_hex(fgRgb565);
+    dsc.bg_opa   = LV_OPA_COVER;
+    dsc.border_width = 0;
+    for (int row = 0; row < 14; ++row) {
+        uint8_t hi = pgm_read_byte(&kGen1IconBitmaps[species][row * 2]);
+        uint8_t lo = pgm_read_byte(&kGen1IconBitmaps[species][row * 2 + 1]);
+        uint16_t bits = ((uint16_t)hi << 8) | lo;
+        for (int col = 0; col < 14; ++col) {
+            // MSB-first: bit 15 is leftmost pixel.
+            if (bits & (1 << (15 - col))) {
+                lv_area_t a = {(int32_t)(col * 2), (int32_t)(row * 2),
+                               (int32_t)(col * 2 + 1), (int32_t)(row * 2 + 1)};
+                lv_draw_rect(&layer, &dsc, &a);
+            }
+        }
+    }
+    lv_canvas_finish_layer(canvas, &layer);
+}
+
 void MonsterMeshModule::updateLvBattleScreen()
 {
     if (!lvBattleScreen_ || !textBattle_.isActive()) return;
@@ -4753,6 +4781,23 @@ void MonsterMeshModule::updateLvBattleScreen()
     const Gen1BattleEngine &eng = textBattle_.engine();
     const auto &me  = eng.party(0);
     const auto &opp = eng.party(1);
+
+    // Re-render sprites only when the active species changes (canvas
+    // pixel-pushing is the most expensive part of an update).
+    if (opp.count > 0 && opp.active < opp.count) {
+        uint8_t sp = opp.mons[opp.active].species;
+        if (sp != lvLastFoeSpecies_) {
+            renderGen1Sprite((lv_obj_t *)lvFoeCanvas_, sp, 0xC03050);
+            lvLastFoeSpecies_ = sp;
+        }
+    }
+    if (me.count > 0 && me.active < me.count) {
+        uint8_t sp = me.mons[me.active].species;
+        if (sp != lvLastPlayerSpecies_) {
+            renderGen1Sprite((lv_obj_t *)lvPlayerCanvas_, sp, 0x3060C0);
+            lvLastPlayerSpecies_ = sp;
+        }
+    }
 
     auto setLabel = [](void *w, const char *s) {
         if (w) lv_label_set_text((lv_obj_t *)w, s);

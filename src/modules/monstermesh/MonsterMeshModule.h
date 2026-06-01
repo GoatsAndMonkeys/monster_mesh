@@ -592,6 +592,16 @@ public:
     void *lvFoeHpBar_         = nullptr;
     void *lvFoeSprite_        = nullptr;
     void *lvPlayerSprite_     = nullptr;
+    // Sprite canvases. 28×28 = 14×14 native @ 2× scale, RGB565.
+    // 28*28*2 = 1568 bytes each. Total +3 KB BSS.
+    static constexpr int LV_SPRITE_W = 28;
+    static constexpr int LV_SPRITE_H = 28;
+    void *lvFoeCanvas_        = nullptr;
+    void *lvPlayerCanvas_     = nullptr;
+    uint8_t lvFoeCanvasBuf_[LV_SPRITE_W * LV_SPRITE_H * 2] = {};
+    uint8_t lvPlayerCanvasBuf_[LV_SPRITE_W * LV_SPRITE_H * 2] = {};
+    uint8_t lvLastFoeSpecies_    = 0xFF;
+    uint8_t lvLastPlayerSpecies_ = 0xFF;
     void *lvPlayerPanel_      = nullptr;
     void *lvPlayerName_       = nullptr;
     void *lvPlayerLevel_      = nullptr;
