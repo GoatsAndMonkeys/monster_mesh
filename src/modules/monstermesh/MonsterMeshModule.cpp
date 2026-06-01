@@ -3371,7 +3371,11 @@ int32_t MonsterMeshModule::runOnce()
                 now - lastReassertMs >= 500 &&
                 lv_screen_active() != (lv_obj_t *)lvBattleScreen_) {
                 lv_screen_load((lv_obj_t *)lvBattleScreen_);
-                updateLvBattleScreen();
+                // Skip the full updateLvBattleScreen on re-assert —
+                // widget content is already correct, we just need to
+                // get our screen on top again. Doing 20+ label updates
+                // here under load (user spamming keys) was freezing
+                // the deck.
                 lastReassertMs = now;
             }
         }
@@ -4605,6 +4609,10 @@ void MonsterMeshModule::buildLvBattleScreen()
     lv_obj_set_style_pad_all(scr, 0, LV_PART_MAIN);
     lv_obj_set_layout(scr, LV_LAYOUT_NONE);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    // Compact pixel-ish font for the dense Gen-1 layout — the default
+    // 14 px font was too big to fit name + level + HP bar inside each
+    // panel.
+    lv_obj_set_style_text_font(scr, &lv_font_montserrat_10, LV_PART_MAIN);
 
     auto mkPanel = [&](lv_obj_t *parent, int16_t x, int16_t y,
                        int16_t w, int16_t h) {
@@ -4652,13 +4660,12 @@ void MonsterMeshModule::buildLvBattleScreen()
     };
 
     // ── Foe panel (top-left) ──────────────────────────────────────────
-    lv_obj_t *foe = mkPanel(scr, 2, 2, 178, 50);
-    mkLabel(foe, 0,  0, 26, 12, lv_color_black())
-        ;  // "FOE" hardcoded
+    lv_obj_t *foe = mkPanel(scr, 2, 2, 178, 56);
+    mkLabel(foe, 2, 0, 40, 12, lv_color_black());
     lv_label_set_text(lv_obj_get_child(foe, 0), "FOE");
-    lvFoeName_  = mkLabel(foe, 4,  12, 110, 18, lv_color_black());
-    lvFoeLevel_ = mkLabel(foe, 120, 12, 50,  18, lv_color_black());
-    lvFoeHpBar_ = mkBar  (foe, 4,  32, 166, 8,
+    lvFoeName_  = mkLabel(foe, 4,  12, 100, 14, lv_color_black());
+    lvFoeLevel_ = mkLabel(foe, 110, 12, 50,  14, lv_color_black());
+    lvFoeHpBar_ = mkBar  (foe, 4,  30, 166, 8,
                           lv_color_make(0x40, 0xC0, 0x40));
     lvFoePanel_ = foe;
 
@@ -4692,31 +4699,31 @@ void MonsterMeshModule::buildLvBattleScreen()
     lvPlayerSprite_ = pSpr;
 
     // ── Player panel (mid-right) ──────────────────────────────────────
-    lv_obj_t *you = mkPanel(scr, 100, 80, 218, 56);
-    mkLabel(you, 0, 0, 26, 12, lv_color_black());
+    lv_obj_t *you = mkPanel(scr, 100, 80, 218, 62);
+    mkLabel(you, 2, 0, 40, 12, lv_color_black());
     lv_label_set_text(lv_obj_get_child(you, 0), "YOU");
-    lvPlayerName_   = mkLabel(you, 4,  12, 130, 18, lv_color_black());
-    lvPlayerLevel_  = mkLabel(you, 140, 12, 50,  18, lv_color_black());
-    lvPlayerHpBar_  = mkBar  (you, 4,  32, 206, 8,
+    lvPlayerName_   = mkLabel(you, 4,   12, 130, 14, lv_color_black());
+    lvPlayerLevel_  = mkLabel(you, 140, 12, 50,  14, lv_color_black());
+    lvPlayerHpBar_  = mkBar  (you, 4,   28, 206, 8,
                               lv_color_make(0x40, 0xC0, 0x40));
-    lvPlayerHpText_ = mkLabel(you, 4,  42, 206, 12, lv_color_black());
+    lvPlayerHpText_ = mkLabel(you, 4,   38, 206, 14, lv_color_black());
     lvPlayerPanel_  = you;
 
-    // ── Battle log (lower box, also used for move menu) ───────────────
-    lv_obj_t *logp = mkPanel(scr, 2, 142, 316, 56);
-    lvLogLabel_ = mkLabel(logp, 0, 0, 308, 50, lv_color_black());
+    // ── Battle log (lower box) ────────────────────────────────────────
+    lv_obj_t *logp = mkPanel(scr, 2, 148, 316, 44);
+    lvLogLabel_ = mkLabel(logp, 0, 0, 308, 38, lv_color_black());
     lvLogPanel_ = logp;
-    lvMoveMenu_ = lvLogLabel_;  // same widget; content switches modes
+    lvMoveMenu_ = lvLogLabel_;
 
-    // ── Party footer (6 mons, 2 cols × 3 rows) ────────────────────────
-    lv_obj_t *footer = mkPanel(scr, 2, 200, 316, 38);
-    for (int i = 0; i < 6; ++i) {
-        int col = i / 3;
-        int row = i % 3;
+    // ── Move menu (4 moves, 2 cols × 2 rows) ───────────────────────────
+    lv_obj_t *footer = mkPanel(scr, 2, 196, 316, 42);
+    for (int i = 0; i < 4; ++i) {
+        int col = i % 2;
+        int row = i / 2;
         int16_t rx = col * 154;
-        int16_t ry = row * 10;
+        int16_t ry = row * 17;
         lv_obj_t *r = lv_obj_create(footer);
-        lv_obj_set_size(r, 152, 10);
+        lv_obj_set_size(r, 152, 16);
         lv_obj_align(r, LV_ALIGN_TOP_LEFT, rx, ry);
         lv_obj_set_style_bg_opa(r, LV_OPA_TRANSP, LV_PART_MAIN);
         lv_obj_set_style_border_width(r, 0, LV_PART_MAIN);
@@ -4724,10 +4731,11 @@ void MonsterMeshModule::buildLvBattleScreen()
         lv_obj_set_layout(r, LV_LAYOUT_NONE);
         lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
         lvPartyRow_[i]   = r;
-        lvPartyName_[i]  = mkLabel(r, 0,  0, 70, 10, lv_color_black());
-        lvPartyLevel_[i] = mkLabel(r, 72, 0, 24, 10, lv_color_black());
-        lvPartyHp_[i]    = mkLabel(r, 98, 0, 54, 10, lv_color_black());
+        lvPartyName_[i]  = mkLabel(r, 2,   1, 100, 14, lv_color_black());
+        lvPartyLevel_[i] = mkLabel(r, 104, 1,  46, 14, lv_color_black());
     }
+    for (int i = 4; i < 6; ++i) lvPartyRow_[i] = lvPartyName_[i] =
+                                lvPartyLevel_[i] = lvPartyHp_[i] = nullptr;
 
     lvBattleScreen_ = scr;
     LOG_INFO("[MonsterMesh] LVGL battle screen built (Gen-1 layout)\n");
@@ -4736,6 +4744,12 @@ void MonsterMeshModule::buildLvBattleScreen()
 void MonsterMeshModule::updateLvBattleScreen()
 {
     if (!lvBattleScreen_ || !textBattle_.isActive()) return;
+    // LVGL widget mutation is not thread-safe. Input handling
+    // (handleKey on the LVGL thread) and our update calls (LoRa
+    // thread) both write LVGL state; without a lock the deck froze
+    // and rebooted on the first DOWN keypress. spiLock is the
+    // existing thread-sync primitive Meshtastic's LGFX driver uses.
+    concurrency::LockGuard g(spiLock);
     const Gen1BattleEngine &eng = textBattle_.engine();
     const auto &me  = eng.party(0);
     const auto &opp = eng.party(1);
@@ -4808,35 +4822,33 @@ void MonsterMeshModule::updateLvBattleScreen()
         setLabel(lvLogLabel_, framed);
     }
 
-    // ── Party footer ────
-    for (int i = 0; i < 6; ++i) {
-        if ((size_t)i < me.count) {
-            const auto &m = me.mons[i];
-            snprintf(buf, sizeof(buf), "%c%s",
-                     i == me.active ? '*' : ' ',
-                     m.nickname[0] ? m.nickname : "???");
+    // ── Move menu (active mon's 4 moves with PP, cursor-highlighted) ────
+    if (me.count > 0 && me.active < me.count) {
+        const auto &m = me.mons[me.active];
+        uint8_t cursor = textBattle_.cursorIdx();
+        for (int i = 0; i < 4; ++i) {
+            const Gen1MoveData *mv = gen1Move(m.moves[i]);
+            const char *name = mv ? mv->name : "----";
+            uint8_t maxPp = mv ? mv->pp : 0;
+            snprintf(buf, sizeof(buf), "%c %s",
+                     (cursor == i) ? '>' : ' ', name);
             setLabel(lvPartyName_[i], buf);
-            snprintf(buf, sizeof(buf), "L%u", (unsigned)m.level);
-            setLabel(lvPartyLevel_[i], buf);
             snprintf(buf, sizeof(buf), "%u/%u",
-                     (unsigned)m.hp, (unsigned)m.maxHp);
-            setLabel(lvPartyHp_[i], buf);
-            // Highlight active mon row with light-yellow bg (mockup).
+                     (unsigned)m.pp[i], (unsigned)maxPp);
+            setLabel(lvPartyLevel_[i], buf);
+            // Highlight cursor row light-yellow.
             if (lvPartyRow_[i]) {
                 lv_obj_set_style_bg_opa((lv_obj_t *)lvPartyRow_[i],
-                    i == me.active ? LV_OPA_COVER : LV_OPA_TRANSP,
+                    (cursor == i) ? LV_OPA_COVER : LV_OPA_TRANSP,
                     LV_PART_MAIN);
                 lv_obj_set_style_bg_color((lv_obj_t *)lvPartyRow_[i],
                     lv_color_make(0xFF, 0xF0, 0x80), LV_PART_MAIN);
             }
-        } else {
+        }
+    } else {
+        for (int i = 0; i < 4; ++i) {
             setLabel(lvPartyName_[i],  "");
             setLabel(lvPartyLevel_[i], "");
-            setLabel(lvPartyHp_[i],    "");
-            if (lvPartyRow_[i]) {
-                lv_obj_set_style_bg_opa((lv_obj_t *)lvPartyRow_[i],
-                                        LV_OPA_TRANSP, LV_PART_MAIN);
-            }
         }
     }
 }
@@ -5110,6 +5122,11 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
     // background.
     if (textBattleActive_) {
         textBattle_.handleKey(ascii);
+        // Push the new state straight into the LVGL battle screen from
+        // this LVGL-thread context. Doing it from runOnce (LoRa thread)
+        // races against LVGL's render and froze the deck on the first
+        // DOWN keypress. Same-thread update is safe.
+        if (lvBattleActive_) updateLvBattleScreen();
         return;
     }
 
