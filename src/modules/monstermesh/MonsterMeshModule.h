@@ -579,14 +579,43 @@ public:
     // takeover and restore on cleanup. Plays by LVGL's rules so no
     // Meshtastic-UI bleed-through is possible.
     void *lvBattleScreen_     = nullptr;
+    // Phase 2 — Gen 1 battle UI widget tree (RPi mockup port):
+    //   foe panel (bordered box):  FOE label + name + level + HP bar
+    //   foe sprite area  (top-right, placeholder for now)
+    //   player sprite area (mid-left)
+    //   player panel (bordered):   YOU + name + level + HP bar + HP text
+    //   log panel  (bordered, 3 lines, `>` prefix per line)
+    //   party list (6 mons, 2 cols, active highlighted)
+    void *lvFoePanel_         = nullptr;
+    void *lvFoeName_          = nullptr;
+    void *lvFoeLevel_         = nullptr;
+    void *lvFoeHpBar_         = nullptr;
+    void *lvFoeSprite_        = nullptr;
+    void *lvPlayerSprite_     = nullptr;
+    void *lvPlayerPanel_      = nullptr;
+    void *lvPlayerName_       = nullptr;
+    void *lvPlayerLevel_      = nullptr;
+    void *lvPlayerHpBar_      = nullptr;
+    void *lvPlayerHpText_     = nullptr;
+    void *lvLogPanel_         = nullptr;
+    void *lvLogLabel_         = nullptr;
+    void *lvPartyRow_[6]      = {};
+    void *lvPartyName_[6]     = {};
+    void *lvPartyLevel_[6]    = {};
+    void *lvPartyHp_[6]       = {};
+    // Move menu sits in the log panel (replaces the log content when
+    // it's the player's turn and they need to pick a move).
+    void *lvMoveMenu_         = nullptr;
+    void *lvBattlePrevScreen_ = nullptr;
+    bool  lvBattleActive_     = false;
+    uint32_t lastLvBattleUpdateMs_ = 0;
+    // Old legacy pointers — kept so existing helpers compile during
+    // the refactor; not displayed in Phase 2.
     void *lvBattleHeader_     = nullptr;
     void *lvBattleEnemy_      = nullptr;
     void *lvBattlePlayer_     = nullptr;
     void *lvBattleLog_        = nullptr;
     void *lvBattleMoves_      = nullptr;
-    void *lvBattlePrevScreen_ = nullptr;
-    bool  lvBattleActive_     = false;
-    uint32_t lastLvBattleUpdateMs_ = 0;
     // Public helpers (definitions in MonsterMeshModule.cpp).
     void buildLvBattleScreen();
     void updateLvBattleScreen();
