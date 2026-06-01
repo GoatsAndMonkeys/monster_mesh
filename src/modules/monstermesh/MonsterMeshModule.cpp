@@ -2926,7 +2926,26 @@ int32_t MonsterMeshModule::runOnce()
         textBattle_.role() == MonsterMeshTextBattle::Role::LEGACY ||
         (textBattle_.role() == MonsterMeshTextBattle::Role::SERVER &&
          !textBattle_.awaitingAccept()));
-    if (shouldOwnScreen && !textBattleActive_ && setupDone_) {
+    // P2.28 diag: throttled log of takeover-gate inputs so we can see
+    // why "fight" / "mmb" doesn't end up on the LVGL battle screen
+    // when the user expects it to.
+    {
+        static uint32_t lastTbGateLogMs = 0;
+        uint32_t now = millis();
+        if (textBattle_.isActive() && now - lastTbGateLogMs > 2000) {
+            lastTbGateLogMs = now;
+            LOG_INFO("[MonsterMesh] TB gate: shouldOwn=%d tbActive=%d "
+                     "role=%d isActive=%d awaitAccept=%d setupDone=%d\n",
+                     (int)shouldOwnScreen, (int)textBattleActive_,
+                     (int)textBattle_.role(), (int)textBattle_.isActive(),
+                     (int)textBattle_.awaitingAccept(), (int)setupDone_);
+        }
+    }
+    // P2.28.3: gate on lvBattleActive_ (our own flag) instead of
+    // textBattleActive_ — fight/gym/explore set textBattleActive_=true
+    // before runOnce reaches this block, so the old gate was always
+    // false and the LVGL battle screen never showed up.
+    if (shouldOwnScreen && !lvBattleActive_ && setupDone_) {
         textBattleActive_ = true;
         // P2.28: LVGL-native battle screen. We lv_screen_load a
         // dedicated battle screen whose widget tree we control, so
@@ -3004,20 +3023,11 @@ int32_t MonsterMeshModule::runOnce()
         mmbPartyTotal_     = 0;
         if (mmbPartyChunks_)
             memset(mmbPartyChunks_, 0, MMB_PARTY_CHUNKS_BYTES);
-#if HAS_TFT
-        lv_display_t *disp = lv_display_get_default();
-        if (disp && !savedFlushCb_) {
-            savedFlushCb_ = (void *)disp->flush_cb;
-            lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
-                lv_display_flush_ready(d);
-            });
-        }
-#endif
-        if (g_deviceUiLgfx) {
-            concurrency::LockGuard g(spiLock);
-            g_deviceUiLgfx->clearClipRect();
-            g_deviceUiLgfx->fillScreen(0x0000);
-        }
+        // P2.28.5: vestigial flush_cb park + lgfx fillScreen REMOVED.
+        // The LVGL-native battle screen (loaded by showLvBattleScreen
+        // from the main takeover block) is what draws now — leaving
+        // these parks in place killed LVGL refresh and the screen
+        // stayed black even when our battle screen was the active one.
         textBattleActive_ = true;
 
         // Use the directly-exchanged opponent party (assembled from
@@ -3068,20 +3078,11 @@ int32_t MonsterMeshModule::runOnce()
         !emulatorActive_ && !browserActive_ && terminal_.hasParty()) {
         bbsLadderStartPending_ = false;
         bbsLadderTrainerIdx_ = 0;
-#if HAS_TFT
-        lv_display_t *disp = lv_display_get_default();
-        if (disp && !savedFlushCb_) {
-            savedFlushCb_ = (void *)disp->flush_cb;
-            lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
-                lv_display_flush_ready(d);
-            });
-        }
-#endif
-        if (g_deviceUiLgfx) {
-            concurrency::LockGuard g(spiLock);
-            g_deviceUiLgfx->clearClipRect();
-            g_deviceUiLgfx->fillScreen(0x0000);
-        }
+        // P2.28.5: vestigial flush_cb park + lgfx fillScreen REMOVED.
+        // The LVGL-native battle screen (loaded by showLvBattleScreen
+        // from the main takeover block) is what draws now — leaving
+        // these parks in place killed LVGL refresh and the screen
+        // stayed black even when our battle screen was the active one.
         textBattleActive_ = true;
         bbsFightActive_   = true;
         textBattle_.startLocal(terminal_.getParty(),
@@ -3146,20 +3147,11 @@ int32_t MonsterMeshModule::runOnce()
     if (bbsBattleStartPending_ && !textBattleActive_ && setupDone_ &&
         !emulatorActive_ && !browserActive_ && terminal_.hasParty()) {
         bbsBattleStartPending_ = false;
-#if HAS_TFT
-        lv_display_t *disp = lv_display_get_default();
-        if (disp && !savedFlushCb_) {
-            savedFlushCb_ = (void *)disp->flush_cb;
-            lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
-                lv_display_flush_ready(d);
-            });
-        }
-#endif
-        if (g_deviceUiLgfx) {
-            concurrency::LockGuard g(spiLock);
-            g_deviceUiLgfx->clearClipRect();
-            g_deviceUiLgfx->fillScreen(0x0000);
-        }
+        // P2.28.5: vestigial flush_cb park + lgfx fillScreen REMOVED.
+        // The LVGL-native battle screen (loaded by showLvBattleScreen
+        // from the main takeover block) is what draws now — leaving
+        // these parks in place killed LVGL refresh and the screen
+        // stayed black even when our battle screen was the active one.
         textBattleActive_ = true;
         bbsFightActive_   = true;
         textBattle_.startLocal(terminal_.getParty(), bbsGymParty_,
@@ -3184,20 +3176,11 @@ int32_t MonsterMeshModule::runOnce()
     if (textBattleStartReq_ && !textBattleActive_ && setupDone_ &&
         !emulatorActive_ && !browserActive_ && terminal_.hasParty()) {
         textBattleStartReq_ = false;
-#if HAS_TFT
-        lv_display_t *disp = lv_display_get_default();
-        if (disp && !savedFlushCb_) {
-            savedFlushCb_ = (void *)disp->flush_cb;
-            lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *, uint8_t *) {
-                lv_display_flush_ready(d);
-            });
-        }
-#endif
-        if (g_deviceUiLgfx) {
-            concurrency::LockGuard g(spiLock);
-            g_deviceUiLgfx->clearClipRect();
-            g_deviceUiLgfx->fillScreen(0x0000);
-        }
+        // P2.28.5: vestigial flush_cb park + lgfx fillScreen REMOVED.
+        // The LVGL-native battle screen (loaded by showLvBattleScreen
+        // from the main takeover block) is what draws now — leaving
+        // these parks in place killed LVGL refresh and the screen
+        // stayed black even when our battle screen was the active one.
         // CPU rival: pick a real trainer we've seen on the mesh via
         // daycare beacons. Build their Gen1Party from the beacon's species
         // + level + nickname + moves. Daycare beacons carry pokedex numbers
