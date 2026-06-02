@@ -594,12 +594,16 @@ public:
     void *lvPlayerSprite_     = nullptr;
     // Sprite canvases. 28×28 = 14×14 native @ 2× scale, RGB565.
     // 28*28*2 = 1568 bytes each. Total +3 KB BSS.
-    static constexpr int LV_SPRITE_W = 28;
-    static constexpr int LV_SPRITE_H = 28;
+    // 56×56 = native Gen1ColorIcons size (P2.31, GBC palette sprites).
+    static constexpr int LV_SPRITE_W = 56;
+    static constexpr int LV_SPRITE_H = 56;
+    // P2.32: player back sprite at native 48×48 (Gen-2 Crystal source).
+    static constexpr int LV_PLAYER_W = 48;
+    static constexpr int LV_PLAYER_H = 48;
     void *lvFoeCanvas_        = nullptr;
     void *lvPlayerCanvas_     = nullptr;
     uint8_t lvFoeCanvasBuf_[LV_SPRITE_W * LV_SPRITE_H * 2] = {};
-    uint8_t lvPlayerCanvasBuf_[LV_SPRITE_W * LV_SPRITE_H * 2] = {};
+    uint8_t lvPlayerCanvasBuf_[LV_PLAYER_W * LV_PLAYER_H * 2] = {};
     uint8_t lvLastFoeSpecies_    = 0xFF;
     uint8_t lvLastPlayerSpecies_ = 0xFF;
     void *lvPlayerPanel_      = nullptr;

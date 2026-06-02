@@ -1043,12 +1043,15 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
     }
 
     if (keyAccept) {
+        Serial.printf("[MMB] K-accept: phase=%d mode=%d role=%d cursor=%u\n",
+                      (int)phase_, (int)mode_, (int)role_, (unsigned)cursor_);
         // Networked initiator only: block move submission until the peer
         // has proven their battle station is up by sending us anything in
         // this session. Without this, an initiator who presses a move
         // before the receiver's screen finished rendering produced a
         // turn-0 ACTION the receiver missed → engines desynced from turn 0.
         if (mode_ == Mode::NETWORKED && !peerReady_) {
+            Serial.printf("[MMB] K-accept: peerReady=false → waiting\n");
             appendLog("Waiting for opponent...");
             dirty_ = true;
             return;
@@ -1076,7 +1079,12 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
             phase_ = Phase::WAIT_REMOTE;
             return;
         }
-        if (mon.moves[cursor_] == 0 || mon.pp[cursor_] == 0) return;
+        if (mon.moves[cursor_] == 0 || mon.pp[cursor_] == 0) {
+            Serial.printf("[MMB] K-accept: REJECTED moves[%u]=%u pp[%u]=%u\n",
+                          (unsigned)cursor_, (unsigned)mon.moves[cursor_],
+                          (unsigned)cursor_, (unsigned)mon.pp[cursor_]);
+            return;
+        }
         // Disabled move (Disable, mostly) — block selection so the user
         // can't burn the K-accept on a move that won't fire. The greyed
         // "DIS N" label in drawMoveMenu signals this visually.

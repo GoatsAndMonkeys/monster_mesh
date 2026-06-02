@@ -1,5 +1,7 @@
 #include "MonsterMeshModule.h"
-#include "../pentest/Gen1MiniIcons.h"  // 14×14 1-bit silhouettes (152 species)
+#include "../pentest/Gen1MiniIcons.h"   // legacy 14×14 silhouettes (kept for fallback)
+#include "../pentest/Gen1ColorIcons.h"  // 56×56 4-color GBC-palette sprites (P2.31)
+#include "../pentest/Gen2BackIcons.h"   // 48×48 4-color GBC-palette back sprites (P2.32)
 
 #if defined(T_DECK) && !MESHTASTIC_EXCLUDE_MONSTERMESH
 
@@ -2947,14 +2949,18 @@ int32_t MonsterMeshModule::runOnce()
     // before runOnce reaches this block, so the old gate was always
     // false and the LVGL battle screen never showed up.
     if (shouldOwnScreen && !lvBattleActive_ && setupDone_) {
+        Serial.printf("[MMB] takeover: shouldOwn=1 lvBattleActive=0 setupDone=1\n");
         textBattleActive_ = true;
         // P2.28: LVGL-native battle screen. We lv_screen_load a
         // dedicated battle screen whose widget tree we control, so
         // LVGL is in charge the whole time and nothing can bleed
         // through from Meshtastic's home screen. No more lgfx-direct
         // draws, no more flush_cb park, no more refresh-timer pause.
+        Serial.printf("[MMB] takeover: calling showLvBattleScreen\n");
         showLvBattleScreen();
+        Serial.printf("[MMB] takeover: calling updateLvBattleScreen\n");
         updateLvBattleScreen();
+        Serial.printf("[MMB] takeover: done\n");
         LOG_INFO("[MonsterMesh] textBattle owning screen (role=%d) — LVGL battle screen loaded\n",
                  (int)textBattle_.role());
     }
@@ -3315,9 +3321,15 @@ int32_t MonsterMeshModule::runOnce()
         exploreRouteIdx_ = 0xFF;
         e4MemberIdx_ = 0xFF;
         const char *ourTag = (owner.short_name[0] != '\0') ? owner.short_name : "ME";
+        Serial.printf("[MMB] fight: pre-startLocal myCount=%u cpuCount=%u\n",
+                      (unsigned)terminal_.getParty().count,
+                      (unsigned)cpuParty.count);
         textBattle_.startLocal(terminal_.getParty(), cpuParty, ourTag, rivalTag);
+        Serial.printf("[MMB] fight: post-startLocal active=%d mode=%d\n",
+                      (int)textBattle_.isActive(), 0);
         if (hdrText[0]) textBattle_.setHeader(hdrText);
         textBattleActive_ = true;
+        Serial.printf("[MMB] fight: textBattleActive_=true\n");
     }
 
     // Drive textBattle_.tick() any time the state machine is alive —
@@ -3354,6 +3366,10 @@ int32_t MonsterMeshModule::runOnce()
         // timer. No more lgfx-direct render, no more flush_cb park,
         // no more recovery sweep. Update only on dirty.
         if (textBattle_.dirty()) {
+            // P2.32.4: spiLock wrap REVERTED — it deadlocked with the
+            // LVGL render thread, which takes spiLock inside the
+            // LGFX flush_cb. A → B vs B → A. Race is tolerable; the
+            // user proved a full battle worked at P2.31 without it.
             updateLvBattleScreen();
             textBattle_.clearDirty();
         }
@@ -4604,6 +4620,7 @@ void MonsterMeshModule::tryConsumeStagedParty()
 void MonsterMeshModule::buildLvBattleScreen()
 {
     if (lvBattleScreen_) return;
+    Serial.printf("[MMB] buildLvBattleScreen: lv_obj_create scr\n");
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr, lv_color_white(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
@@ -4670,21 +4687,25 @@ void MonsterMeshModule::buildLvBattleScreen()
                           lv_color_make(0x40, 0xC0, 0x40));
     lvFoePanel_ = foe;
 
-    // ── Foe sprite canvas (top-right) ─────────────────────────────────
+    // ── Foe sprite canvas (top-right, 56×56) ──────────────────────────
     lv_obj_t *fSpr = lv_canvas_create(scr);
     lv_obj_set_size(fSpr, LV_SPRITE_W, LV_SPRITE_H);
-    lv_obj_align(fSpr, LV_ALIGN_TOP_LEFT, 246, 24);
+    lv_obj_align(fSpr, LV_ALIGN_TOP_LEFT, 260, 4);
     lv_canvas_set_buffer(fSpr, lvFoeCanvasBuf_, LV_SPRITE_W, LV_SPRITE_H,
                          LV_COLOR_FORMAT_RGB565);
     lv_canvas_fill_bg(fSpr, lv_color_white(), LV_OPA_COVER);
     lvFoeCanvas_ = fSpr;
-    lvFoeSprite_ = fSpr;  // keep old pointer name in sync for any callers
+    lvFoeSprite_ = fSpr;
 
-    // ── Player sprite canvas (mid-left) ───────────────────────────────
+    // ── Player sprite canvas (48×48 native, bottom aligned with log top
+    // at y=148 → sprite top at y=100, "rising out of the text box").
+    Serial.printf("[MMB] buildLvBattleScreen: player canvas %dx%d buf=%u\n",
+                  LV_PLAYER_W, LV_PLAYER_H,
+                  (unsigned)sizeof(lvPlayerCanvasBuf_));
     lv_obj_t *pSpr = lv_canvas_create(scr);
-    lv_obj_set_size(pSpr, LV_SPRITE_W, LV_SPRITE_H);
-    lv_obj_align(pSpr, LV_ALIGN_TOP_LEFT, 36, 90);
-    lv_canvas_set_buffer(pSpr, lvPlayerCanvasBuf_, LV_SPRITE_W, LV_SPRITE_H,
+    lv_obj_set_size(pSpr, LV_PLAYER_W, LV_PLAYER_H);
+    lv_obj_align(pSpr, LV_ALIGN_TOP_LEFT, 4, 100);
+    lv_canvas_set_buffer(pSpr, lvPlayerCanvasBuf_, LV_PLAYER_W, LV_PLAYER_H,
                          LV_COLOR_FORMAT_RGB565);
     lv_canvas_fill_bg(pSpr, lv_color_white(), LV_OPA_COVER);
     lvPlayerCanvas_ = pSpr;
@@ -4730,54 +4751,91 @@ void MonsterMeshModule::buildLvBattleScreen()
                                 lvPartyLevel_[i] = lvPartyHp_[i] = nullptr;
 
     lvBattleScreen_ = scr;
+    Serial.printf("[MMB] buildLvBattleScreen: DONE scr=%p\n", scr);
     LOG_INFO("[MonsterMesh] LVGL battle screen built (Gen-1 layout)\n");
 }
 
-// Decode a single Gen1MiniIcon into a 28×28 RGB565 canvas at 2× scale.
-// Black silhouette pixels become `fg`, transparent stays the canvas
-// background color (white). Caller is responsible for spiLock.
+// P2.31: render a Gen1ColorIcon (56×56 4-color, GBC-style palette) into
+// a 56×56 RGB565 LVGL canvas. Per-species kGen1ColorPalettes[dex][4]
+// chooses the 4 colors; the bytes in the decoded buffer are 2bpp packed
+// (4 pixels per byte, MSB-first). `fgFallback` is unused for color
+// sprites — kept on the signature to preserve API while we kill the
+// silhouette fallback.
 static void renderGen1Sprite(lv_obj_t *canvas, uint8_t species,
-                             uint16_t fgRgb565)
+                             uint16_t /*fgFallback*/)
 {
     if (!canvas) return;
-    // Out-of-range species → blank.
-    if (species == 0 || species >= 152) {
+    if (species == 0 || species > 151) {
         lv_canvas_fill_bg(canvas, lv_color_white(), LV_OPA_COVER);
         return;
     }
-    lv_canvas_fill_bg(canvas, lv_color_white(), LV_OPA_COVER);
-    lv_layer_t layer;
-    lv_canvas_init_layer(canvas, &layer);
-    lv_draw_rect_dsc_t dsc;
-    lv_draw_rect_dsc_init(&dsc);
-    dsc.bg_color = lv_color_hex(fgRgb565);
-    dsc.bg_opa   = LV_OPA_COVER;
-    dsc.border_width = 0;
-    for (int row = 0; row < 14; ++row) {
-        uint8_t hi = pgm_read_byte(&kGen1IconBitmaps[species][row * 2]);
-        uint8_t lo = pgm_read_byte(&kGen1IconBitmaps[species][row * 2 + 1]);
-        uint16_t bits = ((uint16_t)hi << 8) | lo;
-        for (int col = 0; col < 14; ++col) {
-            // MSB-first: bit 15 is leftmost pixel.
-            if (bits & (1 << (15 - col))) {
-                lv_area_t a = {(int32_t)(col * 2), (int32_t)(row * 2),
-                               (int32_t)(col * 2 + 1), (int32_t)(row * 2 + 1)};
-                lv_draw_rect(&layer, &dsc, &a);
-            }
+    // Decode the deflated 2bpp stream into a 784-byte scratch buffer
+    // (56×56 / 4 = 784). Static so we don't blow the stack with the
+    // big enough I/O buffers and so subsequent calls don't reallocate.
+    static uint8_t s_decoded[784];
+    gen1ColorDecodeTo2bpp(species, s_decoded);
+
+    // Look up the 4-entry palette for this species. Each entry is an
+    // RGB565 word — write directly into the canvas buffer.
+    const uint16_t *pal = kGen1ColorPalettes[species];
+    uint8_t *canvasBuf =
+        (uint8_t *)lv_canvas_get_buf(canvas);
+    if (!canvasBuf) return;
+    // 56×56 px × 2 bytes (RGB565) = 6272.
+    for (int y = 0; y < 56; ++y) {
+        for (int x = 0; x < 56; ++x) {
+            int pxIdx = y * 56 + x;
+            uint8_t byte = s_decoded[pxIdx >> 2];
+            // MSB-first: pixel 0 is bits 7-6, pixel 1 is bits 5-4, etc.
+            uint8_t shift = (3 - (pxIdx & 3)) * 2;
+            uint8_t colorIdx = (byte >> shift) & 0x03;
+            uint16_t rgb565 = pal[colorIdx];
+            // LVGL canvas RGB565 buffer is little-endian byte pairs.
+            canvasBuf[pxIdx * 2]     = (uint8_t)(rgb565 & 0xFF);
+            canvasBuf[pxIdx * 2 + 1] = (uint8_t)(rgb565 >> 8);
         }
     }
-    lv_canvas_finish_layer(canvas, &layer);
+    // Tell LVGL the canvas pixels changed so it re-flushes the area.
+    lv_obj_invalidate(canvas);
+}
+
+// P2.32: render the PLAYER's back sprite (48×48 Gen-2 Crystal) at
+// native size into a 48×48 RGB565 LVGL canvas. Same 2bpp packed
+// layout as the front sprite.
+static void renderGen1BackSprite(lv_obj_t *canvas, uint8_t species)
+{
+    if (!canvas) return;
+    if (species == 0 || species > 151) {
+        lv_canvas_fill_bg(canvas, lv_color_white(), LV_OPA_COVER);
+        return;
+    }
+    static uint8_t s_decoded[576];
+    gen2BackDecodeTo2bpp(species, s_decoded);
+    const uint16_t *pal = kGen2BackPalettes[species];
+    uint8_t *canvasBuf = (uint8_t *)lv_canvas_get_buf(canvas);
+    if (!canvasBuf) return;
+    for (int y = 0; y < 48; ++y) {
+        for (int x = 0; x < 48; ++x) {
+            int pxIdx = y * 48 + x;
+            uint8_t byte = s_decoded[pxIdx >> 2];
+            uint8_t shift = (3 - (pxIdx & 3)) * 2;
+            uint8_t colorIdx = (byte >> shift) & 0x03;
+            uint16_t rgb565 = pal[colorIdx];
+            canvasBuf[pxIdx * 2]     = (uint8_t)(rgb565 & 0xFF);
+            canvasBuf[pxIdx * 2 + 1] = (uint8_t)(rgb565 >> 8);
+        }
+    }
+    lv_obj_invalidate(canvas);
 }
 
 void MonsterMeshModule::updateLvBattleScreen()
 {
     if (!lvBattleScreen_ || !textBattle_.isActive()) return;
-    // LVGL widget mutation is not thread-safe. Input handling
-    // (handleKey on the LVGL thread) and our update calls (LoRa
-    // thread) both write LVGL state; without a lock the deck froze
-    // and rebooted on the first DOWN keypress. spiLock is the
-    // existing thread-sync primitive Meshtastic's LGFX driver uses.
-    concurrency::LockGuard g(spiLock);
+    // P2.31 fix: spiLock here starved the LVGL render task during the
+    // 20+ widget mutations and froze input. Caller is responsible for
+    // calling us from a safe context (we now only call from
+    // handleKeyPress on the LVGL thread or from the initial takeover
+    // before any input could land).
     const Gen1BattleEngine &eng = textBattle_.engine();
     const auto &me  = eng.party(0);
     const auto &opp = eng.party(1);
@@ -4794,7 +4852,7 @@ void MonsterMeshModule::updateLvBattleScreen()
     if (me.count > 0 && me.active < me.count) {
         uint8_t sp = me.mons[me.active].species;
         if (sp != lvLastPlayerSpecies_) {
-            renderGen1Sprite((lv_obj_t *)lvPlayerCanvas_, sp, 0x3060C0);
+            renderGen1BackSprite((lv_obj_t *)lvPlayerCanvas_, sp);
             lvLastPlayerSpecies_ = sp;
         }
     }
@@ -4900,11 +4958,20 @@ void MonsterMeshModule::updateLvBattleScreen()
 
 void MonsterMeshModule::showLvBattleScreen()
 {
-    if (!lvBattleScreen_) buildLvBattleScreen();
+    Serial.printf("[MMB] showLvBattleScreen: lvBattleScreen_=%p lvBattleActive_=%d\n",
+                  lvBattleScreen_, (int)lvBattleActive_);
+    if (!lvBattleScreen_) {
+        Serial.printf("[MMB] showLvBattleScreen: calling buildLvBattleScreen\n");
+        buildLvBattleScreen();
+        Serial.printf("[MMB] showLvBattleScreen: built ok, lvBattleScreen_=%p\n",
+                      lvBattleScreen_);
+    }
     if (lvBattleActive_) return;
     lvBattlePrevScreen_ = (void *)lv_screen_active();
+    Serial.printf("[MMB] showLvBattleScreen: lv_screen_load\n");
     lv_screen_load((lv_obj_t *)lvBattleScreen_);
     lvBattleActive_ = true;
+    Serial.printf("[MMB] showLvBattleScreen: done\n");
     LOG_INFO("[MonsterMesh] LVGL battle screen shown\n");
 }
 
