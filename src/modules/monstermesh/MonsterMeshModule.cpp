@@ -2915,20 +2915,15 @@ int32_t MonsterMeshModule::runOnce()
         LOG_INFO("[MonsterMesh] textBattle exited externally — scheduling LVGL restore\n");
     }
 
-    // ── Take over the screen ONLY when the textBattle actually needs to
-    // render battle UI on this deck. Server-auth has two pre-battle
-    // states we explicitly DO NOT take over:
-    //   - SERVER side awaiting ACCEPT: user just typed `mmb2`; CHALLENGE
-    //     is in flight. Stay in the terminal so the user sees the
-    //     "queued challenge" line and isn't locked into a black battle
-    //     screen if the peer never accepts.
-    // CLIENT-side WAIT_CHALLENGE_OVERLAY DOES take over the screen,
-    // because the overlay IS the visible Y/N prompt for the user.
-    bool shouldOwnScreen = textBattle_.isActive() && (
-        textBattle_.role() == MonsterMeshTextBattle::Role::CLIENT ||
-        textBattle_.role() == MonsterMeshTextBattle::Role::LEGACY ||
-        (textBattle_.role() == MonsterMeshTextBattle::Role::SERVER &&
-         !textBattle_.awaitingAccept()));
+    // ── Take over the screen as soon as textBattle is active.
+    // P2.34: SERVER takes over immediately on `mmb2` so the user sees the
+    // battle station + "Sending challenge…" log line right away instead
+    // of staring at the terminal for up to 120 s while CHALLENGE
+    // retransmits. Auto-cancel still fires after TB_CHALLENGE_MAX_TRIES,
+    // so the user isn't stuck — the screen returns to terminal on
+    // timeout. CLIENT-side WAIT_CHALLENGE_OVERLAY takes over because
+    // the overlay IS the Y/N prompt.
+    bool shouldOwnScreen = textBattle_.isActive();
     // P2.28 diag: throttled log of takeover-gate inputs so we can see
     // why "fight" / "mmb" doesn't end up on the LVGL battle screen
     // when the user expects it to.
@@ -4728,15 +4723,16 @@ void MonsterMeshModule::buildLvBattleScreen()
     lvLogPanel_ = logp;
     lvMoveMenu_ = lvLogLabel_;
 
-    // ── Move menu (4 moves, 2 cols × 2 rows) ───────────────────────────
+    // ── Menu footer (6 cells, 2 cols × 3 rows). WAIT_ACTION shows 4
+    // moves (cells 4-5 blank); WAIT_SWITCH shows party of up to 6.
     lv_obj_t *footer = mkPanel(scr, 2, 196, 316, 42);
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 6; ++i) {
         int col = i % 2;
         int row = i / 2;
         int16_t rx = col * 154;
-        int16_t ry = row * 17;
+        int16_t ry = row * 12;
         lv_obj_t *r = lv_obj_create(footer);
-        lv_obj_set_size(r, 152, 16);
+        lv_obj_set_size(r, 152, 12);
         lv_obj_align(r, LV_ALIGN_TOP_LEFT, rx, ry);
         lv_obj_set_style_bg_opa(r, LV_OPA_TRANSP, LV_PART_MAIN);
         lv_obj_set_style_border_width(r, 0, LV_PART_MAIN);
@@ -4744,11 +4740,9 @@ void MonsterMeshModule::buildLvBattleScreen()
         lv_obj_set_layout(r, LV_LAYOUT_NONE);
         lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
         lvPartyRow_[i]   = r;
-        lvPartyName_[i]  = mkLabel(r, 2,   1, 100, 14, lv_color_black());
-        lvPartyLevel_[i] = mkLabel(r, 104, 1,  46, 14, lv_color_black());
+        lvPartyName_[i]  = mkLabel(r, 2,   0, 100, 12, lv_color_black());
+        lvPartyLevel_[i] = mkLabel(r, 104, 0,  46, 12, lv_color_black());
     }
-    for (int i = 4; i < 6; ++i) lvPartyRow_[i] = lvPartyName_[i] =
-                                lvPartyLevel_[i] = lvPartyHp_[i] = nullptr;
 
     lvBattleScreen_ = scr;
     Serial.printf("[MMB] buildLvBattleScreen: DONE scr=%p\n", scr);
@@ -4922,10 +4916,60 @@ void MonsterMeshModule::updateLvBattleScreen()
                 framed[pos++] = ' ';
             }
         }
+        // Append "Waiting…" hint when phase says we already submitted and
+        // are blocked on the peer — without this the user can't tell that
+        // their K-press registered.
+        auto p = textBattle_.currentPhase();
+        if (p == MonsterMeshTextBattle::Phase::WAIT_REMOTE ||
+            p == MonsterMeshTextBattle::Phase::ANIMATING) {
+            const char *hint = "\n> Waiting for opponent...";
+            for (const char *s = hint; *s && pos < sizeof(framed) - 1; ++s) {
+                framed[pos++] = *s;
+            }
+        }
         setLabel(lvLogLabel_, framed);
     }
 
-    // ── Move menu (active mon's 4 moves with PP, cursor-highlighted) ────
+    // ── Menu footer dispatch: moves (WAIT_ACTION) or party (WAIT_SWITCH).
+    auto highlightRow = [&](int i, bool on) {
+        if (!lvPartyRow_[i]) return;
+        lv_obj_set_style_bg_opa((lv_obj_t *)lvPartyRow_[i],
+            on ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_bg_color((lv_obj_t *)lvPartyRow_[i],
+            lv_color_make(0xFF, 0xF0, 0x80), LV_PART_MAIN);
+    };
+    auto phase = textBattle_.currentPhase();
+    bool switchMode = (phase == MonsterMeshTextBattle::Phase::WAIT_SWITCH);
+    if (switchMode) {
+        // Party of up to 6 — pick with K, cancel back with L (handled in
+        // handleKey). Each row: "> NICKNAME L99  hp/max" (or "FAINTED").
+        uint8_t cursor = textBattle_.switchCursor();
+        for (int i = 0; i < 6; ++i) {
+            if (i < me.count) {
+                const auto &m = me.mons[i];
+                char nick[12] = {};
+                gen1NameToAscii((const uint8_t *)m.nickname,
+                                sizeof(m.nickname), nick, sizeof(nick));
+                snprintf(buf, sizeof(buf), "%c %.10s",
+                         (cursor == i) ? '>' : ' ',
+                         nick[0] ? nick : "?");
+                setLabel(lvPartyName_[i], buf);
+                if (m.hp == 0) {
+                    snprintf(buf, sizeof(buf), "FNT");
+                } else {
+                    snprintf(buf, sizeof(buf), "%u/%u",
+                             (unsigned)m.hp, (unsigned)m.maxHp);
+                }
+                setLabel(lvPartyLevel_[i], buf);
+            } else {
+                setLabel(lvPartyName_[i],  "");
+                setLabel(lvPartyLevel_[i], "");
+            }
+            highlightRow(i, switchMode && cursor == i && i < me.count);
+        }
+        return;
+    }
+    // Move menu (active mon's 4 moves with PP). Cells 4-5 cleared.
     if (me.count > 0 && me.active < me.count) {
         const auto &m = me.mons[me.active];
         uint8_t cursor = textBattle_.cursorIdx();
@@ -4939,19 +4983,18 @@ void MonsterMeshModule::updateLvBattleScreen()
             snprintf(buf, sizeof(buf), "%u/%u",
                      (unsigned)m.pp[i], (unsigned)maxPp);
             setLabel(lvPartyLevel_[i], buf);
-            // Highlight cursor row light-yellow.
-            if (lvPartyRow_[i]) {
-                lv_obj_set_style_bg_opa((lv_obj_t *)lvPartyRow_[i],
-                    (cursor == i) ? LV_OPA_COVER : LV_OPA_TRANSP,
-                    LV_PART_MAIN);
-                lv_obj_set_style_bg_color((lv_obj_t *)lvPartyRow_[i],
-                    lv_color_make(0xFF, 0xF0, 0x80), LV_PART_MAIN);
-            }
+            highlightRow(i, cursor == i);
         }
-    } else {
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 4; i < 6; ++i) {
             setLabel(lvPartyName_[i],  "");
             setLabel(lvPartyLevel_[i], "");
+            highlightRow(i, false);
+        }
+    } else {
+        for (int i = 0; i < 6; ++i) {
+            setLabel(lvPartyName_[i],  "");
+            setLabel(lvPartyLevel_[i], "");
+            highlightRow(i, false);
         }
     }
 }

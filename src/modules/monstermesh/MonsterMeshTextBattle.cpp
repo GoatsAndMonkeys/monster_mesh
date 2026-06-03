@@ -352,8 +352,18 @@ void MonsterMeshTextBattle::startServerAuthAsInitiator(uint32_t remoteId,
     }
     peerTbName_[0] = '\0';
 
+    // P2.34: pre-load engine with our own party in both slots so the
+    // battle station shows the player's pokemon while waiting for
+    // ACCEPT. We then zero opponent count so the foe panel renders
+    // "---" (placeholder). ACCEPT handler re-calls engine_.start()
+    // with the real opponent party + real seed, replacing this stub.
+    engine_.start(myParty, myParty, /*rngSeed*/ 0xCAFEBABE);
+    engine_.party(1).count = 0;
+
     appendLog("Sending challenge…");
+    Serial.printf("[MMB] startServerAuthAsInitiator: pre-sendChallenge\n");
     serverAuthSendChallenge();          // first burst
+    Serial.printf("[MMB] startServerAuthAsInitiator: post-sendChallenge\n");
     lastRecvMs_ = millis();
     dirty_ = true;
     Serial.printf("[MMB] server-auth CHALLENGE → 0x%08X session=0x%04X "
@@ -1105,10 +1115,12 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
         return;
     }
 
-    // P = switch (Pokemon menu — X is reserved for exit). If the active
-    // mon is wrapped/bound (trapTurns > 0), block the switch — Gen 1's
-    // trapping moves prevent the target from switching out.
-    if (c == 'p' || c == 'P') {
+    // P or L = open switch menu. L is the Gen-1 "B" button — natural pair
+    // with K=A for accept inside the switch menu (which also cancels).
+    // If the active mon is wrapped/bound (trapTurns > 0), block the
+    // switch — Gen 1's trapping moves prevent the target from switching
+    // out.
+    if (c == 'p' || c == 'P' || keyBack) {
         const auto &activeMon = engine_.party(0).mons[engine_.party(0).active];
         if (activeMon.trapTurns > 0) {
             char buf[40];
@@ -1120,6 +1132,7 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
         }
         switchCursor_ = engine_.party(0).active;
         phase_ = Phase::WAIT_SWITCH;
+        dirty_ = true;
     }
 }
 
@@ -1519,6 +1532,9 @@ void MonsterMeshTextBattle::serverAuthSendChallenge()
     packPartyMinTb(pendingMyParty_, pkt->payload + 2 + nameLen);
 
     size_t payloadLen = 2 + nameLen + TB_PARTY_MIN_BYTES;
+    Serial.printf("[MMB] serverAuthSendChallenge: sz=%u tries=%u session=0x%04X\n",
+                  (unsigned)(BATTLELINK_HDR_SIZE + payloadLen),
+                  (unsigned)challengeTries_ + 1, (unsigned)session_);
     transport_.queueSend(buf, BATTLELINK_HDR_SIZE + payloadLen);
     lastChallengeMs_ = millis();
     challengeTries_++;
@@ -1909,10 +1925,24 @@ void MonsterMeshTextBattle::serverAuthOnAcceptPkt(uint32_t fromId,
 void MonsterMeshTextBattle::serverAuthOnActionV2Pkt(uint32_t fromId,
                                                     const uint8_t *buf, size_t len)
 {
-    if (len < BATTLELINK_HDR_SIZE + TB_ACTION_BYTES) return;
+    if (len < BATTLELINK_HDR_SIZE + TB_ACTION_BYTES) {
+        Serial.printf("[MMB] DROP ACTION_V2 from=0x%08X reason=short_len=%u\n",
+                      (unsigned)fromId, (unsigned)len);
+        return;
+    }
     const BattlePacket *pkt = (const BattlePacket *)buf;
-    if (pkt->sessionId() != session_) return;
-    if (fromId != remoteId_) return;
+    if (pkt->sessionId() != session_) {
+        Serial.printf("[MMB] DROP ACTION_V2 from=0x%08X reason=session pkt=0x%04X our=0x%04X\n",
+                      (unsigned)fromId, (unsigned)pkt->sessionId(),
+                      (unsigned)session_);
+        return;
+    }
+    if (fromId != remoteId_) {
+        Serial.printf("[MMB] DROP ACTION_V2 from=0x%08X reason=not_peer (peer=0x%08X)\n",
+                      (unsigned)fromId, (unsigned)remoteId_);
+        return;
+    }
+    Serial.printf("[MMB] server ACTION_V2 rx from=0x%08X\n", (unsigned)fromId);
 
     uint8_t turn, actionType, index, lastAckedSeq;
     if (!tbUnpackAction(pkt->payload, len - BATTLELINK_HDR_SIZE,
@@ -2079,6 +2109,11 @@ void MonsterMeshTextBattle::clientAuthSendAccept(bool accepted)
     packPartyMinTb(pendingMyParty_, pkt->payload + 2 + nameLen);
 
     size_t payloadLen = 2 + nameLen + TB_PARTY_MIN_BYTES;
+    Serial.printf("[MMB] clientAuthSendAccept: accepted=%u sz=%u session=0x%04X "
+                  "awaitingFirstUpdate=%u\n",
+                  (unsigned)accepted,
+                  (unsigned)(BATTLELINK_HDR_SIZE + payloadLen),
+                  (unsigned)session_, (unsigned)awaitingFirstUpdate_);
     transport_.queueSend(buf, BATTLELINK_HDR_SIZE + payloadLen);
     lastAcceptSendMs_ = millis();
 
