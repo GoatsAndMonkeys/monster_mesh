@@ -125,12 +125,15 @@ void MonsterMeshTextBattle::startNetworkedAsInitiator(uint32_t remoteId,
     if (!existingSeed) sendStart(rngSeed, myParty);
     Serial.printf("[MMB] init startNetworked: session=0x%04X seed=0x%08X peer=0x%08X\n",
                   (unsigned)session_, (unsigned)rngSeed, (unsigned)remoteId);
-    appendLog("Battle started!");
-    appendLog("Waiting for opponent…");
+    appendLog("Battle ready — waiting for peer…");
     lastRecvMs_ = millis();
     handleFaints();
+    // Stay in WAIT_PEER_READY until receiver sends TEXT_BATTLE_READY.
+    // handlePacket transitions to WAIT_ACTION when that packet arrives.
+    // A 10s fallback in tick() unblocks in case the peer is an older build.
     if (engine_.result() == Gen1BattleEngine::Result::ONGOING)
-        phase_ = Phase::WAIT_ACTION;
+        phase_ = Phase::WAIT_PEER_READY;
+    peerReadyTimeoutMs_ = millis() + 10000;
     dirty_ = true;
 }
 
@@ -172,12 +175,11 @@ void MonsterMeshTextBattle::startNetworkedAsReceiver(uint32_t remoteId,
                   (unsigned)session_, (unsigned)rngSeed, (unsigned)remoteId);
     appendLog("Battle started!");
     lastRecvMs_ = millis();
-    // Send a turn-0 hash to the initiator immediately. This serves as the
-    // "I'm ready" signal — the initiator's handlePacket sets peerReady_
-    // true on any in-session packet from us, unblocking move submission
-    // on its side. Receiver itself doesn't need peerReady_ since START
-    // already proved the initiator was ready.
+    // Notify the initiator that our battle station is up. sendReady() is the
+    // explicit signal; sendHash() follows for turn-0 desync detection.
+    // Initiator transitions from WAIT_PEER_READY to WAIT_ACTION on receipt.
     peerReady_ = true;
+    sendReady();
     sendHash();
     dirty_ = true;
 }
@@ -442,6 +444,16 @@ void MonsterMeshTextBattle::sendForfeit()
     transport_.queueSend(buf, sizeof(buf));
 }
 
+void MonsterMeshTextBattle::sendReady()
+{
+    uint8_t buf[BATTLELINK_HDR_SIZE];
+    BattlePacket *pkt = (BattlePacket *)buf;
+    pkt->type = (uint8_t)PktType::TEXT_BATTLE_READY;
+    pkt->setSessionId(session_);
+    pkt->seq = 0;
+    transport_.queueSend(buf, sizeof(buf));
+}
+
 void MonsterMeshTextBattle::sendHash()
 {
     uint8_t buf[BATTLELINK_MAX_PKT];
@@ -463,6 +475,9 @@ bool MonsterMeshTextBattle::handlePacket(uint32_t fromId,
     if (len < BATTLELINK_HDR_SIZE) return false;
     const BattlePacket *pkt = (const BattlePacket *)buf;
     PktType t = (PktType)pkt->type;
+    Serial.printf("[MMB] handlePacket type=0x%02X from=0x%08X len=%u mode=%d role=%d\n",
+                  (unsigned)pkt->type, (unsigned)fromId, (unsigned)len,
+                  (int)mode_, (int)role_);
 
     // ── Server-auth dispatch (must precede the mode_/session checks since
     // CHALLENGE arrives when mode_ == OFF and ACCEPT/ACTION_V2 may carry
@@ -542,9 +557,17 @@ bool MonsterMeshTextBattle::handlePacket(uint32_t fromId,
     // so it implicitly knows the initiator is ready.
     if (!peerReady_) {
         peerReady_ = true;
-        appendLog("Opponent ready — go!");
+        if (phase_ == Phase::WAIT_PEER_READY) {
+            phase_ = Phase::WAIT_ACTION;
+            appendLog("Opponent ready!");
+        } else {
+            appendLog("Opponent ready — go!");
+        }
         dirty_ = true;
     }
+
+    // Explicit ready ping from receiver — same effect as first peerReady_.
+    if (t == PktType::TEXT_BATTLE_READY) return true;
 
     switch (t) {
         case PktType::TEXT_BATTLE_ACTION: {
@@ -851,13 +874,21 @@ void MonsterMeshTextBattle::tick(uint32_t nowMs)
                 sendAction(lastSentAction_, lastSentIndex_);
             }
         }
+        // Fallback: if WAIT_PEER_READY hasn't resolved in 10 s (peer is an
+        // older build without TEXT_BATTLE_READY), unblock and show the UI.
+        if (phase_ == Phase::WAIT_PEER_READY && nowMs >= peerReadyTimeoutMs_) {
+            phase_ = Phase::WAIT_ACTION;
+            appendLog("Peer ready (timeout)");
+            dirty_ = true;
+        }
         // Timeout: opponent hasn't sent anything in a while. Server-auth
         // uses the spec's 30 s window; legacy uses the legacy 60 s.
         uint32_t timeout = (role_ != Role::LEGACY)
                              ? TB_NO_TRAFFIC_TIMEOUT_MS
                              : REMOTE_TIMEOUT_MS;
         if ((nowMs - lastRecvMs_) > timeout &&
-            phase_ != Phase::FINISHED && !awaitingAccept_) {
+            phase_ != Phase::FINISHED &&
+            phase_ != Phase::WAIT_PEER_READY && !awaitingAccept_) {
             appendLog("Opponent timed out.");
             if (engine_.result() == Gen1BattleEngine::Result::ONGOING) {
                 engine_.forfeit(1, engineLogCb, this);
@@ -1414,6 +1445,18 @@ void MonsterMeshTextBattle::render(lgfx::LGFX_Device *g)
         g->setTextColor(FG, DARK);
         g->setCursor(34, by + 76);
         g->print("Y = ACCEPT    N = DECLINE");
+        dirty_ = false;
+        return;
+    }
+
+    // Initiator: hold full battle UI until receiver confirms readiness.
+    if (phase_ == Phase::WAIT_PEER_READY) {
+        g->setTextColor(FG, BG);
+        g->setCursor(8, SCREEN_H / 2 - 8);
+        g->print("Waiting for opponent…");
+        g->setTextColor(DIM, BG);
+        g->setCursor(8, SCREEN_H / 2 + 12);
+        g->print("Battle will start when they connect.");
         dirty_ = false;
         return;
     }
@@ -2109,12 +2152,13 @@ void MonsterMeshTextBattle::clientAuthSendAccept(bool accepted)
     packPartyMinTb(pendingMyParty_, pkt->payload + 2 + nameLen);
 
     size_t payloadLen = 2 + nameLen + TB_PARTY_MIN_BYTES;
+    bool qOk = transport_.queueSend(buf, BATTLELINK_HDR_SIZE + payloadLen);
     Serial.printf("[MMB] clientAuthSendAccept: accepted=%u sz=%u session=0x%04X "
-                  "awaitingFirstUpdate=%u\n",
+                  "awaitingFirstUpdate=%u queueOk=%d\n",
                   (unsigned)accepted,
                   (unsigned)(BATTLELINK_HDR_SIZE + payloadLen),
-                  (unsigned)session_, (unsigned)awaitingFirstUpdate_);
-    transport_.queueSend(buf, BATTLELINK_HDR_SIZE + payloadLen);
+                  (unsigned)session_, (unsigned)awaitingFirstUpdate_,
+                  (int)qOk);
     lastAcceptSendMs_ = millis();
 
     if (!accepted) {
@@ -2550,11 +2594,14 @@ void MonsterMeshTextBattle::clientAuthSendStateRequest()
 
 void MonsterMeshTextBattle::clientAuthRetransmit(uint32_t nowMs)
 {
-    // ACCEPT retransmit until first UPDATE lands. Matches the server's
-    // CHALLENGE retransmit cadence so a single lost ACCEPT doesn't lock
-    // us in WAIT_REMOTE for the full 30 s no-traffic timeout.
+    // P2.37: ACCEPT retransmit cadence is intentionally faster AND
+    // staggered relative to the server's CHALLENGE cadence. With both
+    // sides flood-broadcasting on 8 s intervals, the LoRa air would
+    // saturate and both radios "busyRx"-throttled each other's actual
+    // retransmits — neither side ever heard the other's packet.
+    // Client retries at ~5 s + jitter so the schedules don't lock.
     if (awaitingFirstUpdate_ &&
-        (nowMs - lastAcceptSendMs_) >= TB_CHALLENGE_RESEND_MS) {
+        (nowMs - lastAcceptSendMs_) >= 5000u + (uint32_t)(esp_random() & 0x7FF)) {
         clientAuthSendAccept(true);
     }
     // ACTION_V2 retransmit while waiting for next UPDATE.

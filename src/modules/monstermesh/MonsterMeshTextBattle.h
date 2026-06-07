@@ -41,6 +41,7 @@ public:
         ANIMATING,      // turn just resolved, scrolling messages
         FINISHED,       // result_ != ONGOING; press any key to exit
         WAIT_CHALLENGE_OVERLAY,  // server-auth CLIENT: "X challenges you! K=accept L=decline"
+        WAIT_PEER_READY, // legacy initiator: holding until receiver sends TEXT_BATTLE_READY
     };
 
     explicit MonsterMeshTextBattle(MeshtasticTransport &transport)
@@ -176,8 +177,11 @@ public:
     // and no Meshtastic-UI bleed-through is possible.
     const Gen1BattleEngine &engine() const { return engine_; }
     uint8_t cursorIdx() const { return cursor_; }
+    uint8_t switchCursor() const { return switchCursor_; }
+    Phase   currentPhase() const { return phase_; }
     const char *peerName() const { return peerTbName_; }
     const char *myName()   const { return myTbName_; }
+    uint32_t remoteId() const { return remoteId_; }
     // Copy up to maxLines most-recent log lines into `out` (newline-
     // separated). Returns number of lines written.
     uint8_t getRecentLog(char *out, size_t outCap, uint8_t maxLines) const;
@@ -276,10 +280,12 @@ private:
     // move at engine.turn()=0 while the receiver was still loading its
     // battle station made the receiver miss the START race and the engines
     // desynced from turn 0.
-    bool peerReady_ = false;
-    static constexpr uint32_t REMOTE_TIMEOUT_MS = 60000;   // 60s w/o packet → forfeit
-    static constexpr uint32_t SCROLL_INTERVAL_MS = 600;    // text reveal cadence
-    static constexpr uint32_t RESEND_INTERVAL_MS = 4000;   // re-broadcast our action
+    bool     peerReady_          = false;
+    uint32_t peerReadyTimeoutMs_ = 0;   // fallback: unblock WAIT_PEER_READY after 10s
+    static constexpr uint32_t REMOTE_TIMEOUT_MS    = 60000;  // 60s w/o packet → forfeit
+    static constexpr uint32_t SCROLL_INTERVAL_MS   = 600;    // text reveal cadence
+    static constexpr uint32_t RESEND_INTERVAL_MS   = 4000;   // re-broadcast our action
+    static constexpr uint32_t PEER_READY_TIMEOUT_MS = 10000; // fallback if no READY arrives
 
     // Local→engine helpers
     void appendLog(const char *line);
@@ -289,6 +295,7 @@ private:
     void sendAction(uint8_t actionType, uint8_t index);
     void sendForfeit();
     void sendHash();
+    void sendReady();
 
     // After both sides submitted, run executeTurn and prep next phase.
     void resolveTurn();

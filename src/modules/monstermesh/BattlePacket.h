@@ -99,6 +99,11 @@ enum class PktType : uint8_t {
     // CHALLENGE / ACCEPT party.
     TEXT_BATTLE_FULL_STATE = 0x6B,
 
+    // READY: receiver → initiator. Zero-payload ping sent when the receiver
+    // enters the battle station, letting the initiator know the peer's UI is
+    // up. Initiator holds its render in WAIT_PEER_READY until this arrives.
+    TEXT_BATTLE_READY = 0x6C,
+
     // BBS gym discovery (Phase C-1) — runs over PRIVATE_APP so it does NOT
     // appear in mesh chat. Never use TEXT_MESSAGE_APP for these.
     BBS_PING  = 0x70,  // broadcast probe; payload empty
@@ -191,8 +196,14 @@ static constexpr uint8_t  TB_UPDATE_MAX_LOG_LINES = 6;
 // and was silently dropped.
 static constexpr uint32_t TB_CHALLENGE_RESEND_MS  = 8000;
 static constexpr uint32_t TB_CHALLENGE_MAX_TRIES  = 15;
-static constexpr uint32_t TB_UPDATE_RESEND_MS     = 6000;
-static constexpr uint32_t TB_ACTION_RESEND_MS     = 6000;
+// P2.39d: bumped from 6s → 15s/11s to clear airtime contention. Both
+// sides retx-ing every 6s on the MonsterMesh channel triggered
+// "Ch. util >25% Skip send" on the server + "MQTT queue is full",
+// and ACTION_V2 packets weren't getting through. Slower retx with
+// per-side stagger (server 15s, client 11s) gives each radio real
+// RX windows between TX bursts.
+static constexpr uint32_t TB_UPDATE_RESEND_MS     = 15000;
+static constexpr uint32_t TB_ACTION_RESEND_MS     = 11000;
 // 60 s no-traffic timeout once a battle is live — gives the user time
 // to consult the move menu without auto-forfeiting between turns.
 static constexpr uint32_t TB_NO_TRAFFIC_TIMEOUT_MS = 60000;
