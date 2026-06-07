@@ -579,6 +579,7 @@ public:
     // takeover and restore on cleanup. Plays by LVGL's rules so no
     // Meshtastic-UI bleed-through is possible.
     void *lvBattleScreen_     = nullptr;
+    void *lvBattleRefreshTimer_ = nullptr;  // lv_timer_t* (P2.39c)
     // Phase 2 — Gen 1 battle UI widget tree (RPi mockup port):
     //   foe panel (bordered box):  FOE label + name + level + HP bar
     //   foe sprite area  (top-right, placeholder for now)
@@ -684,6 +685,26 @@ public:
     // File browser
     void renderBrowser();
     void launchROM(const char *path);
+
+    // ── Deferred LVGL work from LoRa/runOnce threads ───────────────────────
+    // All LVGL API calls (printLine, onBbsReply, etc.) must run on the LVGL
+    // render task. Work originating on the LoRa thread or runOnce OSThread is
+    // stored here and drained in tryConsumeStagedParty() (LVGL task context).
+
+    // Pending BBS_REPLY terminal notification (one slot — BBS replies are rare)
+    struct PendingBbsReplyData {
+        uint32_t from  = 0;
+        char gym[24]   = {};
+        char badge[24] = {};
+        char leader[16]= {};
+        uint8_t roster = 0;
+    };
+    PendingBbsReplyData   pendingBbsReplyData_;
+    volatile bool         pendingBbsReply_        = false;
+
+    // Pending single-line terminal message (gym-cleared notification, etc.)
+    char                  pendingTerminalLine_[128] = {};
+    volatile bool         pendingTerminalLine_valid_ = false;
 };
 
 extern MonsterMeshModule *monsterMeshModule;

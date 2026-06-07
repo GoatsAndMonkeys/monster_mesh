@@ -700,8 +700,19 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 char gym[24], badge[24], leader[16];
                 if (pull(gym, sizeof(gym)) && pull(badge, sizeof(badge)) &&
                     pull(leader, sizeof(leader)) && pos < plen) {
+                    // Defer to LVGL task — onBbsReply calls printLine which
+                    // calls lv_label_create. Calling LVGL from the LoRa/Router
+                    // thread without holding the LVGL mutex corrupts state.
                     uint8_t roster = p[pos];
-                    terminal_.onBbsReply(mp.from, gym, badge, leader, roster);
+                    pendingBbsReplyData_.from   = mp.from;
+                    strncpy(pendingBbsReplyData_.gym,    gym,    sizeof(pendingBbsReplyData_.gym)    - 1);
+                    strncpy(pendingBbsReplyData_.badge,  badge,  sizeof(pendingBbsReplyData_.badge)  - 1);
+                    strncpy(pendingBbsReplyData_.leader, leader, sizeof(pendingBbsReplyData_.leader) - 1);
+                    pendingBbsReplyData_.gym[sizeof(pendingBbsReplyData_.gym)-1]       = '\0';
+                    pendingBbsReplyData_.badge[sizeof(pendingBbsReplyData_.badge)-1]   = '\0';
+                    pendingBbsReplyData_.leader[sizeof(pendingBbsReplyData_.leader)-1] = '\0';
+                    pendingBbsReplyData_.roster = roster;
+                    pendingBbsReply_ = true;  // set LAST (volatile, seen by LVGL task)
                 }
                 return ProcessMessage::CONTINUE;
             }
@@ -3593,7 +3604,10 @@ int32_t MonsterMeshModule::runOnce()
                         }
                     }
                     if (won && inLadder) {
-                        terminal_.printLine("MM Gym cleared! You bested the leader.");
+                        // Defer — printLine calls LVGL; runOnce is the LoRa OSThread.
+                        strncpy(pendingTerminalLine_, "MM Gym cleared! You bested the leader.", sizeof(pendingTerminalLine_) - 1);
+                        pendingTerminalLine_[sizeof(pendingTerminalLine_) - 1] = '\0';
+                        pendingTerminalLine_valid_ = true;
                     }
                     LOG_INFO("[MonsterMesh] BBS fight ended — %s sent to gym 0x%08X\n",
                              won ? "WIN" : "LOSS", (unsigned)bbsFightTarget_);
@@ -4188,8 +4202,15 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
 void MonsterMeshModule::installKeyboardHook()
 {
 #if HAS_TFT
-    // Walk the indev list every time. If device-ui ever recreates the keypad
-    // indev, our cached pointer goes stale — re-walk catches that.
+    // Fast-exit: once hooked, never walk the LVGL indev list again from the
+    // Meshtastic OSThread. lv_indev_get_next/get_type/get_read_cb all read
+    // LVGL's internal object list without a mutex. When the LVGL render task
+    // is creating widgets (e.g. a new-message popup), the concurrent walk from
+    // runOnce() corrupts LVGL state and deadlocks the OSThread task.
+    // device-ui does NOT recreate the keypad indev during normal runtime, so
+    // the cached pointer remains valid for the entire session.
+    if (g_kbIndev != nullptr) return;
+
     lv_indev_t *indev = nullptr;
     while ((indev = lv_indev_get_next(indev)) != nullptr) {
         if (lv_indev_get_type(indev) != LV_INDEV_TYPE_KEYPAD) continue;
@@ -4636,6 +4657,22 @@ void MonsterMeshModule::tryConsumeStagedParty()
         }
         stagedEndKind_ = StagedEndKind::NONE;
     }
+    // Drain deferred LVGL work queued from LoRa/runOnce threads.
+    // This runs on the LVGL render task (via monsterMeshKeyboardRead →
+    // tryConsumeStagedParty), so all LVGL API calls here are safe.
+    if (pendingBbsReply_) {
+        pendingBbsReply_ = false;
+        terminal_.onBbsReply(pendingBbsReplyData_.from,
+                             pendingBbsReplyData_.gym,
+                             pendingBbsReplyData_.badge,
+                             pendingBbsReplyData_.leader,
+                             pendingBbsReplyData_.roster);
+    }
+    if (pendingTerminalLine_valid_) {
+        pendingTerminalLine_valid_ = false;
+        terminal_.printLine(pendingTerminalLine_);
+    }
+
     if (!terminalPartyStaged_) return;
     // Always commit the staged party into the terminal's data model so
     // hasParty() flips true and downstream features (PvP launch gate,
