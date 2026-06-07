@@ -332,9 +332,10 @@ void BattleWindow::drawYouBox() {
     drawHpBar(bx + 38, by + 50, barW, 10, state_.you.hp, state_.you.maxHp);
     BitmapFont::drawString(renderer_, hpsX, by + 46, hps, COL_INK, 2);
 
-    // EXP row: same scale-2 label treatment.  Bar runs full remaining width.
-    BitmapFont::drawString(renderer_, bx + 8, by + 66, "EXP", COL_INK, 2);
-    drawExpBar(bx + 46, by + 70, bw - 54, 6);
+    // EXP row: same scale-2 label treatment.  Bar runs full remaining width and
+    // is the same thickness as the HP bar (there's room in the box).
+    BitmapFont::drawString(renderer_, bx + 8, by + 68, "EXP", COL_INK, 2);
+    drawExpBar(bx + 46, by + 70, bw - 54, 10);
 }
 
 void BattleWindow::drawMessageLog() {

@@ -86,12 +86,20 @@ fi
 WORK_IMG="${WORKDIR}/work.img"
 echo "[2/7] Expanding base image to ${WORK_IMG}…"
 rm -f "$WORK_IMG"
-case "$BASE_CACHED" in
-    *.img.gz)  gunzip -c   "$BASE_CACHED" > "$WORK_IMG" ;;
-    *.img.xz)  xz -dc       "$BASE_CACHED" > "$WORK_IMG" ;;
-    *.img)     cp "$BASE_CACHED" "$WORK_IMG" ;;
-    *) echo "ERROR: unknown image format: $BASE_CACHED" >&2; exit 1 ;;
+# The base lives on the macOS virtio-fs bind mount (.cache).  Decompressors
+# read it with seeks/large buffers that intermittently trip EDEADLK
+# ("Resource deadlock avoided") through virtio-fs; a plain sequential `cat`
+# into container-local /tmp does not.  Copy first, then decompress locally.
+LOCAL_BASE="/tmp/$(basename "$BASE_CACHED")"
+echo "  staging base to container-local ${LOCAL_BASE}…"
+cat "$BASE_CACHED" > "$LOCAL_BASE"
+case "$LOCAL_BASE" in
+    *.img.gz)  gunzip -c   "$LOCAL_BASE" > "$WORK_IMG" ;;
+    *.img.xz)  xz -dc       "$LOCAL_BASE" > "$WORK_IMG" ;;
+    *.img)     cp "$LOCAL_BASE" "$WORK_IMG" ;;
+    *) echo "ERROR: unknown image format: $LOCAL_BASE" >&2; rm -f "$LOCAL_BASE"; exit 1 ;;
 esac
+rm -f "$LOCAL_BASE"
 
 # ── Step 3: Grow image so we have room for our deps + binaries ──────────────
 # RetroPie images ship near-full.  We add 600 MiB of headroom for libsdl2,
