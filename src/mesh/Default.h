@@ -36,11 +36,7 @@
 // client and silently drops bursts > ~1 msg/sec — fatal for MMB's chunked
 // party exchange. Our private broker has no rate limits and supports the
 // full QoS spectrum.
-// Custom domain mqtt.cableclub.net CNAMEs here, but EMQX Serverless is
-// multi-tenant and uses TLS SNI to route to your tenant — connecting to the
-// custom hostname makes the broker abort the TLS handshake with
-// "unrecognized_name" within ~1s. Connect to the EMQX-native hostname so
-#define default_mqtt_address "cableclub.net"
+#define default_mqtt_address "mqtt.cableclub.net"
 #define default_mqtt_username "ash"
 #define default_mqtt_password "large4meowth"
 // MonsterMesh private namespace on the EMQX broker. The framework's auto-
