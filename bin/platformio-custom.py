@@ -211,7 +211,10 @@ if platform.name == "espressif32":
                 shutil.copyfile(src, dst)
                 print(f"  [MonsterMesh] → {dst}")
 
-    env.AddPostAction("$BUILD_DIR/${PROGNAME}.factory.bin", copy_firmware_to_builds)
+    # Attach to .bin (a real SCons target); factory.bin is created as a side
+    # effect by esp32_create_combined_bin so it's not a SCons target and
+    # post-actions on it never fire.
+    env.AddPostAction("$BUILD_DIR/${PROGNAME}.bin", copy_firmware_to_builds)
 
 mm_version = "P2.43"  # Human-readable release label shown on boot screen
 
