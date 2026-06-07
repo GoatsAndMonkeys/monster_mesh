@@ -4,14 +4,26 @@
 #include <signal.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/stat.h>
 
 static TerminalUI *g_ui = nullptr;
 static void sigHandler(int) { if (g_ui) g_ui->requestQuit(); }
 
 int main(int argc, char *argv[]) {
-    (void)argc;
-    (void)argv;
+    // The MonsterMesh RetroPie system loads "ROMs" by passing the .mm file
+    // path to launch.sh, which forwards it (or --pentest) to us.  A ROM whose
+    // name mentions pentest/pikachu boots straight into the Pentest Pikachu
+    // battle screen instead of the normal terminal menu.
+    bool pentest = false;
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (!a) continue;
+        if (strstr(a, "pentest") || strstr(a, "Pentest") ||
+            strstr(a, "pikachu") || strstr(a, "Pikachu") ||
+            strstr(a, "PENTEST") || strstr(a, "PIKACHU"))
+            pentest = true;
+    }
 
     signal(SIGINT,  sigHandler);
     signal(SIGTERM, sigHandler);
@@ -22,6 +34,7 @@ int main(int argc, char *argv[]) {
 
     TerminalUI ui;
     g_ui = &ui;
+    ui.setPentestMode(pentest);
 
     if (!ui.init()) {
         fprintf(stderr, "Failed to initialize terminal UI\n");

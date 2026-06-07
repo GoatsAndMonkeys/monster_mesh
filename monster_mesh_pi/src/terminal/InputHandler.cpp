@@ -51,6 +51,22 @@
 #ifndef BTN_SELECT
 #define BTN_SELECT      0x13a
 #endif
+// GPI Case 2W reports D-pad as gamepad codes, not keyboard arrows.
+#ifndef BTN_DPAD_UP
+#define BTN_DPAD_UP     0x220
+#endif
+#ifndef BTN_DPAD_DOWN
+#define BTN_DPAD_DOWN   0x221
+#endif
+#ifndef BTN_DPAD_LEFT
+#define BTN_DPAD_LEFT   0x222
+#endif
+#ifndef BTN_DPAD_RIGHT
+#define BTN_DPAD_RIGHT  0x223
+#endif
+#ifndef BTN_GAMEPAD
+#define BTN_GAMEPAD     0x130
+#endif
 #endif  // __linux__
 
 InputHandler::InputHandler() {}
@@ -99,13 +115,21 @@ GpiButton InputHandler::mapKeyCode(int code)
 {
 #ifdef __linux__
     switch (code) {
+        case BTN_DPAD_UP:
         case KEY_UP:        return GpiButton::UP;
+        case BTN_DPAD_DOWN:
         case KEY_DOWN:      return GpiButton::DOWN;
+        case BTN_DPAD_LEFT:
         case KEY_LEFT:      return GpiButton::LEFT;
+        case BTN_DPAD_RIGHT:
         case KEY_RIGHT:     return GpiButton::RIGHT;
-        case BTN_EAST:
-        case KEY_ENTER:     return GpiButton::A;
+        // GPI Case 2W: physical A button (right) reports as BTN_SOUTH (Xbox
+        // "A" position), physical B button (left) reports as BTN_EAST (Xbox
+        // "B" position).  Match the case's labels, not the underlying Xbox
+        // semantic naming.
         case BTN_SOUTH:
+        case KEY_ENTER:     return GpiButton::A;
+        case BTN_EAST:
         case KEY_BACKSPACE: return GpiButton::B;
         case BTN_START:
         case KEY_SPACE:     return GpiButton::START;
@@ -127,6 +151,13 @@ int InputHandler::poll()
     int count = 0;
     struct input_event ev;
 
+    // Track hat-switch state so we can emit press/release transitions
+    // (the kernel reports axis position, not edge events).  GPI Case 2W's
+    // RetroFlag controller exposes its D-pad as ABS_HAT0X / ABS_HAT0Y on
+    // a Microsoft X-Box 360 pad emulation, not as discrete BTN_DPAD_*.
+    static int8_t lastHatX_ = 0;
+    static int8_t lastHatY_ = 0;
+
     while (true) {
         ssize_t n = ::read(fd_, &ev, sizeof(ev));
         if (n < 0) {
@@ -138,19 +169,50 @@ int InputHandler::poll()
         if (n == 0) break;
         if (n < (ssize_t)sizeof(ev)) continue;
 
-        if (ev.type != EV_KEY) continue;
-        if (ev.value != 0 && ev.value != 1) continue;
+        // ── Buttons (EV_KEY) — A/B/Start/Select ─────────────────────────
+        if (ev.type == EV_KEY) {
+            if (ev.value != 0 && ev.value != 1) continue;
 
-        GpiButton btn = mapKeyCode(ev.code);
-        if (btn == GpiButton::NONE) continue;
+            GpiButton btn = mapKeyCode(ev.code);
+            if (btn == GpiButton::NONE) continue;
 
-        if (cb_) {
-            ButtonEvent bev;
-            bev.button  = btn;
-            bev.pressed = (ev.value == 1);
-            cb_(bev);
+            if (cb_) {
+                ButtonEvent bev;
+                bev.button  = btn;
+                bev.pressed = (ev.value == 1);
+                cb_(bev);
+            }
+            count++;
+            continue;
         }
-        count++;
+
+        // ── D-pad as hat-switch (EV_ABS, ABS_HAT0X / ABS_HAT0Y) ─────────
+        // Value is -1 (left/up), 0 (released), or +1 (right/down).  We
+        // synthesize press/release events on transitions through 0.
+        if (ev.type == EV_ABS) {
+            if (ev.code == ABS_HAT0X) {
+                int8_t v = (int8_t)ev.value;
+                if (v != lastHatX_ && cb_) {
+                    // Release whichever direction was active.
+                    if (lastHatX_ < 0) { ButtonEvent r{GpiButton::LEFT,  false}; cb_(r); count++; }
+                    if (lastHatX_ > 0) { ButtonEvent r{GpiButton::RIGHT, false}; cb_(r); count++; }
+                    // Press the new direction (if any).
+                    if (v < 0) { ButtonEvent p{GpiButton::LEFT,  true};  cb_(p); count++; }
+                    if (v > 0) { ButtonEvent p{GpiButton::RIGHT, true};  cb_(p); count++; }
+                    lastHatX_ = v;
+                }
+            } else if (ev.code == ABS_HAT0Y) {
+                int8_t v = (int8_t)ev.value;
+                if (v != lastHatY_ && cb_) {
+                    if (lastHatY_ < 0) { ButtonEvent r{GpiButton::UP,   false}; cb_(r); count++; }
+                    if (lastHatY_ > 0) { ButtonEvent r{GpiButton::DOWN, false}; cb_(r); count++; }
+                    if (v < 0) { ButtonEvent p{GpiButton::UP,   true}; cb_(p); count++; }
+                    if (v > 0) { ButtonEvent p{GpiButton::DOWN, true}; cb_(p); count++; }
+                    lastHatY_ = v;
+                }
+            }
+            continue;
+        }
     }
 
     return count;
@@ -181,10 +243,25 @@ std::string InputHandler::autoDetect()
 
         uint8_t keyBits[KEY_MAX / 8 + 1] = {};
         if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keyBits)), keyBits) < 0) { ::close(fd); continue; }
-        bool hasKeyUp = (keyBits[KEY_UP / 8] >> (KEY_UP % 8)) & 1;
+        // Accept any device that looks like keyboard arrows, BTN_DPAD_* gamepad,
+        // or BTN_SOUTH (A button on any modern gamepad — Xbox360, Switch Pro,
+        // PS4/5, the RetroFlag X360-emulated controller in the GPI Case 2W).
+        bool hasKeyUp     = (keyBits[KEY_UP     / 8] >> (KEY_UP     % 8)) & 1;
+        bool hasDpadUp    = (keyBits[BTN_DPAD_UP/ 8] >> (BTN_DPAD_UP% 8)) & 1;
+        bool hasGamepadBtn= (keyBits[BTN_SOUTH  / 8] >> (BTN_SOUTH  % 8)) & 1;
+
+        // Also peek at EV_ABS — Xbox-style controllers report the D-pad as
+        // ABS_HAT0X/ABS_HAT0Y rather than discrete buttons.  If the device
+        // has a hat axis, that's a strong gamepad signal even if it doesn't
+        // expose BTN_SOUTH for some reason.
+        uint8_t absBits[ABS_MAX / 8 + 1] = {};
+        bool hasHat = false;
+        if (ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absBits)), absBits) >= 0) {
+            hasHat = (absBits[ABS_HAT0X / 8] >> (ABS_HAT0X % 8)) & 1;
+        }
         ::close(fd);
 
-        if (hasKeyUp) { found = g.gl_pathv[i]; break; }
+        if (hasKeyUp || hasDpadUp || hasGamepadBtn || hasHat) { found = g.gl_pathv[i]; break; }
     }
 
     globfree(&g);

@@ -10,7 +10,15 @@
 
 #include "platform.h"
 
+// /var/lib/monstermesh on Linux (survives reboots — matches MMD_STATE_DIR
+// in IpcProtocol.h), /tmp/monstermesh on macOS dev where /tmp persists
+// across runs.  Using /tmp on the Pi loses gym progress on every reboot
+// because Buster wipes /tmp at boot via tmpfiles.d.
+#ifdef __APPLE__
 static constexpr const char *LORD_SAVE_PATH = "/tmp/monstermesh/lord.dat";
+#else
+static constexpr const char *LORD_SAVE_PATH = "/var/lib/monstermesh/lord.dat";
+#endif
 
 static constexpr uint32_t LORD_MAGIC   = 0x4C4F5244u;   // 'LORD'
 static constexpr uint8_t  LORD_VERSION = 1;

@@ -9,27 +9,11 @@
 #include "Gen1BattleEngine.h"
 #include "../shared/PokemonData.h"
 #include "../shared/DaycareSavPatcher.h"      // dexToInternal[]
+#include "../shared/LordLogic.h"              // NG+ scaling + coverage moves
 #include "showdown_gen1_moves.h"
 
 #include <string.h>
 #include <stdio.h>
-
-// ── NG+ stubs (Pi v1 — no NG+) ───────────────────────────────────────────────
-
-static inline uint8_t lordScaleLevel(uint8_t baseLevel, uint8_t /*tier*/, bool /*isE4*/)
-{
-    return baseLevel;
-}
-
-static inline uint8_t lordCurrentNgPlusTier()
-{
-    return 0;
-}
-
-static inline void lordApplyNgPlusMoves(uint8_t /*dex*/, uint8_t /*tier*/, uint8_t /*moves*/[4])
-{
-    // no-op
-}
 
 // ── Flat pool of LordGymMon records, grouped per-trainer. ────────────────────
 //

@@ -3,10 +3,15 @@
 // No text input - every action is reached through the MESH / LOCAL / SYSTEM menu tree.
 
 #include "TerminalUI.h"
+#include "SpriteRender.h"
 #include "../battle/showdown_gen1_moves.h"
 #include "../shared/DaycareSavPatcher.h"   // dexToInternal[] table
 #include "../shared/Gen1BaseExp.h"         // gen1XpYield()
+#include "../shared/LordE4.h"              // Indigo Plateau rosters
+#include "../shared/LordLogic.h"           // NG+ tier state + scaling
+#include "../shared/KantoZones.h"          // Pentest Pikachu zone encounters
 #include <ncurses.h>
+#include <locale.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <time.h>
@@ -77,11 +82,20 @@ bool TerminalUI::init() {
         LOG_WARN("GPI input device not found; using ncurses keyboard fallback");
     }
 
-    // Resize terminal window to the device's screen resolution.
-    // 640x480 @ standard 8x16 console font = 80 columns x 30 rows.
-    // ANSI escape: CSI 8 ; rows ; cols t  - works in xterm, iTerm2, Terminal.app
-    printf("\033[8;30;80t");
+    // Resize the host terminal to match the GPI Case 2W resolution.
+    // 640x480 @ standard 8x16 console font = 80 cols x 30 rows.
+    // CSI 8 ; rows ; cols t resizes; CSI 3 ; 0 ; 0 t moves to origin;
+    // CSI 1 t de-iconifies.  iTerm2, xterm, and Terminal.app honor these;
+    // the Pi's fbcon ignores them (it's already exactly sized by the
+    // framebuffer driver).
+    printf("\033[3;0;0t\033[1t\033[8;30;80t");
     fflush(stdout);
+
+    // Honour the user's UTF-8 locale so ncurses can paint the upper-half-
+    // block (▀, U+2580) sprite glyph used by SpriteRender.  Without this,
+    // multibyte sequences get split per-byte and the sprites look like
+    // garbled box-drawing on UTF-8 terminals.
+    setlocale(LC_ALL, "");
 
     // ncurses
     initscr();
@@ -100,27 +114,108 @@ bool TerminalUI::init() {
 
     if (has_colors()) {
         start_color();
-        use_default_colors();
-        init_pair(1, COLOR_GREEN,   -1);  // HP high
-        init_pair(2, COLOR_YELLOW,  -1);  // HP mid
-        init_pair(3, COLOR_RED,     -1);  // HP low / selected
-        init_pair(4, COLOR_CYAN,    -1);  // header / tab active
-        init_pair(5, COLOR_WHITE,   -1);  // normal text
-        init_pair(6, COLOR_MAGENTA, -1);  // event / achievement
+        // GBC DMG green-scale palette: every window paints ink on paper, so
+        // the entire terminal reads like a 1989 Game Boy screen.  Per-species
+        // GBC palettes (yellow Pikachu, orange Charizard, etc.) get swapped
+        // in at sprite-render time over a separate pool of color slots.
+        //
+        // The 4 DMG shades are the same values pikachu2/config2.h uses, in
+        // RGB565 form — converted here to ncurses init_color's 0-1000 scale.
+        //   #9bbc0f → R=608  G=737  B=59   (paper, lightest)
+        //   #8bac0f → R=545  G=674  B=59   (light shade)
+        //   #306232 → R=188  G=384  B=188  (dark shade)
+        //   #0f380f → R=59   G=219  B=59   (ink, darkest)
+        // The DMG green slots normally live at 16-19 (clear of the 16 ANSI
+        // colors a 256-colour terminal reserves).  But the Pi's framebuffer
+        // console reports only COLORS=8 — yet it CAN repaint its palette
+        // (can_change_color()==1).  So on a small palette we redefine four of
+        // the low ANSI slots instead.  Everything downstream goes through
+        // init_pair(), so the rest of the UI is identical either way; only the
+        // four slot indices change.  This is what makes the Pi render the real
+        // Game Boy green instead of the generic ANSI fallback below.
+        // Pentest Pikachu renders entirely in the SDL window, so it skips the
+        // GB-green palette — that keeps the ncurses console plain black, with
+        // no green-terminal flash before/after the battle.
+        if (!pentestMode_ && can_change_color() && COLORS >= 8) {
+            int paper, light, dark, ink;
+            if (COLORS >= 20) {
+                paper = GB_PAPER_; light = GB_LIGHT_; dark = GB_DARK_; ink = GB_INK_;
+            } else {
+                // Map onto low slots: white→paper (lightest), black→ink
+                // (darkest), so even default/un-paired cells read as GB green.
+                paper = COLOR_WHITE; light = COLOR_CYAN;
+                dark  = COLOR_GREEN; ink   = COLOR_BLACK;
+            }
+            init_color(paper, 608, 737,  59);
+            init_color(light, 545, 674,  59);
+            init_color(dark,  188, 384, 188);
+            init_color(ink,    59, 219,  59);
+            init_pair(1, ink,   paper);  // HP high (default ink/paper)
+            init_pair(2, dark,  paper);  // HP mid
+            // Pair 3 stays ink/paper so the `A_REVERSE | COLOR_PAIR(3)`
+            // selection-cursor pattern used throughout the UI actually
+            // inverts to paper-on-ink.  If 3 were pre-inverted, A_REVERSE
+            // would cancel back out and the selection would be invisible.
+            init_pair(3, ink,   paper);  // selection / HP low (A_REVERSE flips)
+            init_pair(4, dark,  paper);  // header / tab active
+            init_pair(5, ink,   paper);  // normal text
+            init_pair(6, light, ink);    // achievement / event (light on ink)
+            init_pair(7, ink,   paper);  // (was battle white card — alias to default)
+            gbColorsActive_ = true;
+        } else {
+            // Fallback for terminals without init_color() — use the GREEN
+            // family which renders close-ish on a 16-color terminal.
+            use_default_colors();
+            init_pair(1, COLOR_GREEN,  -1);
+            init_pair(2, COLOR_YELLOW, -1);
+            init_pair(3, COLOR_RED,    -1);
+            init_pair(4, COLOR_CYAN,   -1);
+            init_pair(5, COLOR_WHITE,  -1);
+            init_pair(6, COLOR_MAGENTA,-1);
+            init_pair(7, COLOR_BLACK,  COLOR_WHITE);
+        }
+
+        // Reserve colour slots 32..39 and pairs 100..131 for per-species
+        // GBC sprite palettes (pool A = foe, pool B = player).  Failure is
+        // not fatal — drawSprite() bails silently if init() returned false.
+        SpriteRender::init();
     }
 
-    int infoRows = rows_ - STATUS_ROWS - MENU_ROWS;
+    // Initial layout sized for the menu screen (the boot screen) — the
+    // FIGHT-box variant is applied on demand by applyMenuRowsForScreen().
+    menuRows_    = MENU_ROWS_DEFAULT;
+    int infoRows = rows_ - STATUS_ROWS - menuRows_;
 
     winStatus_ = newwin(STATUS_ROWS, cols_, 0,                  0);
     winInfo_   = newwin(infoRows,   cols_, STATUS_ROWS,         0);
-    winMenu_   = newwin(MENU_ROWS,  cols_, rows_ - MENU_ROWS,   0);
+    winMenu_   = newwin(menuRows_,  cols_, rows_ - menuRows_,   0);
+
+    // Paint every window paper-green so erases reset to the GB look rather
+    // than to the host terminal's default.  stdscr too so resize/clear
+    // operations don't expose black underneath.
+    if (gbColorsActive_) {
+        chtype paper = COLOR_PAIR(5);
+        wbkgd(stdscr,    paper);
+        wbkgd(winStatus_, paper);
+        wbkgd(winInfo_,   paper);
+        wbkgd(winMenu_,   paper);
+    }
+
+    // Pentest ROM: blank the console to black up front so there's no green (or
+    // any) terminal visible in the moment before the SDL battle window opens.
+    if (pentestMode_) {
+        werase(stdscr);
+        wrefresh(stdscr);
+    }
 
     // Must enable keypad + nodelay on the window we actually call wgetch() on
     if (winMenu_) {
         keypad(winMenu_, TRUE);
         nodelay(winMenu_, TRUE);
     }
-    scrollok(winInfo_, TRUE);
+    // No scrollok — we manually paint every cell, and the auto-scroll
+    // triggered when addch hits the bottom-right corner of a window was
+    // shifting battle-screen box borders up by one row.
 
     // Seed RNG for battle
     srand((unsigned)time(nullptr));
@@ -131,8 +226,28 @@ bool TerminalUI::init() {
 }
 
 void TerminalUI::shutdown() {
+    // Push any pending battle XP to the daemon and ask it to writeback
+    // the .sav file before we drop the IPC connection.  Without this, XP
+    // earned in a battle that was never closed out via BATTLE_END would
+    // vanish on Ctrl+C / Q / SIGTERM.
+    // Never write pentest XP back to the real SAV — the pentest Pikachu is a
+    // standalone arcade character, not the player's party.
+    if (!pentestMode_ && ipc_.isConnected()) {
+        flushBattleXpToDaemon();
+        // Give the daemon ~250ms to receive + acknowledge before close().
+        for (int i = 0; i < 25; i++) {
+            ipc_.poll();
+            usleep(10000);
+        }
+    }
     ipc_.disconnect();
     input_.close();
+    // Pentest ROM: blank the console to black before tearing down ncurses so no
+    // green terminal flashes on the way back to the MonsterMesh system menu.
+    if (pentestMode_ && !isendwin()) {
+        werase(stdscr);
+        wrefresh(stdscr);
+    }
     if (winStatus_) { delwin(winStatus_); winStatus_ = nullptr; }
     if (winInfo_)   { delwin(winInfo_);   winInfo_   = nullptr; }
     if (winMenu_)   { delwin(winMenu_);   winMenu_   = nullptr; }
@@ -140,6 +255,12 @@ void TerminalUI::shutdown() {
 }
 
 void TerminalUI::run() {
+    // Pentest Pikachu ROM: jump straight into the battle screen on boot.
+    if (pentestMode_ && !pentestStarted_) {
+        pentestStarted_ = true;
+        startPentestBattle();
+    }
+
     while (!shouldQuit_) {
         // IPC reconnect
         if (!ipc_.isConnected()) {
@@ -192,15 +313,108 @@ void TerminalUI::run() {
             }
         }
 
+        // Keep the SDL battle window responsive even when ncurses is busy.
+        // pumpEvents is cheap and a no-op when the window isn't open; we
+        // need it every frame so the OS doesn't mark the window as hung
+        // and the user can close it via window controls if they wish.
+        battleWindow_.pumpEvents();
+
+        // Pentest Pikachu: the fight plays itself — auto-pick a move each beat.
+        if (inPentestBattle_) pentestAutoTick();
+
         render();
         usleep(16666);
     }
 }
 
+// Auto-battle driver for the Pentest Pikachu ROM.  Every ~900 ms it lets the
+// engine's CPU picker choose a move for BOTH sides and runs the turn, so the
+// whole fight is hands-off.  Stops as soon as the battle ends (runTurnWithXp
+// flips screen_ to BATTLE_END).
+void TerminalUI::pentestAutoTick() {
+    // Freeze the auto-fight + auto-advance while the status overlay is up.
+    if (pentestShowStatus_) return;
+    uint64_t now = millis();
+
+    // Battle over: there's no "YOU WIN" screen for the pentest ROM — you can
+    // read the result straight off the frozen battle frame.  Keep that frame
+    // on screen for a couple of seconds, then chain into the next scan.
+    if (battleResult_ != Gen1BattleEngine::Result::ONGOING) {
+        if (pentestEndMs_ == 0) pentestEndMs_ = now;   // begin the linger
+        screen_ = Screen::BATTLE;                       // suppress BATTLE_END
+        if (now - pentestEndMs_ >= PENTEST_END_MS) startPentestBattle();
+        return;
+    }
+
+    // Ongoing: auto-pick a move for both sides on a steady beat.
+    if (!inBattle_ || screen_ != Screen::BATTLE) return;
+    if (now - lastPentestTurnMs_ < PENTEST_TURN_MS) return;
+    lastPentestTurnMs_ = now;
+
+    switchMode_ = false;
+    uint8_t pa, pi, ca, ci;
+    engine_.cpuPickAction(localSide_,     pa, pi);   // auto-pick our move
+    engine_.submitAction(localSide_,      pa, pi);
+    engine_.cpuPickAction(1 - localSide_, ca, ci);   // foe's move
+    engine_.submitAction(1 - localSide_,  ca, ci);
+    runTurnWithXp();
+
+    // runTurnWithXp() flips screen_ to BATTLE_END on the finishing blow; undo
+    // it immediately so the win screen never shows, and start the linger.
+    if (battleResult_ != Gen1BattleEngine::Result::ONGOING) {
+        screen_       = Screen::BATTLE;
+        pentestEndMs_ = now;
+    }
+}
+
 // ── Rendering dispatch ────────────────────────────────────────────────────────
+
+// Battle screens want a compact 5-row FIGHT box; menu/list screens want a
+// taller (10-row) box so 5 selectable items fit between tab header and
+// hint.  Resize on demand — cheap, only fires when screen_ flips between
+// the two groups.
+void TerminalUI::applyMenuRowsForScreen() {
+    bool battle = (screen_ == Screen::BATTLE ||
+                   screen_ == Screen::BATTLE_END ||
+                   screen_ == Screen::PVP_BATTLE ||
+                   screen_ == Screen::PVP_BATTLE_END);
+    int want = battle ? MENU_ROWS_BATTLE : MENU_ROWS_DEFAULT;
+    if (want == menuRows_) return;
+    menuRows_ = want;
+    int infoRows = rows_ - STATUS_ROWS - menuRows_;
+    // Repaint stdscr first so old border cells in the now-shrunk-or-grown
+    // region don't bleed through after the next refresh.
+    werase(stdscr);
+    wnoutrefresh(stdscr);
+    wresize(winInfo_,  infoRows, cols_);
+    wresize(winMenu_,  menuRows_, cols_);
+    mvwin(winMenu_, rows_ - menuRows_, 0);
+    werase(winInfo_);
+    werase(winMenu_);
+}
 
 void TerminalUI::render() {
     if (!winStatus_ || !winInfo_ || !winMenu_) return;
+
+    // Pentest Pikachu renders ONLY through the SDL window — no ncurses content
+    // is painted, so the green terminal never flashes before/after the battle.
+    if (pentestMode_) {
+        if (!battleWindow_.isOpen()) battleWindow_.open();
+        if (battleWindow_.isOpen()) {
+            syncBattleWindow();
+            battleWindow_.render();
+        }
+        return;
+    }
+
+    // Resize the info / menu split per screen so battle gets a tight
+    // FIGHT box and menu screens get room for ~5 item rows.
+    applyMenuRowsForScreen();
+
+    // Per-screen background swap is no-op now that every screen runs on
+    // the GBC green palette — wbkgd() was set once in startup() and the
+    // werase() in each render fn picks it up.  The white-card BATTLE
+    // override is intentionally retired.
 
     renderStatusBar();
 
@@ -219,6 +433,27 @@ void TerminalUI::render() {
         case Screen::CHALLENGE:     renderChallenge();                       break;
     }
 
+    // SDL2 battle window lifecycle.  Open/sync while we're on a battle screen,
+    // close as soon as we leave.  The ncurses sprite renderer stays in place
+    // — SDL2 adds a second window, doesn't replace.
+    bool battleScreen = (screen_ == Screen::BATTLE ||
+                         screen_ == Screen::BATTLE_END ||
+                         screen_ == Screen::PVP_BATTLE ||
+                         screen_ == Screen::PVP_BATTLE_END);
+    if (battleScreen) {
+        if (!battleWindow_.isOpen()) battleWindow_.open();
+        if (battleWindow_.isOpen()) {
+            if (screen_ == Screen::BATTLE || screen_ == Screen::BATTLE_END) {
+                syncBattleWindow();
+            } else {
+                syncPvpBattleWindow();
+            }
+            battleWindow_.render();
+        }
+    } else if (battleWindow_.isOpen()) {
+        battleWindow_.close();
+    }
+
     wrefresh(winStatus_);
     wrefresh(winInfo_);
     wrefresh(winMenu_);
@@ -231,7 +466,7 @@ void TerminalUI::renderStatusBar() {
     wattron(winStatus_, A_REVERSE);
 
     // Build status string
-    char buf[128];
+    char buf[160];
     const char *leadName = "---";
     int leadLv = 0;
     if (hasParty_ && partyCount_ > 0) {
@@ -240,8 +475,18 @@ void TerminalUI::renderStatusBar() {
         leadLv   = lead.level;
     }
 
-    snprintf(buf, sizeof(buf), " MonsterMesh | Nbrs:%-2d | %-10s Lv%d",
-             neighborCount_, leadName, leadLv);
+    // Header reads " GPI / RED | Nbrs:N | LEAD Lv## " — shortName comes
+    // from the Meshtastic radio identity, trainerName from the SAV's Gen 1
+    // player-name field.  Both fall back to "?" until the daemon's
+    // NODE_INFO push lands.  ASCII fallback (not em dash "—") because the
+    // GPI's framebuffer console runs with TERM=linux which doesn't decode
+    // UTF-8 — em dash would render as raw 0xE2 0x80 0x94 bytes ("M-b^@*T"
+    // when cat -v'd).
+    const char *sname = localShortName_[0]   ? localShortName_   : "?";
+    const char *tname = localTrainerName_[0] ? localTrainerName_ : "?";
+    snprintf(buf, sizeof(buf),
+             " %s / %s | Nbrs:%-2d | %-10s Lv%d",
+             sname, tname, neighborCount_, leadName, leadLv);
     buf[cols_-1] = '\0';
 
     // Right-align daemon connection status
@@ -305,24 +550,36 @@ void TerminalUI::renderInfoPanel() {
 
 void TerminalUI::renderMenu() {
     werase(winMenu_);
+    // ncurses ACS box-drawing.  With CURSES_NEED_WIDE in CMakeLists.txt we
+    // link against ncursesw, which emits UTF-8 sequences for ACS_* on a
+    // UTF-8 locale (LANG=C.UTF-8 set by launch.sh).  Renders as ┌─┐│└┘.
     box(winMenu_, 0, 0);
 
-    // Tab headers
+    // Tab headers use the exact same colours as the vertical item list below:
+    // the active tab gets A_REVERSE | COLOR_PAIR(3) (paper-on-ink chip, like a
+    // selected list row) and inactive tabs get COLOR_PAIR(5) (normal ink-on-
+    // paper text).  No A_BOLD — on the 8-colour framebuffer console bold
+    // brightens the foreground to white, which is what made the tab text pop
+    // out lighter than everything else.
     int tabW = (cols_ - 2) / TAB_COUNT;
     for (int t = 0; t < TAB_COUNT; t++) {
         int x = 1 + t * tabW;
-        if (t == activeTab_) wattron(winMenu_, COLOR_PAIR(4) | A_REVERSE | A_BOLD);
-        else                 wattron(winMenu_, A_DIM);
+        if (t == activeTab_) wattron(winMenu_, A_REVERSE | COLOR_PAIR(3));
+        else                 wattron(winMenu_, COLOR_PAIR(5));
         mvwprintw(winMenu_, 1, x, " %-*s", tabW - 1, TAB_NAMES[t]);
-        wattroff(winMenu_, COLOR_PAIR(4) | A_REVERSE | A_BOLD | A_DIM);
+        if (t == activeTab_) wattroff(winMenu_, A_REVERSE | COLOR_PAIR(3));
+        else                 wattroff(winMenu_, COLOR_PAIR(5));
     }
 
+    // ACS_HLINE under ncursesw → renders as ─ on a UTF-8 console.
     mvwhline(winMenu_, 2, 1, ACS_HLINE, cols_ - 2);
 
-    // Items - max rows = MENU_ROWS - 5 (borders + tab row + separator + hint)
+    // Items - max rows = menuRows_ - 5 (borders + tab row + separator + hint).
+    // On menu screens menuRows_ is MENU_ROWS_DEFAULT (10) → 5 item rows.
     const char **items = tabItems(activeTab_);
     int count = tabItemCount(activeTab_);
-    int maxRows = MENU_ROWS - 5;
+    int maxRows = menuRows_ - 5;
+    if (maxRows < 0) maxRows = 0;
     for (int i = 0; i < count && i < maxRows; i++) {
         if (i == activeItem_) wattron(winMenu_, A_REVERSE | COLOR_PAIR(3));
         mvwprintw(winMenu_, 3 + i, 2, "%-*s", cols_ - 4, items[i]);
@@ -330,7 +587,7 @@ void TerminalUI::renderMenu() {
     }
 
     // Controls hint
-    mvwprintw(winMenu_, MENU_ROWS - 2, 1, "A/D:tab  W/S:move  K:select  L:back");
+    // (no on-screen key legend — the GPI Case has physical buttons)
 }
 
 // ── Party detail ──────────────────────────────────────────────────────────────
@@ -350,33 +607,33 @@ void TerminalUI::renderParty() {
     int row      = 0;
     int scroll   = infoScroll_;
 
+    // 80-col terminal lets us pack everything onto one line per Pokémon.
+    // Layout:
+    //   "1. MEWTWO       Lv71    +1234 XP    3h in care"
+    //   slot(3) name(12) level(7) xp(13) hours(12) = 47 cols, leaves 33 free
     for (int i = 0; i < partyCount_; i++) {
         const PartySlot &s = partySlots_[i];
-
-        // Header: slot number, nickname (or species name), level
         const char *displayName = s.nick[0] ? s.nick : (s.name[0] ? s.name : "???");
+
         if (row - scroll >= 0 && row - scroll < infoRows) {
+            // Slot + name + level — bold, default ink.
             wattron(winInfo_, A_BOLD);
             mvwprintw(winInfo_, row - scroll, 0,
-                      "%d. %-10s  Lv%d", i + 1, displayName, s.level);
+                      "%d. %-12s  Lv%-3d",
+                      i + 1, displayName, s.level);
             wattroff(winInfo_, A_BOLD);
-        }
-        row++;
-
-        // XP gained in daycare
-        if (row - scroll >= 0 && row - scroll < infoRows) {
+            // Daycare XP + hours — green so it reads as an accent, doesn't
+            // compete with the name/level for attention.
             wattron(winInfo_, COLOR_PAIR(1));
-            mvwprintw(winInfo_, row - scroll, 3,
-                      "+%u daycare XP  (%uh in care)", s.xpGained, s.hours);
+            mvwprintw(winInfo_, row - scroll, 26,
+                      "+%-5u XP   %2uh in care",
+                      s.xpGained, s.hours);
             wattroff(winInfo_, COLOR_PAIR(1));
         }
         row++;
-
-        // Blank separator
-        row++;
     }
 
-    mvwprintw(winMenu_, 1, 1, "[W/S] Scroll   [L] Back");
+    // (no on-screen key legend — physical GPI buttons)
 }
 
 // ── Neighbor list ─────────────────────────────────────────────────────────────
@@ -390,14 +647,24 @@ void TerminalUI::renderNeighbors() {
         mvwprintw(winInfo_, 3, 2, "Send a Beacon to attract trainers.");
     } else {
         int infoRows = getmaxy(winInfo_);
+        uint64_t now = millis();
         for (int i = 0; i < neighborDisplayCount_ && i * 2 < infoRows - 1; i++) {
             const NeighborEntry &n = neighbors_[i];
             bool sel = (i == neighborSel_);
+            bool fresh = (n.firstSeenMs != 0 &&
+                          now - n.firstSeenMs < NEW_NEIGHBOR_HIGHLIGHT_MS);
             if (sel) wattron(winInfo_, A_REVERSE | COLOR_PAIR(3));
-            wattron(winInfo_, A_BOLD);
-            mvwprintw(winInfo_, i * 2, 0, " %s (%s)%s",
-                      n.shortName, n.gameName, sel ? " <" : "  ");
+            // Leading "*" marker + cyan-bold short-name when this neighbor
+            // is still inside the new-arrival highlight window.
+            const char *marker = fresh ? "*" : " ";
+            mvwprintw(winInfo_, i * 2, 0, "%s", marker);
+            if (fresh) wattron(winInfo_, COLOR_PAIR(4) | A_BOLD);
+            else       wattron(winInfo_, A_BOLD);
+            mvwprintw(winInfo_, i * 2, 1, " %s", n.shortName);
+            if (fresh) wattroff(winInfo_, COLOR_PAIR(4));
             wattroff(winInfo_, A_BOLD);
+            mvwprintw(winInfo_, i * 2, 2 + (int)strlen(n.shortName),
+                      " (%s)%s", n.gameName, sel ? " <" : "  ");
             if (sel) wattroff(winInfo_, A_REVERSE | COLOR_PAIR(3));
             if (n.partyCount > 0)
                 mvwprintw(winInfo_, i * 2 + 1, 3, "%s Lv%d  (%d in party)",
@@ -405,7 +672,7 @@ void TerminalUI::renderNeighbors() {
         }
     }
 
-    mvwprintw(winMenu_, 1, 1, "[W/S] Select  [K] Challenge  [L] Back");
+    // (no on-screen key legend — physical GPI buttons)
 }
 
 // ── Daycare event detail ──────────────────────────────────────────────────────
@@ -466,10 +733,10 @@ void TerminalUI::renderHelp() {
         "",
         "D-pad LEFT/RIGHT  Switch tab (Mesh/Local/System)",
         "D-pad UP/DOWN     Move between items",
-        "A (Z key)         Select / confirm",
-        "B (X key)         Back / cancel",
-        "Start (Tab)       Open menu from anywhere",
-        "Select (Space)    Toggle this help",
+        "A                 Select / confirm",
+        "B                 Back / cancel",
+        "Start             Open menu from anywhere",
+        "Select            Toggle this help",
         "",
         "=== Tabs ===",
         "",
@@ -493,7 +760,7 @@ void TerminalUI::renderHelp() {
             wattroff(winInfo_, A_BOLD | COLOR_PAIR(4));
     }
 
-    mvwprintw(winMenu_, 1, 1, "[B] Back    [Sel] Close help");
+    // (no on-screen key legend — physical GPI buttons)
 }
 
 // ── Confirm quit ──────────────────────────────────────────────────────────────
@@ -546,14 +813,15 @@ void TerminalUI::renderBattle() {
     const Gen1BattleEngine::BattlePoke  &em = ep.mons[ep.active];
 
     int infoRows = getmaxy(winInfo_);
+    int infoCols = getmaxx(winInfo_);
 
-    // Gym gauntlet header (only shown while in a gym run)
+    // ── Optional gauntlet header above the boxes ─────────────────────────
     int row = 0;
     if (inGymBattle_) {
         const LordGym *g = lordGym(pendingGymIdx_);
         if (g) {
-            char hdr[64];
-            int round = pendingTrainerIdx_ + 1;   // 1-based for display
+            char hdr[80];
+            int round = pendingTrainerIdx_ + 1;
             const char *who = (pendingTrainerIdx_ >= LORD_GYM_LEADER_INDEX)
                                 ? g->leaderName
                                 : g->trainers[pendingTrainerIdx_].name;
@@ -561,60 +829,166 @@ void TerminalUI::renderBattle() {
                      "%s Gym  Round %d/5  vs %s",
                      g->city, round, who);
             wattron(winInfo_, A_BOLD | COLOR_PAIR(4));
-            mvwprintw(winInfo_, row, 0, "%-*.*s", cols_, cols_, hdr);
+            mvwprintw(winInfo_, row, 0, "%-*.*s", infoCols, infoCols, hdr);
             wattroff(winInfo_, A_BOLD | COLOR_PAIR(4));
         }
         row++;
+    } else if (inE4Battle_) {
+        const LordE4Member *m = lordE4Member(pendingE4Idx_);
+        if (m) {
+            char hdr[80];
+            snprintf(hdr, sizeof(hdr),
+                     "Indigo Plateau  %d/%d  %s %s",
+                     pendingE4Idx_ + 1, LORD_E4_COUNT, m->title, m->name);
+            wattron(winInfo_, A_BOLD | COLOR_PAIR(4));
+            mvwprintw(winInfo_, row, 0, "%-*.*s", infoCols, infoCols, hdr);
+            wattroff(winInfo_, A_BOLD | COLOR_PAIR(4));
+        }
+        row++;
+    } else if (inPentestBattle_) {
+        char hdr[80];
+        snprintf(hdr, sizeof(hdr), "PENTEST PIKACHU  >  %s", pentestSsid_);
+        wattron(winInfo_, A_BOLD | COLOR_PAIR(4));
+        mvwprintw(winInfo_, row, 0, "%-*.*s", infoCols, infoCols, hdr);
+        wattroff(winInfo_, A_BOLD | COLOR_PAIR(4));
+        row++;
     }
 
-    // Player HP bar
-    drawHpBar(winInfo_, row++, 0, cols_, pm.hp, pm.maxHp, pm.nickname);
-    // Enemy HP bar
-    drawHpBar(winInfo_, row++, 0, cols_, em.hp, em.maxHp, em.nickname);
+    // ── Gen 1/2 inspired layout ──────────────────────────────────────────
+    //  ┌─ FOE ────────────────┐ ┌─ FOE SPRITE ─────────────────┐
+    //  │ ONIX L14   HP:...    │ │                              │
+    //  └──────────────────────┘ │      <species name>          │
+    //                            │                              │
+    //  ┌─ YOU SPRITE ─────────┐  │                              │
+    //  │                      │  └──────────────────────────────┘
+    //  │   <species name>     │  ┌─ YOU ────────────────────────┐
+    //  │                      │  │ MEWTWO L70  HP:...           │
+    //  └──────────────────────┘  └──────────────────────────────┘
+    //  ┌─ MESSAGES ──────────────────────────────────────────────┐
+    //  │ ... battle log ...                                       │
+    //  └──────────────────────────────────────────────────────────┘
+    int half        = infoCols / 2;
+    int infoBoxW    = half - 1;            // info boxes: half width minus a gutter
+    int spriteW     = infoCols - half;     // sprite boxes: other half
+    int leftX       = 0;
+    int rightX      = half;
+    int statusBoxH  = 3;
+    int spriteBoxH  = 8;
 
-    // Battle log starts right below the HP bars (offset by the optional
-    // gauntlet header)
-    int logStart = row;
-    int logEnd   = logStart + BATTLE_LOG_LINES;
-    int logOff   = (int)battleLog_.size() - BATTLE_LOG_LINES;
+    // FOE info top-left, FOE sprite top-right
+    drawStatusBox(winInfo_, row, leftX, infoBoxW, /*isFoe=*/true, em);
+    drawBox(winInfo_, row, rightX, spriteBoxH, spriteW, "FOE SPRITE");
+    {
+        // Real Gen 2 front sprite, downscaled by /4 so 56×56 fits the
+        // 8-row box (14 cols × 7 cell rows of upper-half-block art).  The
+        // species's authentic GBC palette is installed into the foe colour
+        // pool on the fly by SpriteRender::drawSprite().
+        int sW, sH;
+        SpriteRender::cellSize(/*isBack=*/false, /*scaleDiv=*/4, &sW, &sH);
+        int sx = rightX + 1 + (spriteW - 2 - sW) / 2;
+        int sy = row + 1 + (spriteBoxH - 2 - sH) / 2;
+        if (sx < rightX + 1) sx = rightX + 1;
+        if (sy < row + 1)    sy = row + 1;
+        SpriteRender::drawSprite(winInfo_, sy, sx, em.species, /*isBack=*/false,
+                                 /*scaleDiv=*/4, /*slot=*/0, /*bgPair=*/5);
+    }
+
+    // YOU sprite bottom-left, YOU info bottom-right
+    int botRow = row + spriteBoxH;
+    drawBox(winInfo_, botRow, leftX, spriteBoxH, infoBoxW, "YOU SPRITE");
+    {
+        // Real Gen 2 back sprite (48×48), /4 scale → 12 cols × 6 cell rows.
+        int sW, sH;
+        SpriteRender::cellSize(/*isBack=*/true, /*scaleDiv=*/4, &sW, &sH);
+        int sx = leftX + 1 + (infoBoxW - 2 - sW) / 2;
+        int sy = botRow + 1 + (spriteBoxH - 2 - sH) / 2;
+        if (sx < leftX + 1) sx = leftX + 1;
+        if (sy < botRow + 1) sy = botRow + 1;
+        SpriteRender::drawSprite(winInfo_, sy, sx, pm.species, /*isBack=*/true,
+                                 /*scaleDiv=*/4, /*slot=*/1, /*bgPair=*/5);
+    }
+    drawStatusBox(winInfo_, botRow + spriteBoxH - statusBoxH, rightX,
+                  spriteW, /*isFoe=*/false, pm);
+
+    // ── Message log: full-width box, fills remaining info-panel rows ────
+    int logTop    = botRow + spriteBoxH;
+    int logBoxH   = infoRows - logTop;
+    if (logBoxH < 3) logBoxH = 3;
+    drawBox(winInfo_, logTop, 0, logBoxH, infoCols, "MESSAGES");
+
+    int logLines  = logBoxH - 2;        // inside the borders
+    int logOff    = (int)battleLog_.size() - logLines;
     if (logOff < 0) logOff = 0;
-    for (int i = 0; i < BATTLE_LOG_LINES; i++) {
+    for (int i = 0; i < logLines; i++) {
         int idx = logOff + i;
-        if (idx < (int)battleLog_.size() && logStart + i < infoRows)
-            mvwprintw(winInfo_, logStart + i, 1, "%s", battleLog_[idx].c_str());
+        if (idx < (int)battleLog_.size()) {
+            std::string s = battleLog_[idx];
+            if ((int)s.size() > infoCols - 4) s.resize(infoCols - 4);
+            mvwprintw(winInfo_, logTop + 1 + i, 2, "%s", s.c_str());
+        }
     }
 
-    // Move selector or switch list
-    int menuRow = 0;
+    // ── Menu region: boxed move list with PP, or boxed switch list ──────
+    int menuCols  = getmaxx(winMenu_);
+
+    // Pentest Pikachu: no move menu — a text readout of the WiFi target and
+    // the vulnerability being exploited.  This IS the pentest "fight" UI.
+    if (inPentestBattle_) {
+        drawBox(winMenu_, 0, 0, menuRows_, menuCols, "TARGET");
+        char l1[96], l2[96];
+        snprintf(l1, sizeof(l1), "SSID: %s", pentestSsid_);
+        snprintf(l2, sizeof(l2), "Vuln: %s", pentestVuln_);
+        mvwprintw(winMenu_, 1, 2, "%-*.*s", menuCols - 4, menuCols - 4, l1);
+        if (menuRows_ > 3)
+            mvwprintw(winMenu_, 2, 2, "%-*.*s", menuCols - 4, menuCols - 4, l2);
+        return;
+    }
+
+    // Switch list needs an extra inner row to fit 3 rows of party slots.
+    int menuBoxH  = switchMode_ ? menuRows_ : menuRows_ - 1;
+    drawBox(winMenu_, 0, 0, menuBoxH, menuCols,
+            switchMode_ ? "SWITCH" : "FIGHT");
+
     if (!switchMode_) {
-        mvwprintw(winMenu_, menuRow++, 1, "FIGHT:");
+        // 4 moves in a 2x2 grid so we use the full menu width
+        int colW = (menuCols - 4) / 2;
         for (int i = 0; i < 4; i++) {
             uint8_t mv = pm.moves[i];
-            if (mv == 0) break;
+            int cy = 1 + (i / 2);
+            int cx = 2 + (i % 2) * colW;
+            if (mv == 0) {
+                mvwprintw(winMenu_, cy, cx, "  ---");
+                continue;
+            }
             const char *name = moveName(mv);
             uint8_t pp_cur = pm.pp[i];
             const Gen1MoveData *md = gen1Move(mv);
             uint8_t pp_max = md ? md->pp : 0;
+            const char *cursor = (i == moveSel_) ? ">" : " ";
             if (i == moveSel_) wattron(winMenu_, A_REVERSE | COLOR_PAIR(3));
-            mvwprintw(winMenu_, menuRow++, 2, "%-14s PP:%2d/%-2d", name, pp_cur, pp_max);
+            mvwprintw(winMenu_, cy, cx, "%s %-12s PP%2d/%-2d",
+                      cursor, name, pp_cur, pp_max);
             if (i == moveSel_) wattroff(winMenu_, A_REVERSE | COLOR_PAIR(3));
         }
-        mvwprintw(winMenu_, MENU_ROWS - 2, 1, "[A]Use [B]Switch [Start]Flee");
+        // (no on-screen key legend — physical GPI buttons)
     } else {
-        mvwprintw(winMenu_, menuRow++, 1, "SWITCH TO:");
+        // Switch list inside the box
+        int colW = (menuCols - 4) / 2;
         for (int i = 0; i < (int)pp.count; i++) {
             const Gen1BattleEngine::BattlePoke &s = pp.mons[i];
             bool fainted = (s.hp == 0);
             bool active  = (i == (int)pp.active);
+            int cy = 1 + (i / 2);
+            int cx = 2 + (i % 2) * colW;
+            const char *cursor = (i == switchSel_) ? ">" : " ";
             if (i == switchSel_) wattron(winMenu_, A_REVERSE);
             if (fainted || active) wattron(winMenu_, A_DIM);
-            mvwprintw(winMenu_, menuRow++, 2, "%-10s Lv%d HP%d",
-                      s.nickname, s.level, s.hp);
+            mvwprintw(winMenu_, cy, cx, "%s %-10s L%-3d HP%3d",
+                      cursor, s.nickname, s.level, s.hp);
             if (fainted || active) wattroff(winMenu_, A_DIM);
             if (i == switchSel_) wattroff(winMenu_, A_REVERSE);
-            if (menuRow >= MENU_ROWS - 2) break;
         }
-        mvwprintw(winMenu_, MENU_ROWS - 2, 1, "[A]Switch [B]Back to moves");
+        // (no on-screen key legend — physical GPI buttons)
     }
 }
 
@@ -656,13 +1030,71 @@ void TerminalUI::renderBattleEnd() {
 
 // ── HP bar ────────────────────────────────────────────────────────────────────
 
+// Draw a single-line bordered box at (y,x) with given height/width and an
+// optional title chip baked into the top edge.  Uses ncurses ACS chars so it
+// renders correctly on any terminal that speaks line drawing (which is
+// every modern xterm-compatible one, plus the Linux fbcon).
+void TerminalUI::drawBox(WINDOW *w, int y, int x, int h, int w_, const char *title) {
+    if (h < 2 || w_ < 2) return;
+    // Corners
+    mvwaddch(w, y,           x,            ACS_ULCORNER);
+    mvwaddch(w, y,           x + w_ - 1,   ACS_URCORNER);
+    mvwaddch(w, y + h - 1,   x,            ACS_LLCORNER);
+    mvwaddch(w, y + h - 1,   x + w_ - 1,   ACS_LRCORNER);
+    // Edges
+    mvwhline(w, y,           x + 1,        ACS_HLINE, w_ - 2);
+    mvwhline(w, y + h - 1,   x + 1,        ACS_HLINE, w_ - 2);
+    mvwvline(w, y + 1,       x,            ACS_VLINE, h - 2);
+    mvwvline(w, y + 1,       x + w_ - 1,   ACS_VLINE, h - 2);
+    // Title chip — bold against whatever the window's current background
+    // is.  No color pair switch so it stays readable on both the default
+    // dark terminal and the white battle-screen card.
+    if (title && *title) {
+        wattron(w, A_BOLD);
+        mvwprintw(w, y, x + 2, " %s ", title);
+        wattroff(w, A_BOLD);
+    }
+}
+
+// Foe (top) and player (bottom) status boxes: 3 rows tall, inline HP bar.
+//   ┌─ FOE ────────────────────────────────┐
+//   │ ONIX L14   HP:█████░░░░░░░░  35/124   │
+//   └───────────────────────────────────────┘
+void TerminalUI::drawStatusBox(WINDOW *w, int y, int x, int box_w, bool isFoe,
+                                const Gen1BattleEngine::BattlePoke &mon) {
+    drawBox(w, y, x, 3, box_w, isFoe ? "FOE" : "YOU");
+
+    // Inside line: " NAME L## HP:[bar] hp/max "
+    char buf[160];
+    snprintf(buf, sizeof(buf), "%s L%-3d", mon.nickname, (int)mon.level);
+    int leftLen = (int)strlen(buf);
+    int hpStrW = 12;            // " 999/999" room + " HP:"
+    int barW   = box_w - 4 - leftLen - hpStrW;
+    if (barW < 4) barW = 4;
+
+    // Color the bar by HP percentage
+    int filled = (mon.maxHp > 0) ? (barW * mon.hp) / mon.maxHp : 0;
+    double pct = (mon.maxHp > 0) ? (double)mon.hp / mon.maxHp : 0.0;
+    int colorPair = (pct > 0.5) ? 1 : (pct > 0.25) ? 2 : 3;
+
+    mvwprintw(w, y + 1, x + 2, "%s HP:", buf);
+    int barX = x + 2 + leftLen + 4;   // after "NAME L##" + " HP:"
+    wattron(w, COLOR_PAIR(colorPair));
+    for (int i = 0; i < barW; i++)
+        mvwaddch(w, y + 1, barX + i, i < filled ? ACS_BLOCK : '.');
+    wattroff(w, COLOR_PAIR(colorPair));
+    mvwprintw(w, y + 1, barX + barW + 1, "%3d/%-3d",
+              (int)mon.hp, (int)mon.maxHp);
+}
+
 void TerminalUI::drawHpBar(WINDOW *w, int y, int x, int width,
                             uint16_t hp, uint16_t maxHp, const char *label) {
     if (maxHp == 0) return;
-    char name[12];
-    snprintf(name, sizeof(name), "%-10s", label ? label : "");
-    int nameW = 11;
-    int barW  = width - nameW - 8;
+    // Label slot is 14 chars so "CHARMANDR L100" / "MEWTWO L70" fit.
+    static constexpr int NAME_W = 14;
+    char name[NAME_W + 2];
+    snprintf(name, sizeof(name), "%-*.*s", NAME_W, NAME_W, label ? label : "");
+    int barW = width - NAME_W - 11;   // 11 = " [" + "] NNN/NNN"
     if (barW < 4) barW = 4;
     int filled = (barW * hp) / maxHp;
     double pct = (double)hp / maxHp;
@@ -834,6 +1266,9 @@ void TerminalUI::challengeButton(const ButtonEvent &ev) {
 }
 
 void TerminalUI::battleButton(const ButtonEvent &ev) {
+    // Pentest Pikachu owns its own input: A toggles the status overlay, the
+    // fight is automatic, and exit/save is handled centrally.
+    if (inPentestBattle_) { pentestButton(ev); return; }
     if (inBattle_) {
         battleHandleButton(ev);
     } else {
@@ -841,8 +1276,103 @@ void TerminalUI::battleButton(const ButtonEvent &ev) {
     }
 }
 
+void TerminalUI::pentestButton(const ButtonEvent &ev) {
+    if (ev.button == GpiButton::A) {           // toggle the status overlay
+        pentestShowStatus_ = !pentestShowStatus_;
+        return;
+    }
+    if (ev.button == GpiButton::B && pentestShowStatus_) {
+        pentestShowStatus_ = false;            // B also dismisses the overlay
+        return;
+    }
+    if (ev.button == GpiButton::B ||
+        ev.button == GpiButton::START ||
+        ev.button == GpiButton::SELECT) {
+        // Capture the live level/XP, persist, then exit to the system menu.
+        const Gen1BattleEngine::BattleParty &pp = engine_.party(0);
+        if (pp.count > 0 && pp.mons[0].level > 0) {
+            pentestLevel_ = pp.mons[0].level;
+            pentestXp_    = slotLevelXp_[0];
+        }
+        pentestSaveProgress();
+        inPentestBattle_ = false;
+        inBattle_        = false;
+        requestQuit();
+    }
+}
+
+void TerminalUI::pentestMarkSeen(uint8_t dex) {
+    if (dex < 1 || dex > 151) return;
+    int idx = dex - 1;
+    pentestDex_[idx >> 3] |= (uint8_t)(1u << (idx & 7));
+}
+
+void TerminalUI::pentestMarkBeaten(uint8_t dex) {
+    if (dex < 1 || dex > 151) return;
+    int idx = dex - 1;
+    pentestBeaten_[idx >> 3] |= (uint8_t)(1u << (idx & 7));
+    pentestDex_[idx >> 3]    |= (uint8_t)(1u << (idx & 7));  // beaten implies seen
+}
+
+void TerminalUI::pentestBuildStatus(std::vector<std::string> &out) {
+    char line[96];
+    // Gyms "cleared" = gym areas whose leader level the Pikachu has reached.
+    int gyms = 0;
+    bool counted[8] = {};
+    for (int i = 0; i < KANTO_ZONE_COUNT; i++) {
+        const KantoZone &z = KANTO_ZONES[i];
+        if (z.gymIdx < 8 && !counted[z.gymIdx] && pentestLevel_ >= z.gymLvl) {
+            counted[z.gymIdx] = true;
+            gyms++;
+        }
+    }
+    snprintf(line, sizeof(line), "Gyms cleared: %d/8", gyms);   out.push_back(line);
+    snprintf(line, sizeof(line), "Pikachu:      Lv%u", (unsigned)pentestLevel_);
+    out.push_back(line);
+    int seen = 0, beaten = 0;
+    for (int i = 0; i < 151; i++) {
+        if (pentestDex_[i >> 3]    & (1u << (i & 7))) seen++;
+        if (pentestBeaten_[i >> 3] & (1u << (i & 7))) beaten++;
+    }
+    snprintf(line, sizeof(line), "Pokedex seen:   %d/151", seen);   out.push_back(line);
+    snprintf(line, sizeof(line), "Pokedex beaten: %d/151", beaten); out.push_back(line);
+    out.push_back("");
+
+    const KantoZone &zone = kantoZoneForLevel(pentestLevel_);
+    snprintf(line, sizeof(line), "Area: %s", zone.name);        out.push_back(line);
+    out.push_back("Wild Pokemon here:");
+    std::string row;
+    for (int i = 0; i < zone.wildCount; i++) {
+        const char *nm = dexName(zone.wilds[i].dex);
+        if (!row.empty()) row += ", ";
+        row += (nm ? nm : "?");
+        if ((i % 3) == 2) { out.push_back("  " + row); row.clear(); }
+    }
+    if (!row.empty()) out.push_back("  " + row);
+}
+
 void TerminalUI::battleEndButton(const ButtonEvent &ev) {
     if (ev.button != GpiButton::A && ev.button != GpiButton::B) return;
+
+    // Pentest Pikachu ROM: there's no menu to return to.  A = run another wild
+    // scan; B = exit the ROM back to EmulationStation.  No XP flush — the
+    // pentest Pikachu is standalone and must not touch the real SAV.
+    if (inPentestBattle_) {
+        if (ev.button == GpiButton::A) {
+            startPentestBattle();
+        } else {
+            const Gen1BattleEngine::BattleParty &pp = engine_.party(0);
+            if (pp.count > 0 && pp.mons[0].level > 0) {
+                pentestLevel_ = pp.mons[0].level;
+                pentestXp_    = slotLevelXp_[0];
+            }
+            pentestSaveProgress();
+            inPentestBattle_ = false;
+            inBattle_        = false;
+            requestQuit();
+        }
+        return;
+    }
 
     // Gym gauntlet: chain wins into the next trainer without healing.
     if (inGymBattle_ && battleResult_ == Gen1BattleEngine::Result::P1_WIN) {
@@ -851,11 +1381,18 @@ void TerminalUI::battleEndButton(const ButtonEvent &ev) {
             const LordGym *g = lordGym(pendingGymIdx_);
             if (g) lordSave_.badges |= (uint8_t)(1u << g->badgeBit);
             lordSave_.gymProgress[pendingGymIdx_] = LORD_GYM_TRAINERS;
+            // Record which NG+ tier this gym was last cleared at, so the gym
+            // list can flag it for a rematch after the next NG+ rollover.
+            if (pendingGymIdx_ < LORD_GYM_COUNT)
+                lordSave_.gymTierCleared[pendingGymIdx_] = lordSave_.ngPlusTier;
             lordSave(lordSave_);
             inGymBattle_ = false;
         } else {
             // Advance to the next trainer. Engine.replaceOpponent keeps our
             // party's HP/PP/status -- that's the no-healing gauntlet rule.
+            // No SAV writeback between rounds -- we treat the gauntlet as a
+            // single battle sequence and persist XP only when the gym is
+            // fully cleared, lost, or fled (at BATTLE_END below).
             pendingTrainerIdx_++;
             Gen1Party nextGymParty;
             if (lordBuildGymParty(pendingGymIdx_, pendingTrainerIdx_, nextGymParty)) {
@@ -870,6 +1407,54 @@ void TerminalUI::battleEndButton(const ButtonEvent &ev) {
             }
             // Couldn't build next opponent: bail out
             inGymBattle_ = false;
+        }
+    }
+
+    // Indigo Plateau gauntlet: chain the 5 league members without healing;
+    // beating the Champion (last member) triggers NG+ — mirrors the T-Deck.
+    if (inE4Battle_ && battleResult_ == Gen1BattleEngine::Result::P1_WIN) {
+        if (pendingE4Idx_ + 1 < LORD_E4_COUNT) {
+            pendingE4Idx_++;
+            Gen1Party nextE4;
+            if (lordBuildE4Party(pendingE4Idx_, nextE4)) {
+                engine_.replaceOpponent(nextE4);
+                battleLog_.clear();
+                moveSel_      = 0;
+                switchMode_   = false;
+                inBattle_     = true;
+                battleResult_ = Gen1BattleEngine::Result::ONGOING;
+                screen_       = Screen::BATTLE;
+                return;  // straight into the next member
+            }
+            inE4Battle_ = false;  // build failed; bail to the menu fallthrough
+        } else {
+            // Champion defeated → NG+ bookkeeping.
+            uint8_t clearedTier = lordSave_.ngPlusTier;
+            lordSave_.leagueCleared = 1;
+            lordSave_.e4TierCleared = clearedTier;
+            lordSave_.e4Progress    = 0;            // gauntlet replayable
+            if (lordSave_.ngPlusTier < 5) lordSave_.ngPlusTier++;
+            lordSetCurrentNgPlusTier(lordSave_.ngPlusTier);
+            // Reset every gym's trainer progress so the whole game replays at
+            // the new tier.  Badges stay set; gymTierCleared gates the rematch.
+            for (int i = 0; i < LORD_GYM_COUNT; i++) lordSave_.gymProgress[i] = 0;
+            lordSave(lordSave_);
+            inE4Battle_ = false;
+
+            flushBattleXpToDaemon();
+            inBattle_ = false;
+            battleLog_.clear();
+            char msg[128];
+            if (clearedTier == 0)
+                snprintf(msg, sizeof(msg),
+                         "CHAMPION! Elite Four cleared. NG+1 unlocked!");
+            else
+                snprintf(msg, sizeof(msg),
+                         "Champion defeated!  NG+%u -> NG+%u.",
+                         (unsigned)clearedTier, (unsigned)lordSave_.ngPlusTier);
+            lastEventText_ = msg;
+            screen_ = Screen::DAYCARE_EVENT;
+            return;
         }
     }
 
@@ -903,6 +1488,7 @@ void TerminalUI::battleEndButton(const ButtonEvent &ev) {
     }
 
     inGymBattle_ = false;
+    inE4Battle_  = false;
     inBattle_    = false;
     battleLog_.clear();
     screen_      = Screen::MENU;
@@ -925,7 +1511,8 @@ void TerminalUI::flushBattleXpToDaemon() {
     }
     if (anyXp) {
         ipc_.send("{\"cmd\":\"WRITEBACK_SAV\"}");
-        pushActivity("> XP saved to .sav file");
+        // The detailed per-slot summary is printed when the daemon replies
+        // with SAV_WRITEBACK -- no need to announce anything here.
     }
 }
 
@@ -958,11 +1545,60 @@ void TerminalUI::activateMeshItem(int item) {
 
 void TerminalUI::activateLocalItem(int item) {
     switch (item) {
-        case 0: // Party
-            ipc_.send("{\"cmd\":\"GET_PARTY\"}");
-            infoScroll_ = 0;
-            screen_ = Screen::PARTY;
+        case 0: {
+            // Party: dump T-Deck-style listing into the activity feed
+            // (this scrolls in the same panel as everything else instead
+            // of taking over the screen).
+            if (!hasParty_ || partyCount_ == 0) {
+                pushActivity("> No party loaded.");
+                pushActivity("  Drop a .sav in /tmp/mm-test-saves/");
+                break;
+            }
+            uint32_t mins = (millis() - startMs_) / 60000;
+            // 2×3 grid (two columns × three rows for a party of 6).  Each cell
+            // is self-contained: slot, name, level, and the daycare deltas the
+            // ~53-col console now has room for — +XP gained and +levels gained.
+            pushActivity("[t+%um] Party (%d):", (unsigned)mins, partyCount_);
+            auto fmtCell = [](char *buf, size_t n, int idx, const PartySlot &s) {
+                const char *nm = s.nick[0] ? s.nick :
+                                 (s.name[0] ? s.name : "(noname)");
+                unsigned xp = s.xpGained > 9999 ? 9999 : (unsigned)s.xpGained;
+                // Show the level transition orig→current only if it actually
+                // levelled up in the daycare; otherwise just the plain level.
+                if (s.savLevel && s.savLevel != s.level)
+                    snprintf(buf, n, "%d.%-8.8s L%d→%d +%u XP",
+                             idx + 1, nm, (int)s.savLevel, (int)s.level, xp);
+                else
+                    snprintf(buf, n, "%d.%-8.8s L%d +%u XP",
+                             idx + 1, nm, (int)s.level, xp);
+            };
+            // Count display columns (UTF-8 aware) so the → arrow — 3 bytes but
+            // 1 column — doesn't throw off the two-column padding below
+            // (printf field widths count bytes, not columns).
+            auto dispCols = [](const char *s) {
+                int w = 0;
+                for (const unsigned char *p = (const unsigned char *)s; *p; ++p)
+                    if ((*p & 0xC0) != 0x80) w++;
+                return w;
+            };
+            int half = (partyCount_ + 1) / 2;
+            for (int i = 0; i < half; i++) {
+                int j = i + half;
+                if (partySlots_[i].dex == 0) continue;
+                char left[48], right[48];
+                fmtCell(left, sizeof(left), i, partySlots_[i]);
+                if (j < partyCount_ && partySlots_[j].dex) {
+                    fmtCell(right, sizeof(right), j, partySlots_[j]);
+                    int pad = 26 - dispCols(left);
+                    if (pad < 1) pad = 1;
+                    pushActivity("%s%*s%s", left, pad, "", right);
+                } else {
+                    pushActivity("%s", left);
+                }
+            }
+            ipc_.send("{\"cmd\":\"GET_PARTY\"}");  // refresh in background
             break;
+        }
         case 1: startLocalBattle(); break;
         case 2: // Gyms
             loadLordSave();
@@ -1038,10 +1674,12 @@ void TerminalUI::startLocalBattle() {
     buildPlayerPartyForBattle();
 
     battleLog_.clear();
-    roguelike_  = false;
-    localSide_  = 0;
-    moveSel_    = 0;
-    switchMode_ = false;
+    roguelike_   = false;
+    inGymBattle_ = false;
+    inE4Battle_  = false;
+    localSide_   = 0;
+    moveSel_     = 0;
+    switchMode_  = false;
 }
 
 // Shared party builder used by Fight, Run, and Gyms.  Moves come from the
@@ -1170,6 +1808,190 @@ void TerminalUI::startRoguelike() {
     screen_ = Screen::BATTLE;
 }
 
+// Pentest Pikachu progress lives in its own tiny file (NOT the player's SAV),
+// so its level/XP are remembered across ROM relaunches.
+static const char *pentestSavePath() {
+#ifdef __APPLE__
+    return "/tmp/monstermesh/pentest.dat";
+#else
+    return "/var/lib/monstermesh/pentest.dat";
+#endif
+}
+static constexpr uint32_t PENTEST_SAVE_MAGIC = 0x504B4341u;  // 'PKCA'
+
+void TerminalUI::pentestLoadProgress() {
+    FILE *f = fopen(pentestSavePath(), "rb");
+    if (!f) return;  // no save yet — keep the L5 default
+    uint32_t magic = 0, xp = 0; uint8_t lvl = 0;
+    if (fread(&magic, sizeof(magic), 1, f) == 1 &&
+        fread(&lvl,   sizeof(lvl),   1, f) == 1 &&
+        fread(&xp,    sizeof(xp),    1, f) == 1 &&
+        magic == PENTEST_SAVE_MAGIC && lvl >= 1 && lvl <= 100) {
+        pentestLevel_ = lvl;
+        pentestXp_    = xp;
+        // Pokedex bitsets are optional (older saves won't have them).
+        fread(pentestDex_,    sizeof(pentestDex_),    1, f);
+        fread(pentestBeaten_, sizeof(pentestBeaten_), 1, f);
+    }
+    fclose(f);
+}
+
+void TerminalUI::pentestSaveProgress() {
+    FILE *f = fopen(pentestSavePath(), "wb");
+    if (!f) return;
+    uint32_t magic = PENTEST_SAVE_MAGIC;
+    fwrite(&magic,          sizeof(magic),          1, f);
+    fwrite(&pentestLevel_,  sizeof(pentestLevel_),  1, f);
+    fwrite(&pentestXp_,     sizeof(pentestXp_),     1, f);
+    fwrite(pentestDex_,     sizeof(pentestDex_),    1, f);
+    fwrite(pentestBeaten_,  sizeof(pentestBeaten_), 1, f);
+    fclose(f);
+}
+
+// Pentest Pikachu ROM: a self-contained Pikachu-vs-zone battle that doesn't
+// depend on a loaded SAV.  Pikachu starts at L5 and climbs through the Kanto
+// zones, fighting the Pokemon of the area it's currently in.
+void TerminalUI::startPentestBattle() {
+    if (inPentestBattle_) {
+        // Carry the Pikachu's level + partial XP forward from the just-ended
+        // scan, then persist so progress survives a relaunch.
+        const Gen1BattleEngine::BattleParty &prev = engine_.party(0);
+        if (prev.count > 0 && prev.mons[0].level > 0)
+            pentestLevel_ = prev.mons[0].level;
+        pentestXp_ = slotLevelXp_[0];
+        pentestSaveProgress();
+    } else if (!pentestLoaded_) {
+        // First scan this launch — load remembered progress (defaults to L5).
+        pentestLoadProgress();
+        pentestLoaded_ = true;
+    }
+
+    battleLog_.clear();
+    roguelike_         = false;
+    inGymBattle_       = false;
+    inE4Battle_        = false;
+    inPentestBattle_   = true;
+    pentestShowStatus_ = false;
+    localSide_         = 0;
+    moveSel_           = 0;
+    switchMode_        = false;
+    inBattle_          = true;
+
+    // Player: a fixed Lv15 Pikachu (stats derived by the engine from
+    // species + level + average DVs).  The engine reads Gen1Pokemon.species as
+    // the INTERNAL Gen-1 code (not national dex), so convert via dexToInternal
+    // exactly like buildPlayerPartyForBattle / lordBuildGymParty do — passing
+    // raw dex 25 makes the engine resolve a different (ghost) species.
+    uint8_t pikaInternal = dexToInternal[25];   // Pikachu
+    memset(&party_, 0, sizeof(party_));
+    party_.count            = 1;
+    party_.species[0]       = pikaInternal;
+    party_.mons[0].species  = pikaInternal;
+    party_.mons[0].level    = pentestLevel_;
+    party_.mons[0].boxLevel = pentestLevel_;
+    party_.mons[0].dvs[0]   = 0x88;
+    party_.mons[0].dvs[1]   = 0x88;
+    static const uint8_t pikaMoves[4] = { 84, 98, 39, 86 }; // ThunderShock, Quick Attack, Tail Whip, Thunder Wave
+    memcpy(party_.mons[0].moves, pikaMoves, 4);
+    for (int m = 0; m < 4; m++) {
+        const Gen1MoveData *md = gen1Move(pikaMoves[m]);
+        party_.mons[0].pp[m] = md ? md->pp : 0;
+    }
+    memset(party_.nicknames[0], 0x50, 11);          // 0x50 = Gen1 string term
+    const char *nk = "PIKACHU";
+    for (int j = 0; nk[j] && j < 10; j++)
+        party_.nicknames[0][j] = (uint8_t)(0x80 + (nk[j] - 'A'));
+
+    // Resume partial XP toward the next level; never bank it to the SAV.
+    slotLevelXp_[0] = pentestXp_;
+    sessionXp_[0]   = 0;
+
+    // Opponent: drawn from the Kanto zone for the Pikachu's current level, so
+    // it fights the Pokemon of the area it's progressing through (like the
+    // T-Deck pentest project).  Mix: 60% zone wild, 30% the zone's gym-leader
+    // ace, 10% a fully random Gen-1 mon.
+    const KantoZone &zone = kantoZoneForLevel(pentestLevel_);
+    snprintf(pentestZone_, sizeof(pentestZone_), "%s", zone.name);
+
+    uint8_t wildDex, wildLv;
+    int roll = rand() % 100;
+    if (roll < 30 && zone.gymIdx != 255) {
+        // Gym-leader ace for this area.
+        const LordGym *g = lordGym(zone.gymIdx);
+        const LordGymMon *ace = nullptr;
+        if (g) {
+            const LordGymTrainer &ldr = g->trainers[LORD_GYM_LEADER_INDEX];
+            if (ldr.party && ldr.count > 0) ace = &ldr.party[ldr.count - 1];
+        }
+        wildDex = ace ? ace->species : 25;
+        wildLv  = zone.gymLvl ? zone.gymLvl : pentestLevel_;
+    } else if (roll < 90 && zone.wildCount > 0) {
+        // Zone wild.
+        const KantoWildMon &w = zone.wilds[rand() % zone.wildCount];
+        wildDex = w.dex;
+        int span = (int)w.maxLvl - (int)w.minLvl;
+        wildLv = (uint8_t)(w.minLvl + (span > 0 ? rand() % (span + 1) : 0));
+    } else {
+        // Random Gen-1 safety net, near the Pikachu's level.
+        wildDex = (uint8_t)(1 + rand() % 151);
+        int wl = (int)pentestLevel_ + (rand() % 7) - 3;
+        if (wl < 2) wl = 2;
+        if (wl > 100) wl = 100;
+        wildLv = (uint8_t)wl;
+    }
+    pentestMarkSeen(wildDex);                        // log to the Pokedex
+
+    uint8_t wildMoves[4] = { 1, 33, 0, 0 };          // Pound, Tackle
+    if (wildLv >= 10) wildMoves[2] = 45;             // + Growl
+
+    uint8_t wildInternal = dexToInternal[wildDex];
+    Gen1Party wild = {};
+    wild.count            = 1;
+    wild.species[0]       = wildInternal;
+    wild.mons[0].species  = wildInternal;
+    wild.mons[0].level    = wildLv;
+    wild.mons[0].boxLevel = wildLv;
+    memcpy(wild.mons[0].moves, wildMoves, 4);
+
+    // Pentest flavour: a random WiFi target + a vulnerability for the on-screen
+    // text.  Pure fiction — the Pi has no scanner; this is the pentest theme.
+    static const char *SSIDS[] = {
+        "linksys",   "NETGEAR47",  "xfinitywifi",  "ATT-WiFi-2G",
+        "TP-Link_5G","HOME-A1B2",  "dlink-guest",  "CenturyLink",
+        "Pixel_5599","FBI_Van_3",  "Starbucks",    "iPhone",
+    };
+    static const char *VULNS[] = {
+        "WPS PIN brute (CVE-2011-5053)",
+        "WEP key reuse / IV collision",
+        "KRACK 4-way handshake replay",
+        "Default admin creds (admin:admin)",
+        "WPA2 PMKID hashcat -m 16800",
+        "Evil-twin deauth (802.11w off)",
+    };
+    snprintf(pentestSsid_, sizeof(pentestSsid_), "%s", SSIDS[rand() % (int)(sizeof(SSIDS)/sizeof(SSIDS[0]))]);
+    snprintf(pentestVuln_, sizeof(pentestVuln_), "%s", VULNS[rand() % (int)(sizeof(VULNS)/sizeof(VULNS[0]))]);
+    pentestEndMs_ = 0;
+
+    // Seed the (now full-height) scrolling log with the exploit narration; the
+    // engine's turn messages append below these as the auto-fight plays out.
+    {
+        char line[96];
+        snprintf(line, sizeof(line), "[%s]  PIKACHU Lv%u",
+                 pentestZone_, (unsigned)pentestLevel_);
+        battleLog_.push_back(line);
+        snprintf(line, sizeof(line), "Scanning %s ...", pentestSsid_);
+        battleLog_.push_back(line);
+        snprintf(line, sizeof(line), "Vuln: %s", pentestVuln_);
+        battleLog_.push_back(line);
+        battleLog_.push_back("Pikachu deploys the exploit!");
+    }
+
+    battleResult_ = Gen1BattleEngine::Result::ONGOING;
+    uint32_t seed = (uint32_t)(millis() ^ ((uint32_t)wildDex << 8) ^ wildLv);
+    engine_.start(party_, wild, seed);
+    screen_ = Screen::BATTLE;
+}
+
 // Snapshot enemy HP, execute the turn, detect newly-fainted enemies, and
 // credit XP to the player slot that was active at the moment of the kill.
 // Gen-1-ish formula: enemyLevel * 12 (trainer multiplier baked in).  Real
@@ -1194,7 +2016,21 @@ void TerminalUI::runTurnWithXp() {
             // Magikarp Lv5 = 23*5/7*1.5 = 24 XP.
             // Mewtwo Lv70 = 220*70/7*1.5 = 3300 XP.
             // Brock's Onix Lv14 = 108*14/7*1.5 = 324 XP.
-            uint32_t xp = gen1XpYield(enemyDex, enemyLevel, /*isTrainer=*/true);
+            // Gym / E4 fights pay REGULAR (wild) XP — no trainer 1.5x bonus —
+            // so you can't out-level the game by grinding the gyms.
+            bool trainerBonus = !(inGymBattle_ || inE4Battle_);
+            uint32_t xp = gen1XpYield(enemyDex, enemyLevel, trainerBonus);
+
+            // Pentest Pikachu earns only 10% XP so it levels slowly across the
+            // Kanto zones (matches the T-Deck pentest pacing), and the KO'd
+            // species is logged to the Pokedex as "beaten".
+            if (inPentestBattle_) {
+                xp /= 10; if (xp < 1) xp = 1;
+                pentestMarkBeaten(enemyDex);
+            }
+
+            // Gen 1: only the active mon at the time of the KO earns XP.
+            // Bench members get nothing -- switch them in to level them.
             if (killerSlot < 6) {
                 sessionXp_[killerSlot]   += xp;
                 slotLevelXp_[killerSlot] += xp;
@@ -1205,13 +2041,22 @@ void TerminalUI::runTurnWithXp() {
                      pp.mons[killerSlot].nickname, (unsigned)xp);
             battleLog_.push_back(line);
 
+            // Gym / E4 gauntlets: DON'T level up mid-run.  The level should
+            // change once, after the whole gym/league is cleared — not after
+            // every trainer.  XP still accumulates in sessionXp_ above and is
+            // flushed to the daemon at the end, which recomputes the SAV level
+            // (and the SAV_WRITEBACK summary shows the net level change).  For
+            // one-off battles (Fight / roguelike / pentest) we still level up
+            // mid-battle as normal.
+            bool deferLevels = (inGymBattle_ || inE4Battle_);
+
             // Medium-fast level-up: XP needed to gain ONE level from L to
             // L+1 = (L+1)^3 - L^3.  slotLevelXp_ accumulates until it
             // crosses that delta, then we bump the engine's BattlePoke
             // level, scale stats linearly, and add the maxHp delta to
             // current HP (Gen 1 heal-on-level).
             Gen1BattleEngine::BattlePoke &mon = pp.mons[killerSlot];
-            while (mon.level < 100 && killerSlot < 6) {
+            while (!deferLevels && mon.level < 100 && killerSlot < 6) {
                 uint32_t L = mon.level;
                 uint32_t levelDelta = (L + 1) * (L + 1) * (L + 1) - L * L * L;
                 if (slotLevelXp_[killerSlot] < levelDelta) break;
@@ -1244,27 +2089,61 @@ void TerminalUI::runTurnWithXp() {
 }
 
 void TerminalUI::battleHandleButton(const ButtonEvent &ev) {
+    // Pentest Pikachu: the fight is automatic, so manual move/switch input is
+    // ignored.  Start or Select exits the ROM back to the MonsterMesh system.
+    if (inPentestBattle_) {
+        if (ev.button == GpiButton::START || ev.button == GpiButton::SELECT) {
+            // Capture the latest level/XP from the live battle, then persist
+            // before exiting so progress isn't lost mid-scan.
+            const Gen1BattleEngine::BattleParty &pp = engine_.party(0);
+            if (pp.count > 0 && pp.mons[0].level > 0) {
+                pentestLevel_ = pp.mons[0].level;
+                pentestXp_    = slotLevelXp_[0];
+            }
+            pentestSaveProgress();
+            inPentestBattle_ = false;
+            inBattle_        = false;
+            requestQuit();
+        }
+        return;
+    }
+
     const Gen1BattleEngine::BattleParty &pp = engine_.party(localSide_);
 
+    // Game Boy 2x2 move grid:  move0 move1
+    //                          move2 move3
+    // Left/Right swap within a row, Up/Down swap rows. Switch list (party
+    // of 6) is also a 2x3 grid.
+    auto moveExists = [&](int slot) -> bool {
+        return slot >= 0 && slot < 4 && pp.mons[pp.active].moves[slot] != 0;
+    };
     switch (ev.button) {
         case GpiButton::UP:
             if (switchMode_) {
-                switchSel_ = (switchSel_ + (int)pp.count - 1) % (int)pp.count;
+                if (switchSel_ >= 2) switchSel_ -= 2;
             } else {
-                int moveCount = 0;
-                for (int i = 0; i < 4; i++) if (pp.mons[pp.active].moves[i]) moveCount++;
-                if (moveCount == 0) moveCount = 1;
-                moveSel_ = (moveSel_ + moveCount - 1) % moveCount;
+                if (moveSel_ >= 2 && moveExists(moveSel_ - 2)) moveSel_ -= 2;
             }
             break;
         case GpiButton::DOWN:
             if (switchMode_) {
-                switchSel_ = (switchSel_ + 1) % (int)pp.count;
+                if (switchSel_ + 2 < (int)pp.count) switchSel_ += 2;
             } else {
-                int moveCount = 0;
-                for (int i = 0; i < 4; i++) if (pp.mons[pp.active].moves[i]) moveCount++;
-                if (moveCount == 0) moveCount = 1;
-                moveSel_ = (moveSel_ + 1) % moveCount;
+                if (moveSel_ < 2 && moveExists(moveSel_ + 2)) moveSel_ += 2;
+            }
+            break;
+        case GpiButton::LEFT:
+            if (switchMode_) {
+                if (switchSel_ & 1) switchSel_--;
+            } else {
+                if ((moveSel_ & 1) && moveExists(moveSel_ - 1)) moveSel_--;
+            }
+            break;
+        case GpiButton::RIGHT:
+            if (switchMode_) {
+                if (!(switchSel_ & 1) && switchSel_ + 1 < (int)pp.count) switchSel_++;
+            } else {
+                if (!(moveSel_ & 1) && moveExists(moveSel_ + 1)) moveSel_++;
             }
             break;
         case GpiButton::A:
@@ -1343,9 +2222,9 @@ void TerminalUI::renderPvpBattle() {
             mvwprintw(winMenu_, menuRow++, 2, "%-14s  PP:%2u", SLOT_NAMES[i], (unsigned)pvpMyPp_[i]);
         }
         if (i == pvpMoveSel_) wattroff(winMenu_, A_REVERSE | COLOR_PAIR(3));
-        if (menuRow >= MENU_ROWS - 2) break;
+        if (menuRow >= menuRows_ - 2) break;
     }
-    mvwprintw(winMenu_, MENU_ROWS - 2, 1, "[A]Use [UP/DN]Select [Start]Flee");
+    // (no on-screen key legend — physical GPI buttons)
 }
 
 void TerminalUI::renderPvpBattleEnd() {
@@ -1487,9 +2366,39 @@ void TerminalUI::onIpcMessage(const std::string &msg) {
     else if (type == "SAV_WRITEBACK") {
         bool ok = jsonGetInt(msg, "ok", 0) != 0;
         int applied = jsonGetInt(msg, "applied", 0);
-        if (ok && applied) pushActivity("> SAV write OK -- levels persisted");
-        else if (ok)       pushActivity("> SAV write skipped (no XP to apply)");
-        else               pushActivity("> SAV write FAILED");
+        if (!ok) {
+            std::string reason = jsonGetStr(msg, "reason");
+            pushActivity("> SAV write FAILED (%s)",
+                         reason.empty() ? "?" : reason.c_str());
+        } else if (!applied) {
+            pushActivity("> No XP to save (none earned this fight)");
+        } else {
+            pushActivity("=== Progress saved to .sav ===");
+            // Walk the slots[...] array and print one line per Pokemon.
+            size_t pos = msg.find("\"slots\":[");
+            if (pos != std::string::npos) {
+                pos += 9;
+                while (pos < msg.size() && msg[pos] != ']') {
+                    pos = msg.find('{', pos);
+                    if (pos == std::string::npos) break;
+                    size_t end = msg.find('}', pos);
+                    if (end == std::string::npos) break;
+                    std::string sl = msg.substr(pos, end - pos + 1);
+
+                    std::string nick = jsonGetStr(sl, "nick");
+                    int oldL = jsonGetInt(sl, "old_level", 0);
+                    int newL = jsonGetInt(sl, "new_level", 0);
+                    int xp   = jsonGetInt(sl, "xp", 0);
+                    if (newL > oldL)
+                        pushActivity("  %-10s L%d -> L%d  (+%d XP)",
+                                     nick.c_str(), oldL, newL, xp);
+                    else
+                        pushActivity("  %-10s L%d        (+%d XP)",
+                                     nick.c_str(), oldL, xp);
+                    pos = end + 1;
+                }
+            }
+        }
     }
     else if (type == "BEACON_RESULT") {
         bool ok = jsonGetInt(msg, "ok", 0) != 0;
@@ -1505,7 +2414,12 @@ void TerminalUI::onIpcMessage(const std::string &msg) {
     else if (type == "NODE_INFO") {
         uint32_t nid = (uint32_t)jsonGetInt(msg, "node_id", 0);
         std::string sn = jsonGetStr(msg, "short_name");
-        pushActivity("> Radio: 0x%08X %s", nid, sn.c_str());
+        std::string gn = jsonGetStr(msg, "game_name");
+        strncpy(localShortName_,   sn.c_str(), sizeof(localShortName_)   - 1);
+        localShortName_[sizeof(localShortName_)     - 1] = '\0';
+        strncpy(localTrainerName_, gn.c_str(), sizeof(localTrainerName_) - 1);
+        localTrainerName_[sizeof(localTrainerName_) - 1] = '\0';
+        pushActivity("> Radio: 0x%08X %s / %s", nid, sn.c_str(), gn.c_str());
     }
     else if (type == "PONG") { /* keepalive ack */ }
 }
@@ -1582,14 +2496,28 @@ void TerminalUI::parsePartyUpdate(const std::string &msg) {
         pos = end + 1;
     }
 
-    // On first party load, dump T-Deck-style listing into the activity feed
+    // On first party load, dump T-Deck-style listing into the activity feed.
+    // Two columns to keep vertical footprint short on the GPI's 24-row LCD.
     if (first) {
         uint32_t mins = (millis() - startMs_) / 60000;
         pushActivity("[t+%um] Party (%d):", (unsigned)mins, count);
-        for (int i = 0; i < count; i++) {
-            const PartySlot &s = partySlots_[i];
-            const char *nick = s.nick[0] ? s.nick : (s.name[0] ? s.name : "(noname)");
-            pushActivity("%d. %-10s Lv %3d", i + 1, nick, (int)s.level);
+        int half = (count + 1) / 2;
+        for (int i = 0; i < half; i++) {
+            int j = i + half;
+            const PartySlot &s1 = partySlots_[i];
+            const char *n1 = s1.nick[0] ? s1.nick :
+                             (s1.name[0] ? s1.name : "(noname)");
+            if (j < count) {
+                const PartySlot &s2 = partySlots_[j];
+                const char *n2 = s2.nick[0] ? s2.nick :
+                                 (s2.name[0] ? s2.name : "(noname)");
+                pushActivity("%d.%-9s Lv%2d  %d.%-9s Lv%2d",
+                             i + 1, n1, (int)s1.level,
+                             j + 1, n2, (int)s2.level);
+            } else {
+                pushActivity("%d.%-9s Lv%2d",
+                             i + 1, n1, (int)s1.level);
+            }
         }
     }
 }
@@ -1635,10 +2563,18 @@ void TerminalUI::parseNeighbors(const std::string &msg) {
     if (count <= 0) { neighborDisplayCount_ = 0; return; }
     if (count > MAX_NEIGHBORS_DISPLAY) count = MAX_NEIGHBORS_DISPLAY;
 
+    // Snapshot the previous batch so we can preserve firstSeenMs for any
+    // nodeId we've already shown.  The new-neighbor highlight then only
+    // fires on genuinely new arrivals, not on every periodic NEIGHBORS rx.
+    NeighborEntry prev[MAX_NEIGHBORS_DISPLAY];
+    int prevCount = neighborDisplayCount_;
+    for (int i = 0; i < prevCount; i++) prev[i] = neighbors_[i];
+
     size_t pos = msg.find("\"list\":[");
     if (pos == std::string::npos) return;
     pos += 8;
 
+    uint64_t now = millis();
     for (int i = 0; i < count && pos < msg.size(); i++) {
         pos = msg.find('{', pos);
         if (pos == std::string::npos) break;
@@ -1656,13 +2592,35 @@ void TerminalUI::parseNeighbors(const std::string &msg) {
         NeighborEntry &n = neighbors_[i];
         n.nodeId = nid;
         strncpy(n.shortName, sn.c_str(),   sizeof(n.shortName) - 1);
+        n.shortName[sizeof(n.shortName) - 1] = 0;
         strncpy(n.gameName,  gn.c_str(),   sizeof(n.gameName)  - 1);
+        n.gameName[sizeof(n.gameName) - 1] = 0;
         strncpy(n.lead,      nick.c_str(), sizeof(n.lead)      - 1);
+        n.lead[sizeof(n.lead) - 1] = 0;
         n.partyCount = pc;
         n.leadLevel  = lv;
 
-        pushActivity("> Neighbor: %s (%s) %s Lv%d", n.shortName, n.gameName,
-                     n.lead[0] ? n.lead : "(?)", n.leadLevel);
+        // Match against the previous batch by nodeId (preferred) or short
+        // name fallback — preserve firstSeenMs so the highlight expires.
+        n.firstSeenMs = 0;
+        for (int j = 0; j < prevCount; j++) {
+            if ((nid != 0 && prev[j].nodeId == nid) ||
+                (nid == 0 && strncmp(prev[j].shortName, n.shortName,
+                                     sizeof(n.shortName)) == 0)) {
+                n.firstSeenMs = prev[j].firstSeenMs;
+                break;
+            }
+        }
+        bool isNew = (n.firstSeenMs == 0);
+        if (isNew) n.firstSeenMs = now ? now : 1;  // 0 means "no entry"
+
+        if (isNew) {
+            pushActivity("> NEW NEIGHBOR: %s (%s) %s Lv%d", n.shortName,
+                         n.gameName, n.lead[0] ? n.lead : "(?)", n.leadLevel);
+        } else {
+            pushActivity("> Neighbor: %s (%s) %s Lv%d", n.shortName,
+                         n.gameName, n.lead[0] ? n.lead : "(?)", n.leadLevel);
+        }
         pos = end + 1;
     }
     neighborDisplayCount_ = count;
@@ -1750,6 +2708,7 @@ void TerminalUI::parseNeighborParty(const std::string &msg) {
     switchMode_   = false;
     inBattle_     = true;
     inGymBattle_  = false;
+    inE4Battle_   = false;
     localSide_    = 0;
     battleResult_ = Gen1BattleEngine::Result::ONGOING;
     uint32_t seed = (uint32_t)(millis() ^ asyncFightNodeId_);
@@ -1777,6 +2736,8 @@ void TerminalUI::loadLordSave()
         lordLoad(lordSave_);
         lordLoaded_ = true;
     }
+    // Publish the saved NG+ tier so gym / E4 party builders scale correctly.
+    lordSetCurrentNgPlusTier(lordSave_.ngPlusTier);
 }
 
 void TerminalUI::renderGymSelect()
@@ -1784,50 +2745,101 @@ void TerminalUI::renderGymSelect()
     werase(winInfo_);
     werase(winMenu_);
 
+    // Title + badge/NG+ count on ONE row so the short GPI info panel still has
+    // room for all 8 gyms PLUS the league row beneath them.
+    int badges = __builtin_popcount(lordSave_.badges);
+    char title[64];
+    if (lordSave_.ngPlusTier > 0)
+        snprintf(title, sizeof(title), "Legend of Charizard  %d/8  NG+%u",
+                 badges, (unsigned)lordSave_.ngPlusTier);
+    else
+        snprintf(title, sizeof(title), "Legend of Charizard  %d/8 badges", badges);
     wattron(winInfo_, A_BOLD);
-    mvwprintw(winInfo_, 0, 1, "=== Legend of Charizard ===");
+    mvwprintw(winInfo_, 0, 1, "%s", title);
     wattroff(winInfo_, A_BOLD);
 
-    // Count badges
-    int badges = __builtin_popcount(lordSave_.badges);
-    mvwprintw(winInfo_, 1, 1, "Badges: %d/8", badges);
-
     int infoRows = getmaxy(winInfo_);
-    for (int i = 0; i < LORD_GYM_COUNT && i + 3 < infoRows; i++) {
+    uint8_t tier = lordSave_.ngPlusTier;
+    for (int i = 0; i < LORD_GYM_COUNT && (1 + i) < infoRows; i++) {
         const LordGym *g = lordGym((uint8_t)i);
         if (!g) continue;
 
-        bool    cleared = (lordSave_.badges >> g->badgeBit) & 1;
-        bool    sel     = (i == gymSel_);
+        bool cleared = (lordSave_.badges >> g->badgeBit) & 1;
+        // In NG+, a gym is "owed" again until re-cleared at the current tier.
+        bool owedAtTier = cleared && (lordSave_.gymTierCleared[i] < tier);
+        bool sel     = (i == gymSel_);
 
         if (sel) wattron(winInfo_, A_REVERSE | COLOR_PAIR(3));
 
         char badge_mark = cleared ? '*' : ' ';
-        mvwprintw(winInfo_, 2 + i, 0,
+        const char *status = !cleared    ? "5-round gauntlet"
+                           : owedAtTier  ? "NG+ rematch"
+                                         : "Cleared";
+        mvwprintw(winInfo_, 1 + i, 0,
                   " %c%d. %-10s %-8s  %-12s  %s",
                   badge_mark, i + 1,
                   g->city, g->badgeName,
-                  g->leaderName, cleared ? "Cleared" : "5-round gauntlet");
+                  g->leaderName, status);
 
         if (sel) wattroff(winInfo_, A_REVERSE | COLOR_PAIR(3));
     }
 
-    mvwprintw(winMenu_, 1, 1, "[W/S] Select  [K] Fight  [L] Back");
+    // ── 9th row: Indigo Plateau (Elite Four + Champion) ──────────────────────
+    if ((1 + LEAGUE_ROW) < infoRows) {
+        bool unlocked = (badges >= LORD_GYM_COUNT);
+        bool leagueDone = lordSave_.leagueCleared &&
+                          lordSave_.e4TierCleared >= tier;
+        bool sel = (gymSel_ == LEAGUE_ROW);
+        if (sel) wattron(winInfo_, A_REVERSE | COLOR_PAIR(3));
+        const char *status = !unlocked  ? "Need 8 badges"
+                           : leagueDone ? "Cleared"
+                                        : "Elite Four + Champion";
+        mvwprintw(winInfo_, 1 + LEAGUE_ROW, 0,
+                  " %c9. %-10s %-8s  %-12s  %s",
+                  unlocked ? '>' : 'x', "Indigo Plt", "League",
+                  "Elite Four", status);
+        if (sel) wattroff(winInfo_, A_REVERSE | COLOR_PAIR(3));
+    }
+
+    // (no on-screen key legend — physical GPI buttons)
 }
 
 void TerminalUI::gymSelectButton(const ButtonEvent &ev)
 {
     switch (ev.button) {
         case GpiButton::UP:
-            gymSel_ = (gymSel_ + LORD_GYM_COUNT - 1) % LORD_GYM_COUNT;
+            gymSel_ = (gymSel_ + GYM_ROWS - 1) % GYM_ROWS;
             break;
         case GpiButton::DOWN:
-            gymSel_ = (gymSel_ + 1) % LORD_GYM_COUNT;
+            gymSel_ = (gymSel_ + 1) % GYM_ROWS;
             break;
         case GpiButton::A:
-            // Gauntlet: always start at the first trainer.  No mid-gym
-            // resume.  Battle-end handler chains us through 0->4 on wins.
-            startGymBattle((uint8_t)gymSel_, 0);
+            if (gymSel_ == LEAGUE_ROW) {
+                // Indigo Plateau: gated on all 8 badges.  Always starts at
+                // member 0 (Lorelei); the battle-end handler chains 0->4.
+                if (__builtin_popcount(lordSave_.badges) >= LORD_GYM_COUNT) {
+                    startE4Battle(0);
+                } else {
+                    lastEventText_ = "Clear all 8 gyms first!";
+                    screen_ = Screen::DAYCARE_EVENT;
+                }
+            } else {
+                // Can't replay a gym already cleared at the current tier — that
+                // would let you farm XP.  (An NG+ rollover re-opens every gym as
+                // a one-time rematch; those are still allowed.)
+                const LordGym *g = lordGym((uint8_t)gymSel_);
+                bool cleared = g && ((lordSave_.badges >> g->badgeBit) & 1);
+                bool owedAtTier = cleared &&
+                    (lordSave_.gymTierCleared[gymSel_] < lordSave_.ngPlusTier);
+                if (cleared && !owedAtTier) {
+                    lastEventText_ = "Gym already cleared!";
+                    screen_ = Screen::DAYCARE_EVENT;
+                } else {
+                    // Gauntlet: always start at the first trainer.  No mid-gym
+                    // resume.  Battle-end handler chains us through 0->4 on wins.
+                    startGymBattle((uint8_t)gymSel_, 0);
+                }
+            }
             break;
         case GpiButton::B:
             screen_ = Screen::MENU;
@@ -1867,9 +2879,44 @@ void TerminalUI::startGymBattle(uint8_t gymIdx, uint8_t trainerIdx)
     pendingGymIdx_     = gymIdx;
     pendingTrainerIdx_ = trainerIdx;
     inGymBattle_       = true;
+    inE4Battle_        = false;
 
     uint32_t seed = (uint32_t)(millis() ^ ((uint32_t)gymIdx << 8) ^ trainerIdx);
     engine_.start(party_, gymParty, seed);
+    screen_ = Screen::BATTLE;
+}
+
+void TerminalUI::startE4Battle(uint8_t e4Idx)
+{
+    if (!hasParty_ || partyCount_ == 0) {
+        lastEventText_ = "No party! Load a .sav first.";
+        screen_ = Screen::DAYCARE_EVENT;
+        return;
+    }
+
+    buildPlayerPartyForBattle();
+
+    Gen1Party e4Party;
+    if (!lordBuildE4Party(e4Idx, e4Party)) {
+        lastEventText_ = "Could not build league party.";
+        screen_ = Screen::DAYCARE_EVENT;
+        return;
+    }
+
+    battleLog_.clear();
+    roguelike_  = false;
+    localSide_  = 0;
+    moveSel_    = 0;
+    switchMode_ = false;
+    inBattle_   = true;
+
+    // E4 context (mutually exclusive with the gym gauntlet).
+    inGymBattle_  = false;
+    inE4Battle_   = true;
+    pendingE4Idx_ = e4Idx;
+
+    uint32_t seed = (uint32_t)(millis() ^ ((uint32_t)0xE4 << 8) ^ e4Idx);
+    engine_.start(party_, e4Party, seed);
     screen_ = Screen::BATTLE;
 }
 
@@ -1895,4 +2942,178 @@ int TerminalUI::jsonGetInt(const std::string &j, const char *key, int def) {
     while (pos < j.size() && j[pos] == ' ') pos++;
     if (pos >= j.size()) return def;
     return atoi(j.c_str() + pos);
+}
+
+// ── SDL2 BattleWindow state sync ─────────────────────────────────────────────
+
+void TerminalUI::syncBattleWindow() {
+    BattleWindow::State s;
+    // Copy local player identity so the YOU box header reads
+    // "<short> / <trainer>" instead of just "YOU".
+    snprintf(s.localShort,   sizeof(s.localShort),   "%s", localShortName_);
+    snprintf(s.localTrainer, sizeof(s.localTrainer), "%s", localTrainerName_);
+    const Gen1BattleEngine::BattleParty &pp = engine_.party(localSide_);
+    const Gen1BattleEngine::BattleParty &ep = engine_.party(1 - localSide_);
+    const Gen1BattleEngine::BattlePoke  &pm = pp.mons[pp.active];
+    const Gen1BattleEngine::BattlePoke  &em = ep.mons[ep.active];
+
+    s.foe.species = em.species;
+    s.foe.level   = em.level;
+    s.foe.hp      = em.hp;
+    s.foe.maxHp   = em.maxHp;
+    snprintf(s.foe.nickname, sizeof(s.foe.nickname), "%s", em.nickname);
+
+    s.you.species = pm.species;
+    s.you.level   = pm.level;
+    s.you.hp      = pm.hp;
+    s.you.maxHp   = pm.maxHp;
+    snprintf(s.you.nickname, sizeof(s.you.nickname), "%s", pm.nickname);
+
+    for (int i = 0; i < 4; i++) {
+        uint8_t mv = pm.moves[i];
+        s.moves[i].slotUsed = (mv != 0);
+        if (mv == 0) {
+            snprintf(s.moves[i].name, sizeof(s.moves[i].name), "---");
+            s.moves[i].pp = s.moves[i].maxPp = 0;
+            continue;
+        }
+        snprintf(s.moves[i].name, sizeof(s.moves[i].name), "%s", moveName(mv));
+        s.moves[i].pp    = pm.pp[i];
+        const Gen1MoveData *md = gen1Move(mv);
+        s.moves[i].maxPp = md ? md->pp : pm.pp[i];
+    }
+    s.selectedMove = moveSel_;
+    s.mode = switchMode_ ? BattleWindow::Mode::SWITCH
+                         : BattleWindow::Mode::FIGHT;
+
+    // EXP bar: progress of the active mon toward its next level (medium-fast).
+    {
+        uint32_t L     = pm.level;
+        uint32_t delta = (L + 1) * (L + 1) * (L + 1) - L * L * L;
+        uint32_t have  = (pp.active < 6) ? slotLevelXp_[pp.active] : 0;
+        if (have > delta) have = delta;
+        s.expPermille = delta ? (int)(have * 1000 / delta) : 0;
+    }
+
+    // Switch list (party members)
+    s.switchCount = pp.count > 6 ? 6 : pp.count;
+    for (int i = 0; i < s.switchCount; i++) {
+        const Gen1BattleEngine::BattlePoke &m = pp.mons[i];
+        snprintf(s.switchSlots[i].nickname, sizeof(s.switchSlots[i].nickname),
+                 "%s", m.nickname);
+        s.switchSlots[i].level   = m.level;
+        s.switchSlots[i].hp      = m.hp;
+        s.switchSlots[i].maxHp   = m.maxHp;
+        s.switchSlots[i].active  = (i == (int)pp.active);
+        s.switchSlots[i].fainted = (m.hp == 0);
+    }
+    s.selectedSwitch = switchSel_;
+
+    // Feed the SDL log enough lines to fill the box — the renderer caps to
+    // however many actually fit.  Pentest's full-height log shows ~10 lines, so
+    // hand it a generous slice; normal battles keep the compact 4.
+    int logCap = inPentestBattle_ ? 24 : BATTLE_LOG_LINES;
+    int n = (int)battleLog_.size();
+    int start = n > logCap ? n - logCap : 0;
+    for (int i = start; i < n; i++) s.log.push_back(battleLog_[i]);
+
+    // Optional gym / league header
+    if (inGymBattle_) {
+        const LordGym *g = lordGym(pendingGymIdx_);
+        if (g) {
+            int round = pendingTrainerIdx_ + 1;
+            const char *who = (pendingTrainerIdx_ >= LORD_GYM_LEADER_INDEX)
+                                ? g->leaderName
+                                : g->trainers[pendingTrainerIdx_].name;
+            snprintf(s.header, sizeof(s.header),
+                     "%s Gym  Round %d/5  vs %s", g->city, round, who);
+        }
+    } else if (inE4Battle_) {
+        const LordE4Member *m = lordE4Member(pendingE4Idx_);
+        if (m)
+            snprintf(s.header, sizeof(s.header),
+                     "Indigo Plateau  %d/%d  %s %s",
+                     pendingE4Idx_ + 1, LORD_E4_COUNT, m->title, m->name);
+    } else if (inPentestBattle_) {
+        snprintf(s.header, sizeof(s.header), "PENTEST PIKACHU");
+        s.pentest = true;
+        // WiFi network name goes in the foe's corner tag (replacing "FOE");
+        // the name row keeps the actual species so it still reads as a battle.
+        snprintf(s.foeTag, sizeof(s.foeTag), "%s", pentestSsid_);
+        snprintf(s.foe.nickname, sizeof(s.foe.nickname), "%s", dexName(em.species));
+        // Status overlay (toggled with A): gyms / current area / Pokedex.
+        s.showStatus = pentestShowStatus_;
+        if (pentestShowStatus_) pentestBuildStatus(s.statusLines);
+    }
+
+    // End overlay
+    if (screen_ == Screen::BATTLE_END) {
+        if (battleResult_ == Gen1BattleEngine::Result::P1_WIN) {
+            s.endResult = (localSide_ == 0) ? BattleWindow::EndResult::WIN
+                                            : BattleWindow::EndResult::LOSE;
+        } else if (battleResult_ == Gen1BattleEngine::Result::P2_WIN) {
+            s.endResult = (localSide_ == 0) ? BattleWindow::EndResult::LOSE
+                                            : BattleWindow::EndResult::WIN;
+        } else if (battleResult_ == Gen1BattleEngine::Result::DRAW) {
+            s.endResult = BattleWindow::EndResult::DRAW;
+        }
+    }
+
+    battleWindow_.setState(s);
+}
+
+void TerminalUI::syncPvpBattleWindow() {
+    BattleWindow::State s;
+    snprintf(s.localShort,   sizeof(s.localShort),   "%s", localShortName_);
+    snprintf(s.localTrainer, sizeof(s.localTrainer), "%s", localTrainerName_);
+    // Player's lead from cached partySlots_ (daemon-driven PvP doesn't expose
+    // the full engine to the terminal).
+    if (partyCount_ > 0) {
+        const PartySlot &lead = partySlots_[0];
+        s.you.species = lead.dex;
+        s.you.level   = lead.level;
+        s.you.hp      = pvpMyHp_;
+        s.you.maxHp   = pvpMyMaxHp_ ? pvpMyMaxHp_ : 1;
+        snprintf(s.you.nickname, sizeof(s.you.nickname), "%s",
+                 lead.nick[0] ? lead.nick : (lead.name[0] ? lead.name : "?"));
+        for (int i = 0; i < 4; i++) {
+            uint8_t mv = lead.moves[i];
+            s.moves[i].slotUsed = (mv != 0);
+            if (mv == 0) {
+                snprintf(s.moves[i].name, sizeof(s.moves[i].name), "---");
+                s.moves[i].pp = s.moves[i].maxPp = 0;
+                continue;
+            }
+            snprintf(s.moves[i].name, sizeof(s.moves[i].name), "%s", moveName(mv));
+            s.moves[i].pp    = pvpMyPp_[i];
+            const Gen1MoveData *md = gen1Move(mv);
+            s.moves[i].maxPp = md ? md->pp : pvpMyPp_[i];
+        }
+    }
+    // Foe: PvP doesn't ship the enemy dex over IPC right now — fall back to
+    // a sane placeholder (Mewtwo) so the layout still renders.  Replace once
+    // the daemon adds the enemy species to its UPDATE payload.
+    s.foe.species = 150;
+    s.foe.level   = s.you.level;  // best guess
+    s.foe.hp      = pvpEnemyHp_;
+    s.foe.maxHp   = pvpEnemyMaxHp_ ? pvpEnemyMaxHp_ : 1;
+    snprintf(s.foe.nickname, sizeof(s.foe.nickname), "%s",
+             pvpEnemyName_[0] ? pvpEnemyName_ : "ENEMY");
+
+    s.selectedMove = pvpMoveSel_;
+    s.mode = BattleWindow::Mode::FIGHT;
+
+    int n = (int)pvpLog_.size();
+    int start = n > BATTLE_LOG_LINES ? n - BATTLE_LOG_LINES : 0;
+    for (int i = start; i < n; i++) s.log.push_back(pvpLog_[i]);
+
+    snprintf(s.header, sizeof(s.header), "PvP  Turn %u", (unsigned)pvpTurn_);
+
+    if (screen_ == Screen::PVP_BATTLE_END) {
+        if      (pvpResult_ == 1) s.endResult = BattleWindow::EndResult::WIN;
+        else if (pvpResult_ == 2) s.endResult = BattleWindow::EndResult::LOSE;
+        else if (pvpResult_ == 3) s.endResult = BattleWindow::EndResult::DRAW;
+    }
+
+    battleWindow_.setState(s);
 }

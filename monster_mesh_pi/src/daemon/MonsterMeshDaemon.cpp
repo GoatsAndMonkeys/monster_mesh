@@ -93,9 +93,33 @@ bool MonsterMeshDaemon::init(const char *serialPort, const char *saveDir) {
         // When a SAV is loaded, do daycare checkIn with raw SAV buffer
         uint8_t rawSav[32768];
         if (watcher_.getRawSav(rawSav, sizeof(rawSav))) {
+            // Pull the real Gen 1 trainer name out of the SAV header
+            // (offset 0x2598, 11 bytes, terminator 0x50, character-set
+            // mapped: 0x80..0x99 = A..Z, 0xA0..0xB9 = a..z, 0xF6..0xFF =
+            // 0..9, 0x7F = space).  Replaces the "TRAINER" default so the
+            // status bar and beacons show the player's real handle.
+            char raw[12] = {};
+            for (int i = 0; i < 11; i++) {
+                uint8_t b = rawSav[0x2598 + i];
+                if (b == 0x50 || b == 0x00) break;
+                char c = '?';
+                if      (b >= 0x80 && b <= 0x99) c = 'A' + (b - 0x80);
+                else if (b >= 0xA0 && b <= 0xB9) c = 'a' + (b - 0xA0);
+                else if (b >= 0xF6 && b <= 0xFF) c = '0' + (b - 0xF6);
+                else if (b == 0x7F)              c = ' ';
+                raw[i] = c;
+            }
+            if (raw[0]) {
+                strncpy(gameName_, raw, sizeof(gameName_) - 1);
+                gameName_[sizeof(gameName_) - 1] = '\0';
+            }
             daycare_.checkIn(rawSav, shortName_, gameName_);
             pushPartyUpdate();
-            LOG_INFO("MonsterMeshDaemon: checked in party from %s", savPath);
+            // Re-broadcast NODE_INFO so the terminal status bar picks up
+            // the freshly-parsed trainer name immediately.
+            onNodeInfo(mesh_.localNodeId(), shortName_);
+            LOG_INFO("MonsterMeshDaemon: checked in %s (%s) from %s",
+                     shortName_, gameName_, savPath);
         }
     });
 
@@ -107,6 +131,23 @@ bool MonsterMeshDaemon::init(const char *serialPort, const char *saveDir) {
     // ── IPC server ─────────────────────────────────────────────────────────────
     ipc_.setMessageCallback([this](const std::string &msg) {
         onIpcMessage(msg);
+    });
+
+    // When a new mmterm client connects, re-broadcast the identity + party
+    // immediately so the header bar shows the real shortName/trainerName
+    // (instead of the "?" fallback) right away — the periodic broadcast
+    // would otherwise leave the new client looking empty for tens of seconds.
+    ipc_.setConnectCallback([this]() {
+        // Re-emit NODE_INFO using the current shortName_/gameName_.
+        char jsonBuf[160];
+        snprintf(jsonBuf, sizeof(jsonBuf),
+                 "{\"type\":\"NODE_INFO\",\"node_id\":%u,"
+                 "\"short_name\":\"%s\",\"game_name\":\"%s\"}",
+                 (unsigned)mesh_.localNodeId(), shortName_, gameName_);
+        ipc_.push(jsonBuf);
+        // Push current party state too — if a SAV is loaded, the new client
+        // will see the party list immediately instead of "waiting for daemon…".
+        pushPartyUpdate();
     });
 
     // Ensure state directory exists
@@ -171,12 +212,24 @@ void MonsterMeshDaemon::tryReconnectSerial() {
 #endif
         struct stat st;
         if (stat(checkPath, &st) != 0) {
-            // Port doesn't exist — don't burn 1-2 seconds spinning up Python
-            // just to print "No such file".  Just wait for the next tick.
-            return;
+            // Stored port is gone — happens whenever the user replugs the
+            // node into a different USB slot on macOS (the kernel assigns a
+            // fresh /dev/cu.usbmodem<N>).  Walk /dev for a Meshtastic node;
+            // if we find one, adopt it and spawn the relay against it.
+            std::string detected = MeshSerial::autoDetect();
+            if (detected.empty()) {
+                // No port at all — don't burn 1-2 seconds spinning up Python
+                // just to print "No such file".  Wait for the next tick.
+                return;
+            }
+            LOG_INFO("MonsterMeshDaemon: serial port moved %s -> %s",
+                     serialPort_, detected.c_str());
+            strncpy(serialPort_, detected.c_str(), sizeof(serialPort_) - 1);
+            serialPort_[sizeof(serialPort_) - 1] = '\0';
         }
         ok = mesh_.openRelay(relayScript_, serialPort_);
-        if (ok) LOG_INFO("MonsterMeshDaemon: relay subprocess relaunched");
+        if (ok) LOG_INFO("MonsterMeshDaemon: relay subprocess relaunched on %s",
+                         serialPort_);
     } else {
         // Direct mode — try stored port then auto-detect
         if (serialPort_[0] != '\0') {
@@ -483,11 +536,14 @@ void MonsterMeshDaemon::onNodeInfo(uint32_t nodeId, const char *sname) {
         strncpy(shortName_, sname, sizeof(shortName_) - 1);
         shortName_[sizeof(shortName_) - 1] = '\0';
     }
-    // Push node info to terminal so status bar can show the real short name
-    char jsonBuf[128];
+    // Push node info to terminal so status bar can show the real short
+    // name + the SAV's trainer (game_name) — terminal needs both so it can
+    // render the header line "  GPI / RED  | Nbrs:N | LEAD Lv##".
+    char jsonBuf[160];
     snprintf(jsonBuf, sizeof(jsonBuf),
-             "{\"type\":\"NODE_INFO\",\"node_id\":%u,\"short_name\":\"%s\"}",
-             nodeId, shortName_);
+             "{\"type\":\"NODE_INFO\",\"node_id\":%u,"
+             "\"short_name\":\"%s\",\"game_name\":\"%s\"}",
+             nodeId, shortName_, gameName_);
     ipc_.push(jsonBuf);
 }
 
@@ -673,9 +729,21 @@ void MonsterMeshDaemon::onIpcMessage(const std::string &msg) {
                     const DaycareState &st = daycare_.getState();
                     uint8_t  dexNums[6]  = {};
                     uint32_t xpGained[6] = {};
+                    uint8_t  oldLevels[6] = {};
+                    char     nicks[6][12] = {};
                     for (uint8_t i = 0; i < st.partyCount && i < 6; i++) {
-                        dexNums[i]  = st.pokemon[i].speciesDex;
-                        xpGained[i] = st.pokemon[i].totalXpGained;
+                        dexNums[i]   = st.pokemon[i].speciesDex;
+                        xpGained[i]  = st.pokemon[i].totalXpGained;
+                        // Snapshot pre-patch party level so we can report
+                        // the delta to the user as "MEWTWO 70 -> 72".
+                        oldLevels[i] = sram[SAV_POKEMON_DATA + i * SAV_POKEMON_SIZE
+                                            + PKM_LEVEL_PARTY];
+                        // Copy nickname (ASCII already)
+                        const char *src = st.pokemon[i].nickname;
+                        for (int j = 0; j < 11 && src[j]; j++) {
+                            char c = src[j];
+                            nicks[i][j] = (c < 0x20 || c == '"' || c == '\\') ? '?' : c;
+                        }
                     }
                     bool patched = DaycareSavPatcher::checkout(
                         sram, dexNums, xpGained, st.partyCount);
@@ -704,8 +772,35 @@ void MonsterMeshDaemon::onIpcMessage(const std::string &msg) {
                             ipc_.push("{\"type\":\"SAV_WRITEBACK\",\"ok\":0,\"reason\":\"rename\"}");
                         } else {
                             LOG_INFO("SAV writeback OK (atomic): %s", savPath);
+                            // Build a per-slot summary so the UI can show
+                            // "MEWTWO 70 -> 72 (+1024 XP)" etc.  Levels are
+                            // re-read from the now-patched SRAM buffer.
+                            char summary[1024];
+                            int p = 0;
+                            p += snprintf(summary + p, sizeof(summary) - p,
+                                "{\"type\":\"SAV_WRITEBACK\",\"ok\":1,"
+                                "\"applied\":1,\"path\":\"%s\",\"slots\":[",
+                                savPath);
+                            bool first_slot = true;
+                            for (uint8_t i = 0; i < st.partyCount && i < 6; i++) {
+                                if (xpGained[i] == 0) continue;
+                                uint8_t newLevel = sram[
+                                    SAV_POKEMON_DATA + i * SAV_POKEMON_SIZE
+                                    + PKM_LEVEL_PARTY];
+                                p += snprintf(summary + p, sizeof(summary) - p,
+                                    "%s{\"slot\":%u,\"nick\":\"%s\","
+                                    "\"old_level\":%u,\"new_level\":%u,"
+                                    "\"xp\":%u}",
+                                    first_slot ? "" : ",",
+                                    (unsigned)i, nicks[i],
+                                    (unsigned)oldLevels[i],
+                                    (unsigned)newLevel,
+                                    (unsigned)xpGained[i]);
+                                first_slot = false;
+                            }
+                            p += snprintf(summary + p, sizeof(summary) - p, "]}");
                             daycare_.clearTotalXpGained();
-                            ipc_.push("{\"type\":\"SAV_WRITEBACK\",\"ok\":1,\"applied\":1}");
+                            ipc_.push(summary);
                         }
                     }
                 }
@@ -807,7 +902,10 @@ void MonsterMeshDaemon::pushPartyUpdate() {
     std::string partyJson = buildPartyJson();
     const DaycareState &state = daycare_.getState();
 
-    char jsonBuf[1200];
+    // 6 slots × ~250 B JSON each (with dvs + stat_exp arrays) plus wrapper.
+    // 4 KB gives comfortable headroom -- with the old 1200 B buffer the 6th
+    // slot was getting truncated mid-JSON, leaving "???/Lv0" in the UI.
+    char jsonBuf[4096];
     snprintf(jsonBuf, sizeof(jsonBuf),
              "{\"type\":\"PARTY_UPDATE\",\"active\":%s,\"count\":%d,\"party\":%s}",
              daycare_.isActive() ? "1" : "0",

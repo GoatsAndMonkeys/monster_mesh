@@ -160,6 +160,11 @@ void IpcServer::acceptClient() {
 
     // Send a welcome push so client knows we're alive
     push("{\"type\":\"HELLO\",\"daemon\":\"mmd\"}\n");
+
+    // Daemon may want to push fresh state (NODE_INFO, party, daycare
+    // status) so the client doesn't see "—" / empty until the next
+    // periodic broadcast.
+    if (connectCb_) connectCb_();
 }
 
 void IpcServer::readClient() {

@@ -8,6 +8,7 @@
 #include "../battle/Gen1BattleEngine.h"
 #include "IpcClient.h"
 #include "InputHandler.h"
+#include "BattleWindow.h"
 #include <string>
 #include <vector>
 #include <ncurses.h>
@@ -71,18 +72,47 @@ public:
     bool shouldQuit()  const { return shouldQuit_; }
     void requestQuit()      { shouldQuit_ = true; }
 
+    // "Pentest Pikachu" ROM mode: when launched as a separate ROM in the
+    // RetroPie MonsterMesh system, mmterm boots straight into a battle screen
+    // (no menu) styled after the T114 pentest battle.  Set before run().
+    void setPentestMode(bool b) { pentestMode_ = b; }
+
 private:
     // ── Subsystems ────────────────────────────────────────────────────────────
     IpcClient    ipc_;
     InputHandler input_;
+    BattleWindow battleWindow_;   // SDL2 graphical battle screen (battle-only)
+
+    // Build a BattleWindow::State snapshot from the current local/PvP battle
+    // state and push it into battleWindow_.  Opens the window on first call
+    // for the active battle.  Called from renderBattle / renderPvpBattle.
+    void syncBattleWindow();
+    void syncPvpBattleWindow();
 
     // ── ncurses windows ───────────────────────────────────────────────────────
     WINDOW *winStatus_ = nullptr;  // row 0: status bar
     WINDOW *winInfo_   = nullptr;  // rows 1..(rows_-MENU_ROWS-1): info / detail panel
     WINDOW *winMenu_   = nullptr;  // bottom MENU_ROWS rows: tabbed menu
     int rows_ = 24, cols_ = 40;
-    static constexpr int MENU_ROWS    = 8;   // rows allocated to the menu panel
+    // The bottom menu region resizes per screen.  Battle screens want a
+    // compact FIGHT box (5 rows) so the info panel above can fit the
+    // sprites and message log.  The 3-tab menu screens need ~10 rows so
+    // five item rows can fit between the tab header, separator, and hint.
+    static constexpr int MENU_ROWS_BATTLE  = 5;
+    static constexpr int MENU_ROWS_DEFAULT = 8;   // 3 item rows + 5 chrome rows
+
+    // GBC DMG green-scale color slots.  These indices are written into the
+    // terminal's color palette via init_color() in startup() — anything
+    // numbered 16+ is safe (16-color terminals reserve 0..15).  Per-species
+    // sprite palettes occupy 32+.
+    static constexpr int GB_PAPER_ = 16;
+    static constexpr int GB_LIGHT_ = 17;
+    static constexpr int GB_DARK_  = 18;
+    static constexpr int GB_INK_   = 19;
+    bool gbColorsActive_ = false;   // true if init_color() succeeded
+    int menuRows_ = MENU_ROWS_DEFAULT;
     static constexpr int STATUS_ROWS  = 1;
+    void applyMenuRowsForScreen();   // resize winInfo_/winMenu_ as screen_ changes
 
     // ── Navigation state ──────────────────────────────────────────────────────
     Screen screen_     = Screen::MENU;
@@ -115,6 +145,13 @@ private:
     int         neighborCount_ = 0;
     bool        daycareActive_ = false;
     std::string lastEventText_;
+
+    // Local-node identity, populated from the daemon's NODE_INFO push and
+    // shown in the status bar.  shortName is the 4-char Meshtastic radio
+    // name; trainerName is the SAV trainer (Gen 1 offset 0x2598).  Empty
+    // strings render as "—" until the daemon supplies them.
+    char        localShortName_[5]    = "";
+    char        localTrainerName_[12] = "";
     int         lastEventXp_  = 0;
     int         lastEventSlot_ = 0;
 
@@ -125,7 +162,10 @@ private:
         int      partyCount;
         char     lead[11];   // lead pokemon nickname
         int      leadLevel;
+        uint64_t firstSeenMs;  // millis() when first appeared this session
     };
+    // Highlight new neighbors for this long after first appearance.
+    static constexpr uint64_t NEW_NEIGHBOR_HIGHLIGHT_MS = 30000;
 
     // Async-fight context: when the user challenges a neighbor we cache
     // their identity so the result message after the battle has names.
@@ -186,10 +226,18 @@ private:
     // ── Gym state ─────────────────────────────────────────────────────────────
     LordSave    lordSave_          = {};
     bool        lordLoaded_        = false;
-    int         gymSel_            = 0;   // highlighted gym (0-7)
+    int         gymSel_            = 0;   // highlighted gym (0..LORD_GYM_COUNT;
+                                          // index LORD_GYM_COUNT = Indigo Plateau)
     uint8_t     pendingGymIdx_     = 0;
     uint8_t     pendingTrainerIdx_ = 0;
     bool        inGymBattle_       = false;
+    // Indigo Plateau (Elite Four + Champion) gauntlet state.  inE4Battle_ runs
+    // the 5-member chain (no healing between); pendingE4Idx_ is 0..4.
+    bool        inE4Battle_        = false;
+    uint8_t     pendingE4Idx_      = 0;
+    // Selectable rows on the Gyms screen = 8 gyms + the league entry.
+    static constexpr int GYM_ROWS  = LORD_GYM_COUNT + 1;
+    static constexpr int LEAGUE_ROW = LORD_GYM_COUNT;   // index of Indigo Plateau
 
     // ── Info panel scroll (for party / neighbor / event detail views) ─────────
     int infoScroll_ = 0;
@@ -221,6 +269,13 @@ private:
     void drawHpBar(WINDOW *w, int y, int x, int width,
                    uint16_t hp, uint16_t maxHp, const char *label);
     void clearInfo();
+
+    // Gen 1 GB-style battle screen helpers.  drawBox() paints an ncurses
+    // border with an optional title chip in the top edge.  drawStatusBox()
+    // fills the contents with a name + level + inline HP bar + numeric HP.
+    void drawBox(WINDOW *w, int y, int x, int h, int w_, const char *title);
+    void drawStatusBox(WINDOW *w, int y, int x, int box_w, bool isFoe,
+                       const Gen1BattleEngine::BattlePoke &mon);
 
     // ── Input ────────────────────────────────────────────────────────────────
     void handleButton(const ButtonEvent &ev);
@@ -264,6 +319,35 @@ private:
     // ── Battle helpers ────────────────────────────────────────────────────────
     void startLocalBattle();
     void startRoguelike();
+    // Pentest Pikachu ROM: build a self-contained Pikachu-vs-wild battle and
+    // jump straight to the battle screen (independent of the SAV party).
+    void startPentestBattle();
+    void pentestAutoTick();          // auto-battle driver (moves play themselves)
+    bool pentestMode_      = false;  // launched as the pentest ROM
+    bool inPentestBattle_  = false;  // currently in a pentest-styled battle
+    bool pentestStarted_   = false;  // one-shot guard for the boot battle
+    uint64_t lastPentestTurnMs_ = 0; // throttle for auto turns
+    uint64_t pentestEndMs_      = 0; // when the current fight ended (0 = ongoing)
+    // The pentest Pikachu progresses through the Kanto zones as it levels — it
+    // starts at L5 and is persisted to its own file (NOT the player's SAV) so
+    // its level / XP are remembered across ROM relaunches.
+    uint8_t  pentestLevel_      = 5;
+    uint32_t pentestXp_         = 0;  // partial XP toward the next level
+    bool     pentestLoaded_     = false;
+    bool     pentestShowStatus_ = false;  // status overlay toggled with A
+    uint8_t  pentestDex_[19]    = {};     // 151-bit "seen" Pokedex (bitset)
+    uint8_t  pentestBeaten_[19] = {};     // 151-bit "beaten" Pokedex (bitset)
+    void pentestLoadProgress();       // read level/xp/dex from disk (default L5)
+    void pentestSaveProgress();       // write level/xp/dex to disk
+    void pentestButton(const ButtonEvent &ev);  // input while in a pentest scan
+    void pentestMarkSeen(uint8_t dex);          // flag a species as encountered
+    void pentestMarkBeaten(uint8_t dex);        // flag a species as defeated
+    void pentestBuildStatus(std::vector<std::string> &out);  // status overlay text
+    static constexpr uint64_t PENTEST_TURN_MS = 900;
+    static constexpr uint64_t PENTEST_END_MS  = 2500;  // victory linger before next
+    char pentestSsid_[24] = {};      // WiFi target name shown in the fight
+    char pentestVuln_[40] = {};      // vulnerability detail shown in the fight
+    char pentestZone_[24] = {};      // current Kanto zone/area name
     void battleSubmitPlayerAction();
     void battleRunCpuAndExecute();
     static void battleLogSinkStatic(const char *line, void *ctx);
@@ -274,6 +358,8 @@ private:
     void renderGymSelect();
     void gymSelectButton(const ButtonEvent &ev);
     void startGymBattle(uint8_t gymIdx, uint8_t trainerIdx);
+    // Start the Indigo Plateau gauntlet at Elite Four member `e4Idx` (0..4).
+    void startE4Battle(uint8_t e4Idx);
     void loadLordSave();
 
     // ── IPC ──────────────────────────────────────────────────────────────────

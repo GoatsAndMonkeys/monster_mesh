@@ -17,6 +17,13 @@ public:
 
     void setMessageCallback(MessageCallback cb) { msgCb_ = cb; }
 
+    // Fired immediately after a client connects (after HELLO is sent).
+    // Daemon registers this to push NODE_INFO + initial state so a
+    // newly-launched mmterm doesn't have to wait for the next
+    // periodic broadcast to populate the header.
+    using ConnectCallback = std::function<void()>;
+    void setConnectCallback(ConnectCallback cb) { connectCb_ = cb; }
+
     // Push a JSON message to the connected terminal (if any)
     void push(const std::string &json);
 
@@ -30,6 +37,7 @@ private:
     int clientFd_ = -1;
     char sockPath_[256] = {};
     MessageCallback msgCb_;
+    ConnectCallback connectCb_;
 
     // Line buffer for client
     char rxBuf_[4096];
