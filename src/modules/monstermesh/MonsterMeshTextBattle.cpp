@@ -49,10 +49,11 @@ void MonsterMeshTextBattle::startNetworkedAsInitiator(uint32_t remoteId,
                                                      const Gen1Party &oppParty,
                                                      uint32_t existingSeed)
 {
-    mode_     = Mode::NETWORKED;
-    phase_    = Phase::WAIT_REMOTE;
-    remoteId_ = remoteId;
-    session_  = (uint16_t)(millis() & 0xFFFF);
+    mode_        = Mode::NETWORKED;
+    phase_       = Phase::WAIT_REMOTE;
+    remoteId_    = remoteId;
+    session_     = (uint16_t)(millis() & 0xFFFF);
+    isInitiator_ = true;
     cursor_   = 0; switchCursor_ = 0;
     pendingRemoteAction_ = false;
     logFill_ = logHead_ = 0; scrollPending_ = 0;
@@ -82,10 +83,11 @@ void MonsterMeshTextBattle::startNetworkedAsReceiver(uint32_t remoteId,
                                                      uint32_t rngSeed,
                                                      const Gen1Party &oppParty)
 {
-    mode_     = Mode::NETWORKED;
-    phase_    = Phase::WAIT_ACTION;
-    remoteId_ = remoteId;
-    cursor_   = 0; switchCursor_ = 0;
+    mode_        = Mode::NETWORKED;
+    phase_       = Phase::WAIT_ACTION;
+    remoteId_    = remoteId;
+    isInitiator_ = false;
+    cursor_      = 0; switchCursor_ = 0;
     logFill_ = logHead_ = 0; scrollPending_ = 0;
 
     Gen1Party opp = (oppParty.count > 0) ? oppParty : myParty;
@@ -704,11 +706,22 @@ void MonsterMeshTextBattle::drawHpPanel(lgfx::LGFX_Device *g, uint8_t side, int 
     for (uint8_t i = 0; i < p.count && i < 6; ++i) {
         if (p.mons[i].hp > 0) alive++;
     }
-    char hdr[56];
-    snprintf(hdr, sizeof(hdr), "%s  L%u  %u/%u  [%u/%u]",
-             m.nickname[0] ? m.nickname : "?",
-             (unsigned)m.level, (unsigned)m.hp, (unsigned)m.maxHp,
-             (unsigned)alive, (unsigned)p.count);
+    char hdr[64];
+    if (mode_ == Mode::NETWORKED) {
+        const char *tag = (side == 0)
+            ? (isInitiator_ ? "You[SRV]" : "You[CLI]")
+            : (isInitiator_ ? "Foe[CLI]" : "Foe[SRV]");
+        snprintf(hdr, sizeof(hdr), "%s %s  L%u  %u/%u  [%u/%u]",
+                 tag,
+                 m.nickname[0] ? m.nickname : "?",
+                 (unsigned)m.level, (unsigned)m.hp, (unsigned)m.maxHp,
+                 (unsigned)alive, (unsigned)p.count);
+    } else {
+        snprintf(hdr, sizeof(hdr), "%s  L%u  %u/%u  [%u/%u]",
+                 m.nickname[0] ? m.nickname : "?",
+                 (unsigned)m.level, (unsigned)m.hp, (unsigned)m.maxHp,
+                 (unsigned)alive, (unsigned)p.count);
+    }
     g->setTextColor(FG, BG);
     g->setCursor(8, y);
     g->print(hdr);
@@ -832,7 +845,7 @@ void MonsterMeshTextBattle::drawHeader(lgfx::LGFX_Device *g)
     if (headerOverride_[0]) {
         g->print(headerOverride_);
     } else if (mode_ == Mode::NETWORKED) {
-        g->printf("LoRa Battle  T%u", engine_.turn());
+        g->printf("LoRa Battle [%s] T%u", isInitiator_ ? "SRV" : "CLI", engine_.turn());
     } else {
         g->printf("Roguelike  T%u",  engine_.turn());
     }

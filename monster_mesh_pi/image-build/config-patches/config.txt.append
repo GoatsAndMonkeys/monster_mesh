@@ -1,0 +1,64 @@
+# ────────────────────────────────────────────────────────────────────────────
+# Monster Nix / GPI Case 2W
+# Appended by image-build/customize.sh during image bake.
+#
+# Values verified against RetroFlag's official GPiCase2W RetroPie display
+# patch (https://github.com/RetroFlag/GPICASE2W-display-patch).  Two things
+# matter for the LCD to light up:
+#   1. /boot/overlays/dpi24.dtbo MUST be RetroFlag's custom 803-byte build,
+#      not the stock raspberry-pi-overlays one.  Pin assignments differ —
+#      stock dpi24 routes pixels to GPIOs the GPI Case's LCD ribbon doesn't
+#      read.  customize.sh copies it in from config-patches/overlays/.
+#   2. dpi_output_format=0x00016 + the specific 19.2 MHz hdmi_timings below
+#      match RetroFlag's panel datasheet.  Other values (0x6f005, 0x6f015,
+#      etc.) leave the LCD dark.
+# ────────────────────────────────────────────────────────────────────────────
+
+# ── Display: 640x480 LCD via DPI (RetroFlag-verified parameters) ───────────
+dtoverlay=dpi24
+display_rotate=0
+overscan_left=0
+overscan_right=0
+overscan_top=0
+overscan_bottom=0
+framebuffer_width=640
+framebuffer_height=480
+enable_dpi_lcd=1
+display_default_lcd=1
+dpi_group=2
+dpi_mode=87
+dpi_output_format=0x00016
+hdmi_timings=640 0 20 1 20 480 0 1 1 2 0 0 0 60 0 19200000 1
+
+# ── Audio: GPI Case 2W onboard amplifier ───────────────────────────────────
+# audremap with swap_lr matches RetroFlag's stock config.  pins_18_19 is
+# safe here because we're using RetroFlag's custom dpi24.dtbo, which does
+# NOT claim those pins.  (The stock dpi24 would conflict.)
+dtoverlay=audremap,pins_18_19,swap_lr
+disable_pvt=1
+disable_audio_dither=1
+audio_pwm_mode=2
+dtparam=audio=on
+
+# ── GPIO: power switch + safe-shutdown helper ──────────────────────────────
+# GPIO 26: slide-switch input — kernel triggers `systemctl poweroff` when
+# this pin is pulled low (active_low=1).  Matches RetroFlag's wiring.
+dtoverlay=gpio-shutdown,gpio_pin=26,active_low=1,gpio_pull=up
+# GPIO 27: "Pi is alive" signal — RetroFlag's SafeShutdown_gpi.py drives
+# this high at boot to tell the case's power circuit to keep delivering
+# power until the Pi explicitly relinquishes it.  Setting it via firmware
+# config (gpio=27=op,dh = output, drive high) means it's high from before
+# the kernel boots, so there's never a window where the case might cut
+# power prematurely.
+gpio=27=op,dh
+
+# ── Misc ───────────────────────────────────────────────────────────────────
+# Disable Bluetooth (saves ~30mA, frees UART for serial-mode meshtastic
+# nodes connected directly to the Pi without USB).
+dtoverlay=disable-bt
+
+# Disable rainbow splash on boot (looks unprofessional in a handheld).
+disable_splash=1
+
+# Shorten boot delay so EmulationStation appears faster after power-on.
+boot_delay=1

@@ -1,0 +1,8 @@
+# Image-build artifacts — large, regenerable, never check in.
+.cache/
+.build/
+dist/
+*.img
+*.img.gz
+*.img.xz
+*.sha256

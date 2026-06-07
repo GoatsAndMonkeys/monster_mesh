@@ -128,8 +128,9 @@ private:
     Mode  mode_  = Mode::OFF;
     Phase phase_ = Phase::IDLE;
 
-    uint32_t remoteId_ = 0;
-    uint16_t session_  = 0;
+    uint32_t remoteId_    = 0;
+    uint16_t session_     = 0;
+    bool     isInitiator_ = false;
     uint8_t  cursor_   = 0;          // selected move/party slot
     uint8_t  switchCursor_ = 0;
     bool     pendingRemoteAction_ = false;
