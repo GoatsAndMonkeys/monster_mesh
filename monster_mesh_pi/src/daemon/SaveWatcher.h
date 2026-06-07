@@ -3,6 +3,7 @@
 #include "../shared/PokemonData.h"
 #include <string>
 #include <functional>
+#include <ctime>
 
 class SaveWatcher {
 public:
@@ -39,6 +40,9 @@ private:
     static constexpr uint32_t POLL_INTERVAL_MS = 2000;
     char watchDir_[256] = {};
     char currentSav_[256] = {};
+    time_t currentMtime_ = 0;       // mtime of the currently-loaded save, so a
+                                    // content change to the *same* path forces
+                                    // a reload (party reorder, in-game edits).
     bool hasParty_ = false;
     Gen1Party party_ = {};
     uint8_t rawSav_[32768] = {};

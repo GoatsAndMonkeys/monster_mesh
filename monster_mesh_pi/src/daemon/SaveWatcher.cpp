@@ -70,6 +70,7 @@ void SaveWatcher::stop() {
     hasParty_  = false;
     hasRawSav_ = false;
     currentSav_[0] = '\0';
+    currentMtime_  = 0;
 }
 
 bool SaveWatcher::poll() {
@@ -85,12 +86,14 @@ bool SaveWatcher::poll() {
 
         const struct inotify_event *ev = (const struct inotify_event *)evBuf;
         if (ev->mask & (IN_CLOSE_WRITE | IN_MOVED_TO)) {
-            if (ev->len > 0) {
-                const char *name = ev->name;
-                size_t nameLen = strlen(name);
-                if (nameLen > 4 && strcmp(name + nameLen - 4, ".sav") == 0)
-                    changed = true;
-            }
+            // Trigger a rescan on ANY file write/move in the dir, not just
+            // names ending in ".sav".  RetroPie's libretro cores save to
+            // "<rom>.srm"; users commonly symlink that to "<rom>.sav" so the
+            // daemon can read it, but the inotify event for a write through
+            // the symlink can carry the ".srm" name.  scanAndLoad() still
+            // only *loads* valid 32 KB .sav files, so over-triggering here is
+            // harmless and a cheap directory restat.
+            if (ev->len > 0) changed = true;
         }
     }
 
@@ -146,8 +149,14 @@ bool SaveWatcher::scanAndLoad() {
     closedir(dir);
 
     if (bestPath[0] == '\0') return false;
-    if (strcmp(bestPath, currentSav_) == 0 && hasParty_) return false;
+    // Reload when the newest save is a different file OR the same file whose
+    // contents changed (mtime moved).  The old code skipped any reload of the
+    // same path, so editing the loaded save in-place — e.g. reordering the
+    // party in the emulator — never propagated to the daemon.
+    if (strcmp(bestPath, currentSav_) == 0 && hasParty_ && bestMtime == currentMtime_)
+        return false;
 
+    currentMtime_ = bestMtime;
     return loadSav(bestPath);
 }
 
