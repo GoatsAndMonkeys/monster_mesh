@@ -185,6 +185,36 @@ try:
 except Exception:
     mm_branch = "unknown"
 
+if platform.name == "espressif32":
+    def copy_firmware_to_builds(source, target, env):
+        import shutil
+        build_dir   = env.subst("$BUILD_DIR")
+        pioenv      = env.get("PIOENV", "unknown")
+        board_tag   = pioenv.replace("-tft", "").replace("-pro", "").replace("-", "")
+        base_name   = f"MonsterMesh-{board_tag}-b{mm_build}"
+        src_app     = os.path.join(build_dir, "firmware.bin")
+        src_factory = os.path.join(build_dir, "firmware.factory.bin")
+        proj_dir    = env["PROJECT_DIR"]
+        parent      = os.path.dirname(proj_dir)
+        bbs_dir     = os.path.join(os.path.dirname(parent), "mesh_bbs", "firmware-builds")
+        copies = [
+            (os.path.join(parent,   "firmware-builds"), src_app,     ".app.bin"),
+            (os.path.join(proj_dir, "firmware-builds"), src_app,     ".app.bin"),
+            (os.path.join(parent,   "firmware-builds"), src_factory, ".factory.bin"),
+            (os.path.join(proj_dir, "firmware-builds"), src_factory, ".factory.bin"),
+            (bbs_dir,                                   src_factory, ".factory.bin"),
+        ]
+        for fw_dir, src, suffix in copies:
+            if os.path.isfile(src):
+                os.makedirs(fw_dir, exist_ok=True)
+                dst = os.path.join(fw_dir, base_name + suffix)
+                shutil.copyfile(src, dst)
+                print(f"  [MonsterMesh] → {dst}")
+
+    env.AddPostAction("$BUILD_DIR/${PROGNAME}.factory.bin", copy_firmware_to_builds)
+
+mm_version = "P2.43"  # Human-readable release label shown on boot screen
+
 flags = [
         "-DAPP_VERSION=" + verObj["long"],
         "-DAPP_VERSION_SHORT=" + verObj["short"],
@@ -193,6 +223,7 @@ flags = [
         "-DBUILD_EPOCH=" + str(build_epoch),
         "-DMONSTERMESH_BUILD=" + mm_build,
         "-DMONSTERMESH_BRANCH=" + env.StringifyMacro(mm_branch),
+        "-DMONSTERMESH_VERSION=" + env.StringifyMacro(mm_version),
     ] + pref_flags
 
 print ("Using flags:")
@@ -208,6 +239,7 @@ for lb in env.GetLibBuilders():
         lb.env.Append(CPPDEFINES=[("APP_VERSION", verObj["long"])])
         lb.env.Append(CPPDEFINES=[("MONSTERMESH_BUILD", mm_build)])
         lb.env.Append(CPPDEFINES=[("MONSTERMESH_BRANCH", lb.env.StringifyMacro(mm_branch))])
+        lb.env.Append(CPPDEFINES=[("MONSTERMESH_VERSION", lb.env.StringifyMacro(mm_version))])
         # MonsterMesh: copy our patched device-ui sources over the upstream
         # ones before they are compiled. The patches/ tree mirrors the
         # device-ui source tree. Currently used to neuter the map tile SD

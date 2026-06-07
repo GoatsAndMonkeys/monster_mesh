@@ -15,7 +15,7 @@ LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_13;
 LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_20;
 LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_26;
 
-// Build number + branch from git (set by bin/platformio-custom.py)
+// Version label shown on boot screen (set by bin/platformio-custom.py)
 #ifndef MONSTERMESH_BUILD
 #define MONSTERMESH_BUILD 0
 #endif
@@ -24,6 +24,9 @@ LV_ATTRIBUTE_EXTERN_DATA extern const lv_font_t lv_font_cozette_26;
 #endif
 #define MM_STRINGIFY_(x) #x
 #define MM_STRINGIFY(x) MM_STRINGIFY_(x)
+#ifndef MONSTERMESH_VERSION
+#define MONSTERMESH_VERSION "b" MM_STRINGIFY(MONSTERMESH_BUILD)
+#endif
 
 objects_t objects;
 lv_obj_t *tick_value_change_obj;
@@ -86,7 +89,7 @@ void create_screen_boot_screen() {
             lv_obj_t *obj = lv_label_create(parent_obj);
             lv_obj_set_pos(obj, 0, -51);
             lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-            lv_label_set_text(obj, MONSTERMESH_BRANCH " b" MM_STRINGIFY(MONSTERMESH_BUILD));
+            lv_label_set_text(obj, MONSTERMESH_VERSION);
             lv_obj_set_style_align(obj, LV_ALIGN_BOTTOM_MID, LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_set_style_text_font(obj, &lv_font_cozette_13, LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_set_style_text_color(obj, lv_color_hex(0xff0f380f), LV_PART_MAIN | LV_STATE_DEFAULT);

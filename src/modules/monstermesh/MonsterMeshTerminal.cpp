@@ -541,12 +541,14 @@ void MonsterMeshTerminal::executeLine(const char *line)
     }
     if (strncmp(line, "version", 7) == 0) {
         char buf[64];
-#ifdef MONSTERMESH_BUILD
+#ifdef MONSTERMESH_VERSION
+        snprintf(buf, sizeof(buf), "MonsterMesh " MONSTERMESH_VERSION);
+#elif defined(MONSTERMESH_BUILD)
 #define MM_STRINGIFY_(x) #x
 #define MM_STRINGIFY(x) MM_STRINGIFY_(x)
-        snprintf(buf, sizeof(buf), "MonsterMesh build " MM_STRINGIFY(MONSTERMESH_BUILD));
+        snprintf(buf, sizeof(buf), "MonsterMesh b" MM_STRINGIFY(MONSTERMESH_BUILD));
 #else
-        snprintf(buf, sizeof(buf), "MonsterMesh build (unknown)");
+        snprintf(buf, sizeof(buf), "MonsterMesh (unknown)");
 #endif
         println(buf);
         return;
