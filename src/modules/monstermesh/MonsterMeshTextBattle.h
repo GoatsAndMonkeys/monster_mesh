@@ -47,6 +47,10 @@ public:
     explicit MonsterMeshTextBattle(MeshtasticTransport &transport)
       : transport_(transport) {}
 
+    // Must be called once at init so incoming CHALLENGEs can be filtered to
+    // only those addressed to this node.
+    void setMyNodeNum(uint32_t n) { myNodeNum_ = n; }
+
     // ── Lifecycle ───────────────────────────────────────────────────────────
     // ── Server-authoritative PvP entry point ──────────────────────────────
     // Initiator's only call. Stages our party, generates a session id, and
@@ -80,6 +84,12 @@ public:
     // Module uses this to gate the screen takeover so we don't blank the
     // user's terminal panel while the challenge is still in flight.
     bool awaitingAccept() const { return awaitingAccept_; }
+
+    // CLIENT role only: true while waiting for a FULL_STATE resync.
+    bool clientNeedsFullState() const { return clientNeedsFullState_; }
+
+    // Timestamp (millis) of the last received battle packet; 0 if none yet.
+    uint32_t lastRecvMs() const { return lastRecvMs_; }
 
     // Networked initiator. `myParty` is our current save's party; `oppParty`
     // is the peer's party (reconstructed from their daycare beacon — both
@@ -272,6 +282,8 @@ private:
     bool dirty_ = true;
     char headerOverride_[40] = {};
     char endPromptOverride_[48] = {};
+
+    uint32_t myNodeNum_ = 0;   // set via setMyNodeNum(); used to filter CHALLENGEs
 
     // Timeouts
     uint32_t lastRecvMs_ = 0;

@@ -1745,6 +1745,7 @@ int32_t MonsterMeshModule::runOnce()
         if (setupRetries_ == 0) {
             transport_.begin();
             transport_.setNodeId(nodeDB->getNodeNum());
+            textBattle_.setMyNodeNum(nodeDB->getNodeNum());
             dungeon_.begin();
         }
 
@@ -5407,9 +5408,19 @@ void MonsterMeshModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *stat
     if (!emulatorActive_) {
         display->setTextAlignment(TEXT_ALIGN_CENTER);
         display->setFont(ArialMT_Plain_16);
+#ifdef MONSTERMESH_BUILD
+#define MM_STR_(x) #x
+#define MM_STR(x) MM_STR_(x)
+        display->drawString(x + 64, y + 14, "MonsterMesh");
+        display->setFont(ArialMT_Plain_10);
+        display->drawString(x + 64, y + 30, "b" MM_STR(MONSTERMESH_BUILD));
+#undef MM_STR
+#undef MM_STR_
+#else
         display->drawString(x + 64, y + 20, "MonsterMesh");
         display->setFont(ArialMT_Plain_10);
-        display->drawString(x + 64, y + 40, setupStatus_);
+#endif
+        display->drawString(x + 64, y + 44, setupStatus_);
         return;
     }
 }

@@ -1558,7 +1558,7 @@ void unpackPartyMinTb(const uint8_t in[TB_PARTY_MIN_BYTES], Gen1Party &dst)
 } // namespace
 
 // Send the CHALLENGE packet. Layout:
-//   header (4B) | [0]=gen [1]=nameLen [2..]=name | partyMin (109 B)
+//   header (4B) | [0..3]=targetId (BE) [4]=gen [5]=nameLen [6..]=name | partyMin (109 B)
 void MonsterMeshTextBattle::serverAuthSendChallenge()
 {
     uint8_t buf[BATTLELINK_MAX_PKT];
@@ -1568,17 +1568,23 @@ void MonsterMeshTextBattle::serverAuthSendChallenge()
     pkt->setSessionId(session_);
     pkt->seq = 0;  // CHALLENGE doesn't participate in the UPDATE seq stream
 
+    // targetId (4B BE): receiving nodes drop the challenge if it's not for them.
+    pkt->payload[0] = (remoteId_ >> 24) & 0xFF;
+    pkt->payload[1] = (remoteId_ >> 16) & 0xFF;
+    pkt->payload[2] = (remoteId_ >>  8) & 0xFF;
+    pkt->payload[3] =  remoteId_        & 0xFF;
+
     size_t nameLen = strlen(myTbName_);
     if (nameLen > TB_MAX_NAME_LEN) nameLen = TB_MAX_NAME_LEN;
-    pkt->payload[0] = 1;                          // gen 1
-    pkt->payload[1] = (uint8_t)nameLen;
-    memcpy(pkt->payload + 2, myTbName_, nameLen);
-    packPartyMinTb(pendingMyParty_, pkt->payload + 2 + nameLen);
+    pkt->payload[4] = 1;                          // gen 1
+    pkt->payload[5] = (uint8_t)nameLen;
+    memcpy(pkt->payload + 6, myTbName_, nameLen);
+    packPartyMinTb(pendingMyParty_, pkt->payload + 6 + nameLen);
 
-    size_t payloadLen = 2 + nameLen + TB_PARTY_MIN_BYTES;
-    Serial.printf("[MMB] serverAuthSendChallenge: sz=%u tries=%u session=0x%04X\n",
+    size_t payloadLen = 6 + nameLen + TB_PARTY_MIN_BYTES;
+    Serial.printf("[MMB] serverAuthSendChallenge: sz=%u tries=%u session=0x%04X target=0x%08X\n",
                   (unsigned)(BATTLELINK_HDR_SIZE + payloadLen),
-                  (unsigned)challengeTries_ + 1, (unsigned)session_);
+                  (unsigned)challengeTries_ + 1, (unsigned)session_, (unsigned)remoteId_);
     transport_.queueSend(buf, BATTLELINK_HDR_SIZE + payloadLen);
     lastChallengeMs_ = millis();
     challengeTries_++;
@@ -1741,8 +1747,8 @@ void MonsterMeshTextBattle::serverAuthSendUpdate()
         // both write unconditionally without their own bounds checks, so
         // if LOG fills close to the limit they'd scribble past
         // pkt->payload[196] into adjacent stack memory and crash the
-        // deck. Cap the log section to leave at least 70 B free.
-        const size_t kPostLogReserve = 70;
+        // deck. Reserve: BENCH(49) + EnemyBench(19) + FX(19) = 87 bytes.
+        const size_t kPostLogReserve = 95;
         size_t logBudgetEnd = (BATTLELINK_MAX_PAYLOAD > kPostLogReserve)
                                  ? (BATTLELINK_MAX_PAYLOAD - kPostLogReserve)
                                  : 0;
@@ -1798,6 +1804,17 @@ void MonsterMeshTextBattle::serverAuthSendUpdate()
         pkt->payload[w++] = (uint8_t)cmActive.spcBoost;
         pkt->payload[w++] = (uint8_t)cmActive.accBoost;
         pkt->payload[w++] = (uint8_t)cmActive.evaBoost;
+        // Server/enemy bench: HP + status for all of the server's mons
+        // (engine P0 on server = P1 from client's POV). Without this the
+        // client's engine retains stale HP for benched/fainted server mons
+        // and hashes differently after a server pokemon faints and switches.
+        const auto &sbp = engine_.party(0);
+        pkt->payload[w++] = sbp.count;
+        for (uint8_t i = 0; i < sbp.count && i < 6; ++i) {
+            pkt->payload[w++] = (sbp.mons[i].hp >> 8) & 0xFF;
+            pkt->payload[w++] =  sbp.mons[i].hp       & 0xFF;
+            pkt->payload[w++] = sbp.mons[i].status;
+        }
     }
     if (flags & TB_UPD_FX) {
         // Per active mon + per side: visible Gen-1 FX state. Order:
@@ -2070,22 +2087,34 @@ void MonsterMeshTextBattle::serverAuthRetransmit(uint32_t nowMs)
 void MonsterMeshTextBattle::clientAuthOnChallengePkt(uint32_t fromId,
                                                      const uint8_t *buf, size_t len)
 {
-    if (len < BATTLELINK_HDR_SIZE + 2 + TB_PARTY_MIN_BYTES) {
+    if (len < BATTLELINK_HDR_SIZE + 6 + TB_PARTY_MIN_BYTES) {
         Serial.printf("[MMB] DROP CHALLENGE from=0x%08X reason=short_len=%u min=%u\n",
                       (unsigned)fromId, (unsigned)len,
-                      (unsigned)(BATTLELINK_HDR_SIZE + 2 + TB_PARTY_MIN_BYTES));
+                      (unsigned)(BATTLELINK_HDR_SIZE + 6 + TB_PARTY_MIN_BYTES));
         return;
     }
     const BattlePacket *pkt = (const BattlePacket *)buf;
-    uint8_t gen     = pkt->payload[0];
-    uint8_t nameLen = pkt->payload[1];
+
+    // targetId: drop challenges not addressed to this node.
+    uint32_t targetId = ((uint32_t)pkt->payload[0] << 24) |
+                        ((uint32_t)pkt->payload[1] << 16) |
+                        ((uint32_t)pkt->payload[2] <<  8) |
+                                   pkt->payload[3];
+    if (targetId != 0 && myNodeNum_ != 0 && targetId != myNodeNum_) {
+        Serial.printf("[MMB] DROP CHALLENGE from=0x%08X target=0x%08X (not us 0x%08X)\n",
+                      (unsigned)fromId, (unsigned)targetId, (unsigned)myNodeNum_);
+        return;
+    }
+
+    uint8_t gen     = pkt->payload[4];
+    uint8_t nameLen = pkt->payload[5];
     if (gen != 1) {
         Serial.printf("[MMB] DROP CHALLENGE from=0x%08X reason=gen=%u (expected 1)\n",
                       (unsigned)fromId, gen);
         return;
     }
     if (nameLen > TB_MAX_NAME_LEN) nameLen = TB_MAX_NAME_LEN;
-    if (len < (size_t)BATTLELINK_HDR_SIZE + 2 + nameLen + TB_PARTY_MIN_BYTES) {
+    if (len < (size_t)BATTLELINK_HDR_SIZE + 6 + nameLen + TB_PARTY_MIN_BYTES) {
         Serial.printf("[MMB] DROP CHALLENGE from=0x%08X reason=short_after_name "
                       "nameLen=%u len=%u\n",
                       (unsigned)fromId, nameLen, (unsigned)len);
@@ -2119,8 +2148,8 @@ void MonsterMeshTextBattle::clientAuthOnChallengePkt(uint32_t fromId,
     pendingRemoteAction_  = false;
 
     memset(peerTbName_, 0, sizeof(peerTbName_));
-    memcpy(peerTbName_, pkt->payload + 2, nameLen);
-    unpackPartyMinTb(pkt->payload + 2 + nameLen, pendingServerParty_);
+    memcpy(peerTbName_, pkt->payload + 6, nameLen);
+    unpackPartyMinTb(pkt->payload + 6 + nameLen, pendingServerParty_);
 
     char line[40];
     snprintf(line, sizeof(line), "%.12s wants to battle!",
@@ -2353,6 +2382,18 @@ void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len
             m.accBoost = (int8_t)b[4];
             m.evaBoost = (int8_t)b[5];
         }
+        // Enemy bench: HP + status for all server mons (engine P1 from client).
+        // Keeps benched/fainted mons in sync so the hash matches after a switch.
+        const uint8_t *ecp = take(1); if (!ecp) return;
+        uint8_t ecount = *ecp; if (ecount > 6) ecount = 6;
+        auto &ep2 = engine_.party(1);
+        for (uint8_t i = 0; i < ecount; ++i) {
+            const uint8_t *p = take(3); if (!p) return;
+            if (i < ep2.count) {
+                ep2.mons[i].hp     = ((uint16_t)p[0] << 8) | p[1];
+                ep2.mons[i].status = p[2];
+            }
+        }
     }
     if (flags & TB_UPD_FX) {
         // Wire 0 = us (engine P0); wire 1 = server (engine P1).
@@ -2550,6 +2591,9 @@ void MonsterMeshTextBattle::clientAuthOnFullStatePkt(const uint8_t *buf, size_t 
     lastAppliedUpdateSeq_ = pkt->seq;
     lastRecvMs_ = millis();
     dirty_ = true;
+    // Discard any pending action from the diverged state so the retransmit
+    // timer doesn't replay it for the wrong turn after resync.
+    clientActionType_ = 0xFF;
     appendLog("State reconverged.");
 
     if (result == TB_RESULT_ONGOING) {
@@ -2606,7 +2650,10 @@ void MonsterMeshTextBattle::clientAuthRetransmit(uint32_t nowMs)
         clientAuthSendAccept(true);
     }
     // ACTION_V2 retransmit while waiting for next UPDATE.
-    if (clientActionType_ != 0xFF &&
+    // Blocked while clientNeedsFullState_ — retransmitting with an advanced
+    // clientTurn_ while the state is diverged causes the server to advance
+    // another turn from the wrong base, producing a cascade of mismatches.
+    if (!clientNeedsFullState_ && clientActionType_ != 0xFF &&
         (nowMs - lastClientActionSendMs_) >= TB_ACTION_RESEND_MS) {
         clientAuthSendActionV2(clientActionType_, clientActionIndex_);
     }
