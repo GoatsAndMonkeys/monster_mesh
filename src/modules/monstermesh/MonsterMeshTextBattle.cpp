@@ -970,7 +970,8 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
     // the same value and the peer-catch-up path can no longer help a
     // peer stuck on the previous turn). It also floods the wire with
     // duplicate ACTION packets out of band with the 4 s resend timer.
-    if (phase_ == Phase::WAIT_REMOTE || phase_ == Phase::ANIMATING) {
+    if (phase_ == Phase::WAIT_REMOTE || phase_ == Phase::ANIMATING ||
+        phase_ == Phase::WAIT_PEER_READY) {
         return;
     }
 

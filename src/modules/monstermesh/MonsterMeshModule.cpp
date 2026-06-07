@@ -654,6 +654,10 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                  (PktType)bp->type == PktType::TEXT_BATTLE_STATE_REQUEST||
                  (PktType)bp->type == PktType::TEXT_BATTLE_FULL_STATE)  &&
                 mp.from != nodeDB->getNodeNum()) {
+                Serial.printf("[MMB] dispatcher → handlePacket type=0x%02X from=0x%08X len=%u tbActive=%d\n",
+                              (unsigned)bp->type, (unsigned)mp.from,
+                              (unsigned)mp.decoded.payload.size,
+                              (int)textBattleActive_);
                 textBattle_.handlePacket(mp.from,
                                           mp.decoded.payload.bytes,
                                           mp.decoded.payload.size);
@@ -2835,7 +2839,12 @@ int32_t MonsterMeshModule::runOnce()
 
     // Daycare tick — only run while in the Meshtastic UI. The radio is asleep
     // in emu/browser mode, so beacons would just queue up uselessly.
-    if (setupDone_ && !emulatorActive_ && !browserActive_ && daycare_.isActive()) {
+    // P2.39: also gate while a textBattle is active. Daycare's beacon TX +
+    // event-DM TX competes with CHALLENGE/ACCEPT/UPDATE for LoRa airtime;
+    // when both fire at once Red's radio queue wedged (b104-pattern) and
+    // the ACCEPT never made it to Blue.
+    if (setupDone_ && !emulatorActive_ && !browserActive_ &&
+        !textBattle_.isActive() && daycare_.isActive()) {
         daycare_.tick(millis());
     }
 
@@ -3361,11 +3370,16 @@ int32_t MonsterMeshModule::runOnce()
         // timer. No more lgfx-direct render, no more flush_cb park,
         // no more recovery sweep. Update only on dirty.
         if (textBattle_.dirty()) {
-            // P2.32.4: spiLock wrap REVERTED — it deadlocked with the
-            // LVGL render thread, which takes spiLock inside the
-            // LGFX flush_cb. A → B vs B → A. Race is tolerable; the
-            // user proved a full battle worked at P2.31 without it.
-            updateLvBattleScreen();
+            // P2.39b: REMOVED runOnce-side updateLvBattleScreen call.
+            // It races with the LVGL render task (we mutate 20+ widgets
+            // while LVGL is reading them on its own thread) and is the
+            // root cause of the mid-PvP crashes (~30-90 s after CHALLENGE
+            // is sent). The key-press path at the bottom of the file
+            // already refreshes the screen from the LVGL thread on
+            // every keypress — same-thread, safe. State changes that
+            // happen between keypresses (CHALLENGE retx logs, ACCEPT
+            // ack, "Battle begins!" line) won't appear until the next
+            // key press, which is an acceptable trade vs. random freeze.
             textBattle_.clearDirty();
         }
 #if HAS_TFT
@@ -3793,10 +3807,39 @@ void MonsterMeshModule::drainTxQueue()
     uint8_t buf[237];
     size_t len = 0;
 
-    while (transport_.hasPendingSend()) {
-        if (!transport_.dequeueSend(buf, len, sizeof(buf))) break;
+    // P2.38 diag: log only when the queue actually has work, throttled
+    // to avoid spam. Helps narrow down whether ACCEPT is missing the
+    // drain entirely vs. being queued + drained + just not heard.
+    static uint32_t s_drainCalls = 0;
+    static uint32_t s_drainDrained = 0;
+    s_drainCalls++;
+    bool hadWork = transport_.hasPendingSend();
+    if (hadWork) {
+        Serial.printf("[MMB] drainTxQueue: ENTER calls=%lu drained=%lu hasPending=YES\n",
+                      (unsigned long)s_drainCalls, (unsigned long)s_drainDrained);
+    }
 
+    while (transport_.hasPendingSend()) {
+        s_drainDrained++;
+        if (!transport_.dequeueSend(buf, len, sizeof(buf))) {
+            Serial.printf("[MMB] drainTxQueue: dequeueSend FAILED\n");
+            break;
+        }
+
+        uint8_t pktType = (len > 0) ? buf[0] : 0xFF;
         meshtastic_MeshPacket *p = router->allocForSending();
+        if (!p) {
+            Serial.printf("[MMB] drainTxQueue: allocForSending NULL — DROPPED pkt type=0x%02X len=%u\n",
+                          pktType, (unsigned)len);
+            continue;
+        }
+        // P2.37: REVERTED unicast (P2.36) — Meshtastic routes unicast
+        // PRIVATE_APP through PKI encryption on the primary channel
+        // (Ch=0x0), not our MonsterMesh channel — so the peer would
+        // never see it on the MM RX path. Back to broadcast. Airtime
+        // contention is addressed instead by jittering retransmit
+        // intervals (in MonsterMeshTextBattle::serverAuth/clientAuth
+        // retransmit paths).
         p->to = NODENUM_BROADCAST;
         // MMB engine traffic (TEXT_BATTLE_ACTION/HASH/FORFEIT) on the
         // MonsterMesh channel so it MQTT-bridges across LoRa range.
@@ -3805,6 +3848,9 @@ void MonsterMeshModule::drainTxQueue()
         p->decoded.payload.size = len;
         memcpy(p->decoded.payload.bytes, buf, len);
 
+        Serial.printf("[MMB] drainTxQueue: sendToMesh type=0x%02X len=%u ch=%u to=0x%08X\n",
+                      pktType, (unsigned)len, (unsigned)mmChannel_,
+                      (unsigned)p->to);
         service->sendToMesh(p);
     }
 }
@@ -4617,6 +4663,10 @@ void MonsterMeshModule::buildLvBattleScreen()
     if (lvBattleScreen_) return;
     Serial.printf("[MMB] buildLvBattleScreen: lv_obj_create scr\n");
     lv_obj_t *scr = lv_obj_create(NULL);
+    // P2.38: P2.37 added lv_obj_set_size/pos/border_width/margin_all
+    // on `scr` — that combo crashes during widget tree build (deck
+    // freeze + reboot reliably reproducible). Reverted to the
+    // simpler P2.34 init that worked end-to-end.
     lv_obj_set_style_bg_color(scr, lv_color_white(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_pad_all(scr, 0, LV_PART_MAIN);
@@ -4747,6 +4797,27 @@ void MonsterMeshModule::buildLvBattleScreen()
     lvBattleScreen_ = scr;
     Serial.printf("[MMB] buildLvBattleScreen: DONE scr=%p\n", scr);
     LOG_INFO("[MonsterMesh] LVGL battle screen built (Gen-1 layout)\n");
+
+    // P2.39c: LVGL-thread refresh timer. Replaces the runOnce-side
+    // updateLvBattleScreen call we removed (that one raced with the
+    // LVGL render task and crashed the deck). This timer runs ON the
+    // LVGL thread (same thread as render and key input) so widget
+    // mutations are safe. Polls textBattle.dirty() every 250 ms; if
+    // dirty, refresh and clear. Keeps the screen showing live state
+    // (CHALLENGE retx logs, ACCEPT-arrived "Battle begins!", new
+    // UPDATE turn data) without the race.
+    static auto refreshCb = [](lv_timer_t *t) {
+        auto *self = (MonsterMeshModule *)lv_timer_get_user_data(t);
+        if (!self) return;
+        if (self->textBattle_.dirty() && self->lvBattleActive_) {
+            self->updateLvBattleScreen();
+            self->textBattle_.clearDirty();
+        }
+    };
+    if (!lvBattleRefreshTimer_) {
+        lvBattleRefreshTimer_ = lv_timer_create(refreshCb, 250, this);
+        Serial.printf("[MMB] buildLvBattleScreen: refresh timer armed @250ms\n");
+    }
 }
 
 // P2.31: render a Gen1ColorIcon (56×56 4-color, GBC-style palette) into
@@ -4921,7 +4992,8 @@ void MonsterMeshModule::updateLvBattleScreen()
         // their K-press registered.
         auto p = textBattle_.currentPhase();
         if (p == MonsterMeshTextBattle::Phase::WAIT_REMOTE ||
-            p == MonsterMeshTextBattle::Phase::ANIMATING) {
+            p == MonsterMeshTextBattle::Phase::ANIMATING ||
+            p == MonsterMeshTextBattle::Phase::WAIT_PEER_READY) {
             const char *hint = "\n> Waiting for opponent...";
             for (const char *s = hint; *s && pos < sizeof(framed) - 1; ++s) {
                 framed[pos++] = *s;
