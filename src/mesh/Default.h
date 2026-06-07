@@ -47,6 +47,7 @@
 #define default_mqtt_root "kanto"
 #define default_mqtt_encryption_enabled true
 #define default_mqtt_tls_enabled true
+#define default_mqtt_json_enabled true
 
 #define IF_ROUTER(routerVal, normalVal)                                                                                          \
     ((config.device.role == meshtastic_Config_DeviceConfig_Role_ROUTER) ? (routerVal) : (normalVal))

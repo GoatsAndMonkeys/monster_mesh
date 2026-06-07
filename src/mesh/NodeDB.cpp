@@ -885,6 +885,7 @@ void NodeDB::installDefaultModuleConfig()
 #else
     moduleConfig.mqtt.tls_enabled = default_mqtt_tls_enabled;
 #endif
+    moduleConfig.mqtt.json_enabled = default_mqtt_json_enabled;
 
     moduleConfig.has_neighbor_info = true;
     moduleConfig.neighbor_info.enabled = false;
