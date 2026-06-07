@@ -40,9 +40,7 @@
 // multi-tenant and uses TLS SNI to route to your tenant — connecting to the
 // custom hostname makes the broker abort the TLS handshake with
 // "unrecognized_name" within ~1s. Connect to the EMQX-native hostname so
-// the SNI matches. Upgrade to Dedicated tier (with BYO cert) to use
-// mqtt.cableclub.net properly.
-#define default_mqtt_address "sf17b671.ala.us-east-1.emqxsl.com"
+#define default_mqtt_address "cableclub.net"
 #define default_mqtt_username "ash"
 #define default_mqtt_password "large4meowth"
 // MonsterMesh private namespace on the EMQX broker. The framework's auto-
