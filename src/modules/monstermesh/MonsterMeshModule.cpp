@@ -652,7 +652,8 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                  (PktType)bp->type == PktType::TEXT_BATTLE_CHALLENGE    ||
                  (PktType)bp->type == PktType::TEXT_BATTLE_ACCEPT       ||
                  (PktType)bp->type == PktType::TEXT_BATTLE_STATE_REQUEST||
-                 (PktType)bp->type == PktType::TEXT_BATTLE_FULL_STATE)  &&
+                 (PktType)bp->type == PktType::TEXT_BATTLE_FULL_STATE   ||
+                 (PktType)bp->type == PktType::TEXT_BATTLE_READY)       &&
                 mp.from != nodeDB->getNodeNum()) {
                 Serial.printf("[MMB] dispatcher → handlePacket type=0x%02X from=0x%08X len=%u tbActive=%d\n",
                               (unsigned)bp->type, (unsigned)mp.from,
@@ -2910,18 +2911,18 @@ int32_t MonsterMeshModule::runOnce()
         }
     }
 
-    // Battle just ended on this deck — restore the LVGL flush_cb the
-    // existing pendingBattleEndCleanup_ flow uses, so the Meshtastic
-    // UI starts rendering again. Only fires when we actually parked
-    // flush_cb (savedFlushCb_ != null); several legacy paths set
-    // textBattleActive_=true without parking, and firing the cleanup
-    // there triggers stray lv_refr_now + refocus that collides with
-    // incoming-DM notification rendering and reboots the deck.
-    if (textBattleActive_ && !textBattle_.isActive() && setupDone_ &&
-        savedFlushCb_ != nullptr) {
+    // PvP battle ended — fire cleanup so the LVGL battle screen is dismissed
+    // and the terminal gets focus back. The savedFlushCb_ guard was removed in
+    // P2.28 (flush_cb parking eliminated); keeping it here caused textBattleActive_
+    // to stay true forever after any PvP session, making subsequent mmb attempts
+    // return "already in a battle" until reboot. Legacy gym/explore/E4 paths set
+    // textBattleActive_=false themselves at line 3634, so this block only fires
+    // for NETWORKED (PvP) sessions. hideLvBattleScreen() no-ops if !lvBattleActive_.
+    if (textBattleActive_ && !textBattle_.isActive() && setupDone_) {
         textBattleActive_ = false;
         pendingBattleEndCleanup_ = true;
-        LOG_INFO("[MonsterMesh] textBattle exited externally — scheduling LVGL restore\n");
+        LOG_INFO("[MonsterMesh] textBattle exited — scheduling LVGL restore\n");
+        Serial.printf("[MMB] cleanup: textBattleActive=false pendingCleanup=true\n");
     }
 
     // ── Take over the screen as soon as textBattle is active.
@@ -2932,7 +2933,13 @@ int32_t MonsterMeshModule::runOnce()
     // so the user isn't stuck — the screen returns to terminal on
     // timeout. CLIENT-side WAIT_CHALLENGE_OVERLAY takes over because
     // the overlay IS the Y/N prompt.
-    bool shouldOwnScreen = textBattle_.isActive();
+    // SERVER role: don't show the battle screen until the CLIENT accepts.
+    // While awaitingAccept_, the server stays in the terminal (showing
+    // "Challenging..." status) and only switches to the battle station after
+    // ACCEPT arrives and the engine is populated with both parties.
+    bool shouldOwnScreen = textBattle_.isActive() &&
+                           !(textBattle_.role() == MonsterMeshTextBattle::Role::SERVER &&
+                             textBattle_.awaitingAccept());
     // P2.28 diag: throttled log of takeover-gate inputs so we can see
     // why "fight" / "mmb" doesn't end up on the LVGL battle screen
     // when the user expects it to.
@@ -3007,6 +3014,9 @@ int32_t MonsterMeshModule::runOnce()
         textBattle_.startServerAuthAsInitiator(target,
                                                 terminal_.getParty(),
                                                 ourShort);
+        // Mark active now so duplicate challenges are blocked. Screen takeover
+        // is deferred until ACCEPT arrives (shouldOwnScreen skips awaitingAccept_).
+        textBattleActive_ = true;
         LOG_INFO("[MonsterMesh] mmb2: sent CHALLENGE → %s (0x%08X), "
                  "waiting for ACCEPT before opening battle screen\n",
                  peerShort, (unsigned)target);
@@ -5348,6 +5358,14 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
     // battle and returns to the terminal scrollback that was preserved in the
     // background.
     if (textBattleActive_) {
+        // While the server is waiting for ACCEPT (challenge sent, battle screen
+        // not shown yet), keep the terminal responsive so the user can see status.
+        if (textBattle_.awaitingAccept() && terminalActive_ &&
+            !emulatorActive_ && !browserActive_ && ascii != 0x05 &&
+            terminal_.hasInputFocus()) {
+            terminal_.onKey(ascii);
+            return;
+        }
         textBattle_.handleKey(ascii);
         // Push the new state straight into the LVGL battle screen from
         // this LVGL-thread context. Doing it from runOnce (LoRa thread)
