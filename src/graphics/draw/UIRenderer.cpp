@@ -945,9 +945,17 @@ void UIRenderer::drawIconScreen(const char *upperMsg, OLEDDisplay *display, OLED
     }
     // Draw version and short name in bottom middle
     char buf[25];
+#ifdef MONSTERMESH_BUILD
+#define MM_STR_(x) #x
+#define MM_STR(x) MM_STR_(x)
+    snprintf(buf, sizeof(buf), "b" MM_STR(MONSTERMESH_BUILD) "   %s",
+             graphics::UIRenderer::haveGlyphs(owner.short_name) ? owner.short_name : "");
+#undef MM_STR
+#undef MM_STR_
+#else
     snprintf(buf, sizeof(buf), "%s   %s", xstr(APP_VERSION_SHORT),
              graphics::UIRenderer::haveGlyphs(owner.short_name) ? owner.short_name : "");
-
+#endif
     display->drawString(x + getStringCenteredX(buf), y + SCREEN_HEIGHT - FONT_HEIGHT_MEDIUM, buf);
     screen->forceDisplay();
 
@@ -967,9 +975,17 @@ void UIRenderer::drawIconScreen(const char *upperMsg, OLEDDisplay *display, OLED
 
     // Draw version and short name in upper right
     char buf[25];
+#ifdef MONSTERMESH_BUILD
+#define MM_STR_(x) #x
+#define MM_STR(x) MM_STR_(x)
+    snprintf(buf, sizeof(buf), "b" MM_STR(MONSTERMESH_BUILD) "\n%s",
+             graphics::UIRenderer::haveGlyphs(owner.short_name) ? owner.short_name : "");
+#undef MM_STR
+#undef MM_STR_
+#else
     snprintf(buf, sizeof(buf), "%s\n%s", xstr(APP_VERSION_SHORT),
              graphics::UIRenderer::haveGlyphs(owner.short_name) ? owner.short_name : "");
-
+#endif
     display->setTextAlignment(TEXT_ALIGN_RIGHT);
     display->drawString(x + SCREEN_WIDTH, y + 0, buf);
     screen->forceDisplay();
