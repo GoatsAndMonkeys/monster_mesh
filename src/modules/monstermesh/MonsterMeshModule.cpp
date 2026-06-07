@@ -397,7 +397,7 @@ void MonsterMeshModule::ensureMonsterMeshChannel()
     const char *desiredUser     = default_mqtt_username;
     const char *desiredPass     = default_mqtt_password;
     const char *desiredRoot     = "kanto";
-    const bool  desiredTls      = true;
+    const bool  desiredTls      = default_mqtt_tls_enabled;
     // MQTT must be enabled on the device-side (not phone-proxy) so the deck
     // connects to the EMQX broker directly via WiFi. The phone app's "Send
     // via Phone" toggle silently flips proxy_to_client_enabled=true, after
@@ -3202,6 +3202,32 @@ int32_t MonsterMeshModule::runOnce()
     }
 
     // ── T2: text battle ────────────────────────────────────────────────────
+    // Pre-check: if fight was requested but a stale NETWORKED battle is
+    // holding textBattleActive_=true (e.g. a PvP challenge that the user
+    // gave up on), force-exit the stale session so the local CPU fight
+    // can start. Clears stale NETWORKED sessions (SERVER awaiting accept, or
+    // CLIENT stuck in WAIT_REMOTE after the peer went away) so a local CPU
+    // fight can launch. An actively-progressing battle (recent traffic, not
+    // waiting for accept) is left alone.
+    if (textBattleStartReq_ && textBattleActive_ && setupDone_ &&
+        !emulatorActive_ && !browserActive_) {
+        if (textBattle_.isActive()) {
+            bool staleServer = (textBattle_.role() == MonsterMeshTextBattle::Role::SERVER &&
+                                textBattle_.awaitingAccept());
+            bool staleClient = (textBattle_.role() == MonsterMeshTextBattle::Role::CLIENT &&
+                                textBattle_.clientNeedsFullState());
+            bool staleNetworked = (textBattle_.role() != MonsterMeshTextBattle::Role::LEGACY &&
+                                   (millis() - textBattle_.lastRecvMs()) > 90000u);
+            if (staleServer || staleClient || staleNetworked) {
+                Serial.printf("[MMB] fight: force-exiting stale battle "
+                              "(staleServer=%d staleClient=%d staleNetworked=%d)\n",
+                              (int)staleServer, (int)staleClient, (int)staleNetworked);
+                textBattle_.exit();
+                textBattleActive_ = false;
+                pendingBattleEndCleanup_ = true;
+            }
+        }
+    }
     // Start: the terminal `fight` command set the request flag. Suppress the
     // LVGL flush the same way the emulator path does, clear the screen, and
     // hand the staged party + a CPU mirror-match to startLocal().
@@ -4856,6 +4882,15 @@ void MonsterMeshModule::buildLvBattleScreen()
     static auto refreshCb = [](lv_timer_t *t) {
         auto *self = (MonsterMeshModule *)lv_timer_get_user_data(t);
         if (!self) return;
+        // Re-assert battle screen if DeviceUI stole the active LVGL screen
+        // (DeviceUI calls lv_screen_load on its own screens in response to
+        // incoming packets; without this, the battle screen disappears and
+        // the user sees the Meshtastic home screen instead of the battle).
+        if (self->lvBattleActive_ && self->lvBattleScreen_ &&
+            lv_screen_active() != (lv_obj_t *)self->lvBattleScreen_) {
+            Serial.printf("[MMB] refreshCb: DeviceUI stole screen — re-asserting battle screen\n");
+            lv_screen_load((lv_obj_t *)self->lvBattleScreen_);
+        }
         if (self->textBattle_.dirty() && self->lvBattleActive_) {
             self->updateLvBattleScreen();
             self->textBattle_.clearDirty();

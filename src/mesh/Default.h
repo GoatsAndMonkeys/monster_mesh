@@ -46,7 +46,7 @@
 // every boot, so the broker-side topics stay flat and predictable.
 #define default_mqtt_root "kanto"
 #define default_mqtt_encryption_enabled true
-#define default_mqtt_tls_enabled true
+#define default_mqtt_tls_enabled false
 #define default_mqtt_json_enabled true
 
 #define IF_ROUTER(routerVal, normalVal)                                                                                          \
