@@ -582,6 +582,10 @@ public:
     // Meshtastic-UI bleed-through is possible.
     void *lvBattleScreen_     = nullptr;
     void *lvBattleRefreshTimer_ = nullptr;  // lv_timer_t* (P2.39c)
+    // P2.39e: deferred screen setup — showLvBattleScreen() must run on the
+    // LVGL thread (monsterMeshKeyboardRead), not on runOnce() (main task).
+    volatile bool needsBattleScreen_   = false;
+    bool          battleScreenPending_ = false;
     // Phase 2 — Gen 1 battle UI widget tree (RPi mockup port):
     //   foe panel (bordered box):  FOE label + name + level + HP bar
     //   foe sprite area  (top-right, placeholder for now)

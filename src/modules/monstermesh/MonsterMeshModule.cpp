@@ -2962,27 +2962,25 @@ int32_t MonsterMeshModule::runOnce()
     // textBattleActive_ — fight/gym/explore set textBattleActive_=true
     // before runOnce reaches this block, so the old gate was always
     // false and the LVGL battle screen never showed up.
-    if (shouldOwnScreen && !lvBattleActive_ && setupDone_) {
+    // P2.39e: also gate on battleScreenPending_ so we don't re-fire the
+    // takeover every runOnce tick while the LVGL thread hasn't yet consumed
+    // needsBattleScreen_ (which may take up to ~33ms at 30fps).
+    if (shouldOwnScreen && !lvBattleActive_ && !battleScreenPending_ && setupDone_) {
         Serial.printf("[MMB] takeover: shouldOwn=1 lvBattleActive=0 setupDone=1\n");
         Serial.flush();
         textBattleActive_ = true;
-        // P2.28: LVGL-native battle screen. We lv_screen_load a
-        // dedicated battle screen whose widget tree we control, so
-        // LVGL is in charge the whole time and nothing can bleed
-        // through from Meshtastic's home screen. No more lgfx-direct
-        // draws, no more flush_cb park, no more refresh-timer pause.
-        Serial.printf("[MMB] takeover: calling showLvBattleScreen\n");
+        // P2.39e: do NOT call showLvBattleScreen() here. It calls
+        // buildLvBattleScreen() (creates LVGL widgets) and lv_screen_load()
+        // — both are NOT thread-safe from the main task. Set flags instead;
+        // monsterMeshKeyboardRead() (LVGL thread) will pick them up within
+        // ~33ms and call showLvBattleScreen() safely. dirty_ is set by
+        // startLocal() so the 250ms refreshCb timer will do the first
+        // updateLvBattleScreen() immediately after setup.
+        battleScreenPending_ = true;
+        needsBattleScreen_   = true;
+        Serial.printf("[MMB] takeover: deferred showLvBattleScreen to LVGL thread\n");
         Serial.flush();
-        showLvBattleScreen();
-        // P2.39d: do NOT call updateLvBattleScreen() here. showLvBattleScreen()
-        // calls lv_screen_load() which makes the battle screen active, so the
-        // LVGL render task immediately starts painting it. Calling 20+ widget
-        // mutations from runOnce() (main task) at the same time races the render
-        // task and crashes the deck. The 250ms refreshCb timer will fire shortly
-        // and do the first update safely from the LVGL task. dirty_ is already
-        // true (set by startLocal()), so the timer will pick it up.
-        Serial.printf("[MMB] takeover: done (initial update deferred to timer)\n");
-        LOG_INFO("[MonsterMesh] textBattle owning screen (role=%d) — LVGL battle screen loaded\n",
+        LOG_INFO("[MonsterMesh] textBattle owning screen (role=%d) — deferring LVGL setup\n",
                  (int)textBattle_.role());
     }
 
@@ -3981,6 +3979,16 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
     // Pick up any SAV-loaded party that runOnce staged for us — this runs on
     // the LVGL thread, so it's safe to mutate widgets here.
     if (monsterMeshModule) monsterMeshModule->tryConsumeStagedParty();
+
+    // P2.39e: deferred battle screen setup. runOnce() (main task) sets
+    // needsBattleScreen_ instead of calling showLvBattleScreen() directly,
+    // because buildLvBattleScreen() and lv_screen_load() are not thread-safe
+    // from the main task. We pick it up here on the LVGL thread within ~33ms.
+    if (monsterMeshModule && monsterMeshModule->needsBattleScreen_) {
+        monsterMeshModule->needsBattleScreen_ = false;
+        monsterMeshModule->showLvBattleScreen();
+        monsterMeshModule->battleScreenPending_ = false;
+    }
 
     // ── ALT + Mic button peek ──────────────────────────────────────────
     // ALT (byte[0] bit 0x10) = toggle screens, Mic (byte[0] bit 0x40) = toggle sound.
@@ -5197,6 +5205,10 @@ void MonsterMeshModule::showLvBattleScreen()
 
 void MonsterMeshModule::hideLvBattleScreen()
 {
+    // Cancel any pending deferred setup so stale flags don't re-show the
+    // screen after it has been intentionally hidden.
+    needsBattleScreen_   = false;
+    battleScreenPending_ = false;
     if (!lvBattleActive_) return;
     if (lvBattlePrevScreen_) {
         lv_screen_load((lv_obj_t *)lvBattlePrevScreen_);
