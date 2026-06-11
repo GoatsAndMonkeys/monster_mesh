@@ -521,19 +521,34 @@ void MonsterMeshTerminal::executeLine(const char *line)
             println("  beacon      - broadcast presence (daycare + mmt)");
             return;
         }
+        if (strncmp(args, "adv", 3) == 0) {
+            println("advanced usage:");
+            println("  gym/mmg/mmb/fight show a numbered");
+            println("  menu — type N to select, e.g. gym");
+            println("  then 3 fights gym 3.");
+            println("  gym fight N  - fight gym N directly");
+            println("  mmg fight N  - fight mesh gym N");
+            println("  mmb <name>   - PvP by short name");
+            println("  mmb N        - PvP by list index");
+            println("  fight N      - local CPU battle N");
+            println("  gym dev all8 - debug: grant all badges");
+            println("  gym dev clear- debug: wipe LoC save");
+            return;
+        }
         println("commands:");
-        println("  party            - show your loaded SAV party");
-        println("  hb               - Hollaback: ping nearby peers");
-        println("  daycare (dc)     - daycare status + neighbors");
-        println("  beacon (bc)      - broadcast presence");
-        println("  gym [N]          - LoC gym list; N=fight");
-        println("  mmg [N]          - mesh gym list; N=fight");
-        println("  mmb [N/<peer>]   - peers online; N or name=PvP");
-        println("  fight [N]        - local battle menu; N=fight");
-        println("  explore          - Wild encounters nearby");
-        println("  news             - LoC news ring");
-        println("  achievements     - list achievements earned");
-        println("  help sys         - system commands");
+        println("  party        - your party");
+        println("  hb           - ping nearby peers");
+        println("  daycare (dc) - daycare status");
+        println("  beacon (bc)  - broadcast presence");
+        println("  gym          - LoC gym list");
+        println("  mmg          - mesh gym list");
+        println("  mmb          - peers online");
+        println("  fight        - local battle");
+        println("  explore      - wild encounters");
+        println("  news         - LoC news");
+        println("  achievements - achievements");
+        println("  help sys     - system commands");
+        println("  help adv     - advanced usage");
         return;
     }
     // Accept `daycare` or the `dc` shortcut. Both forms take the same args
