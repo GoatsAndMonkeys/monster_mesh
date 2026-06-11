@@ -2270,6 +2270,24 @@ int32_t MonsterMeshModule::runOnce()
     static bool probeLogged = false;
     if (!probeLogged && setupDone_) {
         probeLogged = true;
+        // Log why the previous session ended — helps diagnose silent crashes.
+        esp_reset_reason_t rr = esp_reset_reason();
+        const char *rrStr = "?";
+        switch (rr) {
+            case ESP_RST_POWERON:  rrStr = "POWERON"; break;
+            case ESP_RST_EXT:      rrStr = "EXT"; break;
+            case ESP_RST_SW:       rrStr = "SW"; break;
+            case ESP_RST_PANIC:    rrStr = "PANIC"; break;
+            case ESP_RST_INT_WDT:  rrStr = "INT_WDT"; break;
+            case ESP_RST_TASK_WDT: rrStr = "TASK_WDT"; break;
+            case ESP_RST_WDT:      rrStr = "WDT"; break;
+            case ESP_RST_DEEPSLEEP:rrStr = "DEEPSLEEP"; break;
+            case ESP_RST_BROWNOUT: rrStr = "BROWNOUT"; break;
+            case ESP_RST_SDIO:     rrStr = "SDIO"; break;
+            default: break;
+        }
+        Serial.printf("[MMB] boot complete — reset_reason=%s(%d)\n", rrStr, (int)rr);
+        Serial.flush();
         LOG_INFO("[MonsterMesh] boot complete — emu=%d browser=%d\n",
                  (int)emulatorActive_, (int)browserActive_);
         // One-shot channel provision now that channels.* is fully ready.
@@ -2995,6 +3013,7 @@ int32_t MonsterMeshModule::runOnce()
     // false and the LVGL battle screen never showed up.
     if (shouldOwnScreen && !lvBattleActive_ && setupDone_) {
         Serial.printf("[MMB] takeover: shouldOwn=1 lvBattleActive=0 setupDone=1\n");
+        Serial.flush();
         textBattleActive_ = true;
         // P2.28: LVGL-native battle screen. We lv_screen_load a
         // dedicated battle screen whose widget tree we control, so
@@ -3002,10 +3021,16 @@ int32_t MonsterMeshModule::runOnce()
         // through from Meshtastic's home screen. No more lgfx-direct
         // draws, no more flush_cb park, no more refresh-timer pause.
         Serial.printf("[MMB] takeover: calling showLvBattleScreen\n");
+        Serial.flush();
         showLvBattleScreen();
-        Serial.printf("[MMB] takeover: calling updateLvBattleScreen\n");
-        updateLvBattleScreen();
-        Serial.printf("[MMB] takeover: done\n");
+        // P2.39d: do NOT call updateLvBattleScreen() here. showLvBattleScreen()
+        // calls lv_screen_load() which makes the battle screen active, so the
+        // LVGL render task immediately starts painting it. Calling 20+ widget
+        // mutations from runOnce() (main task) at the same time races the render
+        // task and crashes the deck. The 250ms refreshCb timer will fire shortly
+        // and do the first update safely from the LVGL task. dirty_ is already
+        // true (set by startLocal()), so the timer will pick it up.
+        Serial.printf("[MMB] takeover: done (initial update deferred to timer)\n");
         LOG_INFO("[MonsterMesh] textBattle owning screen (role=%d) — LVGL battle screen loaded\n",
                  (int)textBattle_.role());
     }
@@ -3401,12 +3426,15 @@ int32_t MonsterMeshModule::runOnce()
         Serial.printf("[MMB] fight: pre-startLocal myCount=%u cpuCount=%u\n",
                       (unsigned)terminal_.getParty().count,
                       (unsigned)cpuParty.count);
+        Serial.flush();
         textBattle_.startLocal(terminal_.getParty(), cpuParty, ourTag, rivalTag);
         Serial.printf("[MMB] fight: post-startLocal active=%d mode=%d\n",
                       (int)textBattle_.isActive(), 0);
+        Serial.flush();
         if (hdrText[0]) textBattle_.setHeader(hdrText);
         textBattleActive_ = true;
         Serial.printf("[MMB] fight: textBattleActive_=true\n");
+        Serial.flush();
     }
 
     // Drive textBattle_.tick() any time the state machine is alive —
@@ -4771,6 +4799,7 @@ void MonsterMeshModule::buildLvBattleScreen()
 {
     if (lvBattleScreen_) return;
     Serial.printf("[MMB] buildLvBattleScreen: lv_obj_create scr\n");
+    Serial.flush();
     lv_obj_t *scr = lv_obj_create(NULL);
     // P2.38: P2.37 added lv_obj_set_size/pos/border_width/margin_all
     // on `scr` — that combo crashes during widget tree build (deck
@@ -4856,6 +4885,7 @@ void MonsterMeshModule::buildLvBattleScreen()
     Serial.printf("[MMB] buildLvBattleScreen: player canvas %dx%d buf=%u\n",
                   LV_PLAYER_W, LV_PLAYER_H,
                   (unsigned)sizeof(lvPlayerCanvasBuf_));
+    Serial.flush();
     lv_obj_t *pSpr = lv_canvas_create(scr);
     lv_obj_set_size(pSpr, LV_PLAYER_W, LV_PLAYER_H);
     lv_obj_align(pSpr, LV_ALIGN_TOP_LEFT, 4, 94);
@@ -4907,6 +4937,7 @@ void MonsterMeshModule::buildLvBattleScreen()
 
     lvBattleScreen_ = scr;
     Serial.printf("[MMB] buildLvBattleScreen: DONE scr=%p\n", scr);
+    Serial.flush();
     LOG_INFO("[MonsterMesh] LVGL battle screen built (Gen-1 layout)\n");
 
     // P2.39c: LVGL-thread refresh timer. Replaces the runOnce-side
