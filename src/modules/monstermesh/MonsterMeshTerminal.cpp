@@ -865,13 +865,11 @@ void MonsterMeshTerminal::executeLine(const char *line)
         const char *args = line + 5;
         while (*args == ' ') ++args;
         if (*args) {
-            // fight <shortname> → challenge that peer (same as mmb <shortname>)
-            if (!mmb2Fn_) { println("mmb not wired"); return; }
+            // fight <shortname> → local CPU fight (name is ignored, use mmb for network)
             if (!partyLoaded_) { println("no party loaded — load a SAV first"); return; }
-            char buf[64];
-            snprintf(buf, sizeof(buf), "Challenging %s...", args);
-            println(buf);
-            mmb2Fn_(mmb2Ctx_, args);
+            if (!fightFn_) { println("fight not wired"); return; }
+            println("starting local battle vs CPU rival...");
+            fightFn_(fightCtx_);
             return;
         }
         if (!partyLoaded_) {

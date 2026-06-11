@@ -3241,7 +3241,9 @@ int32_t MonsterMeshModule::runOnce()
                                 textBattle_.clientNeedsFullState());
             bool staleNetworked = (textBattle_.role() != MonsterMeshTextBattle::Role::LEGACY &&
                                    (millis() - textBattle_.lastRecvMs()) > 90000u);
-            if (staleServer || staleClient || staleNetworked) {
+            // User explicitly typed `fight`: always evict any active battle
+            // (networked OR CPU) so a fresh local fight can start immediately.
+            if (staleServer || staleClient || staleNetworked || true) {
                 Serial.printf("[MMB] fight: force-exiting stale battle "
                               "(staleServer=%d staleClient=%d staleNetworked=%d)\n",
                               (int)staleServer, (int)staleClient, (int)staleNetworked);
@@ -3257,6 +3259,7 @@ int32_t MonsterMeshModule::runOnce()
     if (textBattleStartReq_ && !textBattleActive_ && setupDone_ &&
         !emulatorActive_ && !browserActive_ && terminal_.hasParty()) {
         textBattleStartReq_ = false;
+        pendingBattleEndCleanup_ = false;  // cancel any stale cleanup so it doesn't hide this new fight
         // P2.28.5: vestigial flush_cb park + lgfx fillScreen REMOVED.
         // The LVGL-native battle screen (loaded by showLvBattleScreen
         // from the main takeover block) is what draws now — leaving

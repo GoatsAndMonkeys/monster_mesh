@@ -85,11 +85,15 @@ void create_screen_boot_screen() {
             lv_obj_set_style_text_color(obj, lv_color_hex(0xff0f380f), LV_PART_MAIN | LV_STATE_DEFAULT);
         }
         {
-            // MonsterMesh version (small)
+            // MonsterMesh build number (small)
             lv_obj_t *obj = lv_label_create(parent_obj);
             lv_obj_set_pos(obj, 0, -51);
             lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-            lv_label_set_text(obj, MONSTERMESH_VERSION);
+#define _MM_BSTR2(x) #x
+#define _MM_BSTR(x) _MM_BSTR2(x)
+            lv_label_set_text(obj, "b" _MM_BSTR(MONSTERMESH_BUILD));
+#undef _MM_BSTR
+#undef _MM_BSTR2
             lv_obj_set_style_align(obj, LV_ALIGN_BOTTOM_MID, LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_set_style_text_font(obj, &lv_font_cozette_13, LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_set_style_text_color(obj, lv_color_hex(0xff0f380f), LV_PART_MAIN | LV_STATE_DEFAULT);

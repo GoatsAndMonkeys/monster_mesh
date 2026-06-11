@@ -190,9 +190,6 @@ void TFTView_320x240::init(IClientBase *client)
         lv_obj_set_pos(objects.boot_logo, 0, 0);
         lv_obj_add_flag(objects.firmware_label, LV_OBJ_FLAG_HIDDEN);
     } else {
-        // Boot screen layout (in patched screens.c) has separate "MonsterMesh"
-        // title + "build N" + "www.Meshtastic.org" labels. This label is just
-        // the Meshtastic firmware version line.
         lv_label_set_text(objects.firmware_label, firmware_version);
     }
 
