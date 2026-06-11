@@ -2156,55 +2156,6 @@ int32_t MonsterMeshModule::runOnce()
     // recreating the keypad indev won't strand us without ALT detection.
     installKeyboardHook();
 
-    // ── Direct ALT poll (Meshtastic UI only) ────────────────────────────────
-    // The LVGL hook's peek-at-RAW was unreliable — LVGL's keypad indev poll
-    // rate depends on UI state and theme. Owning the I2C bus here every
-    // ~120ms guarantees ALT presses are caught while in the Meshtastic UI.
-    // When emulator/browser is active, the LVGL hook owns I2C (RAW mode for
-    // emu, KEY mode for browser) and we don't poll.
-    if (setupDone_ && !emulatorActive_ && !browserActive_) {
-        static uint32_t lastAltPoll = 0;
-        static bool     altWas      = false;
-        static uint32_t pollCount   = 0;
-        static uint32_t lastDumpMs  = 0;
-        uint32_t now = millis();
-        if (now - lastAltPoll >= 120) {
-            lastAltPoll = now;
-            pollCount++;
-            // Switch to RAW mode, read byte[0] (contains ALT at bit 0x10), revert.
-            Wire.beginTransmission(0x55);
-            Wire.write(0x03);
-            uint8_t st1 = Wire.endTransmission();
-            uint8_t got = Wire.requestFrom((uint8_t)0x55, (uint8_t)5);
-            uint8_t b[5] = {};
-            for (int i = 0; i < 5 && Wire.available(); i++) b[i] = Wire.read();
-            Wire.beginTransmission(0x55);
-            Wire.write(0x04);
-            uint8_t st2 = Wire.endTransmission();
-
-            // Dump raw state every 2s so we can confirm bus is live
-            if (now - lastDumpMs > 2000) {
-                lastDumpMs = now;
-                LOG_INFO("[MonsterMesh] kb poll #%u st=%u/%u got=%u b=%02X %02X %02X %02X %02X\n",
-                         (unsigned)pollCount, st1, st2, got, b[0], b[1], b[2], b[3], b[4]);
-            }
-
-            // Ignore garbage reads (I2C bus error returns 0xFF on every byte,
-            // or NACK gives got<5). Only trust valid frames.
-            bool valid = (st1 == 0 && got == 5 && b[0] != 0xFF);
-            if (valid) {
-                bool altNow = (b[0] & 0x10) != 0;
-                static bool altSeenLow = false;  // require a clean low baseline before firing
-                if (!altNow) altSeenLow = true;
-                if (altNow && !altWas && altSeenLow && (now - g_lastAltFireMs > 250)) {
-                    g_lastAltFireMs = now;
-                    LOG_INFO("[MonsterMesh] ALT pressed (runOnce poll) → toggle\n");
-                    handleKeyPress(0x05);
-                }
-                altWas = altNow;
-            }
-        }
-    }
 
     // Keep PowerFSM awake while emulator or browser is active. Throttle —
     // every runOnce was logging "State: ON" and burying everything else.
