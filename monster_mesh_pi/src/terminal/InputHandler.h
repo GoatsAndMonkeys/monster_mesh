@@ -10,6 +10,8 @@ enum class GpiButton : uint8_t {
     B,      // back/cancel
     START,  // open command menu
     SELECT, // toggle help
+    L,      // left shoulder  (boss key Y on keyboard)
+    R,      // right shoulder (screen off X on keyboard)
     NONE
 };
 

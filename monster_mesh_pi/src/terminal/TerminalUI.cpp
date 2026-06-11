@@ -310,6 +310,10 @@ void TerminalUI::run() {
                     ev.button = GpiButton::START;  handleButton(ev); break;
                 case KEY_BACKSPACE: case 127:
                     ev.button = GpiButton::SELECT; handleButton(ev); break;
+                case 'y': case 'Y':
+                    ev.button = GpiButton::L;      handleButton(ev); break;
+                case 'x': case 'X':
+                    ev.button = GpiButton::R;      handleButton(ev); break;
                 case 'q': case 'Q':
                     shouldQuit_ = true; break;
                 default: break;
@@ -359,6 +363,7 @@ void TerminalUI::pentestAutoTick() {
     // read the result straight off the frozen battle frame.  Keep that frame
     // on screen for a couple of seconds, then chain into the next scan.
     if (battleResult_ != Gen1BattleEngine::Result::ONGOING) {
+        pentestBossMode_ = false;   // boss key: disengage when battle ends
         if (pentestEndMs_ == 0) {
             pentestEndMs_ = now;                         // begin the linger
             // Tally this battle's outcome exactly once (player is P1).
@@ -380,6 +385,9 @@ void TerminalUI::pentestAutoTick() {
         if (now - pentestEndMs_ >= PENTEST_END_MS) startPentestBattle();
         return;
     }
+
+    // Boss mode: player is fighting manually — skip the auto-pick tick.
+    if (pentestBossMode_) return;
 
     // Ongoing: auto-pick a move for both sides on a steady beat.
     if (!inBattle_ || screen_ != Screen::BATTLE) return;
@@ -436,6 +444,17 @@ void TerminalUI::render() {
     // Exception: SIGINT tool screens use ncurses; the SDL window is closed while
     // they're visible and reopens when B returns to Screen::BATTLE.
     if (pentestMode_) {
+        // X / screen-off: close SDL, blank ncurses to black, turn off backlight.
+        if (pentestScreenOff_) {
+            if (battleWindow_.isOpen()) battleWindow_.close();
+            if (winStatus_) { wbkgd(winStatus_, A_NORMAL); werase(winStatus_); wnoutrefresh(winStatus_); }
+            if (winInfo_)   { wbkgd(winInfo_,   A_NORMAL); werase(winInfo_);   wnoutrefresh(winInfo_);   }
+            if (winMenu_)   { wbkgd(winMenu_,   A_NORMAL); werase(winMenu_);   wnoutrefresh(winMenu_);   }
+            wbkgd(stdscr, A_NORMAL); werase(stdscr); wnoutrefresh(stdscr);
+            doupdate();
+            return;
+        }
+
         bool isSigint = (screen_ == Screen::SIGINT_SCANNER  ||
                          screen_ == Screen::SIGINT_PROBES   ||
                          screen_ == Screen::SIGINT_DEAUTHS  ||
@@ -1410,31 +1429,105 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
                 return;
         }
     } else if (ev.button == GpiButton::A) {
-        pentestShowStatus_   = true;
-        pentestStatusSel_    = 0;
-        pentestConfirmReset_ = false;
+        if (!pentestBossMode_) {
+            pentestShowStatus_   = true;
+            pentestStatusSel_    = 0;
+            pentestConfirmReset_ = false;
+        }
         return;
     }
 
-    if (ev.button == GpiButton::B ||
-        ev.button == GpiButton::START ||
-        ev.button == GpiButton::SELECT) {
-        // Capture the live level/XP, persist, then exit to the system menu.
-        const Gen1BattleEngine::BattleParty &pp = engine_.party(0);
-        if (pp.count > 0 && pp.mons[0].level > 0) {
-            pentestLevel_ = pp.mons[0].level;
-            pentestXp_    = slotLevelXp_[0];
+    // R (shoulder) — toggle screen off / back on.
+    if (ev.button == GpiButton::R && ev.pressed) {
+        pentestScreenOff_ = !pentestScreenOff_;
+        if (!pentestScreenOff_) {
+            // Restore backlight when turning screen back on.
+#ifndef __APPLE__
+            (void)system("echo 255 > /sys/class/backlight/*/brightness 2>/dev/null || true");
+#endif
+        } else {
+            // Kill backlight when screen goes off.
+#ifndef __APPLE__
+            (void)system("echo 0 > /sys/class/backlight/*/brightness 2>/dev/null || true");
+#endif
         }
-        pentestSaveProgress();
-        inPentestBattle_ = false;
-        inBattle_        = false;
-        requestQuit();
+        return;
     }
+
+    // L (shoulder) — toggle boss-key / normal-battle mode.
+    if (ev.button == GpiButton::L && ev.pressed) {
+        if (inPentestBattle_ && inBattle_ &&
+            battleResult_ == Gen1BattleEngine::Result::ONGOING) {
+            pentestBossMode_ = !pentestBossMode_;
+            // When entering boss mode suppress the status overlay.
+            if (pentestBossMode_) {
+                pentestShowStatus_   = false;
+                pentestConfirmReset_ = false;
+            }
+        }
+        return;
+    }
+
+    // Boss mode: delegate directional/A/B inputs to the interactive battle handler.
+    if (pentestBossMode_) {
+        switch (ev.button) {
+            case GpiButton::UP:
+            case GpiButton::DOWN:
+            case GpiButton::LEFT:
+            case GpiButton::RIGHT:
+            case GpiButton::A:
+                battleHandleButton(ev);
+                return;
+            case GpiButton::B:
+                // B exits boss mode but does NOT quit pentest.
+                if (ev.pressed) pentestBossMode_ = false;
+                return;
+            default:
+                break;
+        }
+    }
+
+    // START+SELECT within 1 s = exit (mirrors emulator hotkey; B alone does nothing).
+    if (ev.button == GpiButton::START || ev.button == GpiButton::SELECT) {
+        uint64_t now = millis();
+        if (!ev.pressed) return;
+        if (pentestExitPressMs_ == 0) {
+            // First of the pair pressed.
+            pentestExitPressMs_     = now;
+            pentestExitStartFirst_  = (ev.button == GpiButton::START);
+        } else {
+            // Second press — check it's the other button and within 1 second.
+            bool otherBtn = (pentestExitStartFirst_)
+                                ? (ev.button == GpiButton::SELECT)
+                                : (ev.button == GpiButton::START);
+            bool inWindow = (now - pentestExitPressMs_ < 1000);
+            if (otherBtn && inWindow) {
+                // Capture the live level/XP, persist, then exit to the system menu.
+                const Gen1BattleEngine::BattleParty &pp = engine_.party(0);
+                if (pp.count > 0 && pp.mons[0].level > 0) {
+                    pentestLevel_ = pp.mons[0].level;
+                    pentestXp_    = slotLevelXp_[0];
+                }
+                pentestSaveProgress();
+                inPentestBattle_ = false;
+                inBattle_        = false;
+                requestQuit();
+                return;
+            }
+            // Mismatch or timeout: reset and treat this press as the new first.
+            pentestExitPressMs_    = now;
+            pentestExitStartFirst_ = (ev.button == GpiButton::START);
+        }
+        return;
+    }
+    // Any other button resets the exit combo.
+    pentestExitPressMs_ = 0;
 }
 
-// Wipe all pentest progress back to a fresh Level-5 Pikachu and immediately
-// begin a new scan.  inPentestBattle_ is cleared first so startPentestBattle()
-// doesn't carry the OLD engine level forward over the reset.
+// Wipe all pentest progress back to a fresh Level-5 Pikachu, kick a fresh
+// wpa_cli scan, and enter standby so the scan has time to complete before
+// pentestScanNetworks() reads the results.  This ensures all currently visible
+// networks appear after reset — not just whatever was in the stale cache.
 void TerminalUI::pentestResetProgress() {
     pentestLevel_  = 5;
     pentestXp_     = 0;
@@ -1449,17 +1542,16 @@ void TerminalUI::pentestResetProgress() {
     pentestShowStatus_   = false;
     pentestConfirmReset_ = false;
     pentestStatusSel_    = 0;
-    pentestStandby_      = false;
     pentestDoneSsids_.clear();   // forget every network cracked so far...
     pentestNets_.clear();        // ...so they're all fair game again.
 #ifndef __APPLE__
-    // Kick one fresh scan so a reset immediately repopulates targets and drops
-    // straight into a fight (this is a rare, user-initiated action, so the
-    // brief scan is fine — unlike the standby loop, which stays cached-only).
+    // Kick a fresh scan.  wpa_cli scan is async (~2-3s); by entering standby
+    // the first standby tick (PENTEST_STANDBY_SCAN_MS = 6s later) reads fully
+    // updated results rather than the stale pre-reset cache.
     (void)system("sudo -n wpa_cli -i wlan0 scan >/dev/null 2>&1");
 #endif
-    inPentestBattle_     = false;
-    startPentestBattle();
+    inPentestBattle_ = false;
+    pentestEnterStandby();   // waits for fresh scan before picking a target
 }
 
 void TerminalUI::pentestMarkSeen(uint8_t dex) {
@@ -4153,15 +4245,16 @@ void TerminalUI::syncBattleWindow() {
                      "Indigo Plateau  %d/%d  %s %s",
                      pendingE4Idx_ + 1, LORD_E4_COUNT, m->title, m->name);
     } else if (inPentestBattle_) {
-        snprintf(s.header, sizeof(s.header), "PENTEST PIKACHU");
-        s.pentest = true;
-        // WiFi network name goes in the foe's corner tag (replacing "FOE");
-        // the name row keeps the actual species so it still reads as a battle.
-        snprintf(s.foeTag, sizeof(s.foeTag), "%s", pentestSsid_);
-        snprintf(s.foe.nickname, sizeof(s.foe.nickname), "%s", dexName(em.species));
-        // Status overlay toggled with A during a fight: gyms / Pokedex / reset.
-        s.showStatus = pentestShowStatus_;
-        if (pentestShowStatus_) pentestBuildStatus(s.statusLines);
+        if (!pentestBossMode_) {
+            // Normal pentest mode: show the PENTEST PIKACHU header + SSID tag.
+            snprintf(s.header, sizeof(s.header), "PENTEST PIKACHU");
+            s.pentest = true;
+            snprintf(s.foeTag, sizeof(s.foeTag), "%s", pentestSsid_);
+            snprintf(s.foe.nickname, sizeof(s.foe.nickname), "%s", dexName(em.species));
+            s.showStatus = pentestShowStatus_;
+            if (pentestShowStatus_) pentestBuildStatus(s.statusLines);
+        }
+        // Boss mode: no pentest header/tag/overlay — looks like a regular battle.
     } else if (pentestStandby_ && pentestShowStatus_) {
         // Standby + user pressed A: show the full status overlay (+ reset menu).
         snprintf(s.header, sizeof(s.header), "PENTEST PIKACHU");

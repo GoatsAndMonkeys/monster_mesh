@@ -354,8 +354,12 @@ private:
     uint8_t  pentestGymBeaten_  = 0;      // bitset of gym leaders defeated
                                           // (drives zone unlock + next leader)
     uint8_t  pentestBattleGym_  = 255;    // gym idx of the current fight (255=wild)
-    int      pentestStatusSel_  = 0;      // selected option in the status menu
-    bool     pentestConfirmReset_ = false;// status menu is in the reset-confirm step
+    int      pentestStatusSel_   = 0;      // selected option in the status menu
+    bool     pentestConfirmReset_= false; // status menu is in the reset-confirm step
+    bool     pentestBossMode_    = false; // Y: interactive fight (looks like normal battle)
+    bool     pentestScreenOff_   = false; // X: screen blank + backlight off
+    uint64_t pentestExitPressMs_ = 0;     // timestamp of last START or SELECT press
+    bool     pentestExitStartFirst_ = false; // true = START was pressed first
     void     pentestResetProgress();      // wipe save + restart a fresh L5 run
     // ── Real WiFi targeting (Pikachu only fights vulnerable networks) ──
     struct PentestNet { std::string ssid; std::string vuln; };
