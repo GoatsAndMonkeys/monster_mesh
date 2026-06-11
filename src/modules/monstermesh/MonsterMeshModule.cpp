@@ -1971,11 +1971,6 @@ int32_t MonsterMeshModule::runOnce()
                 static_cast<MonsterMeshModule *>(ctx)
                     ->requestE4Battle(memberIdx);
             }, this);
-        terminal_.setMmtChallengeFn(
-            [](void *ctx, const char *peerShort) {
-                static_cast<MonsterMeshModule *>(ctx)
-                    ->challengePeerByShortName(peerShort);
-            }, this);
         terminal_.setMmb2ChallengeFn(
             [](void *ctx, const char *peerShort) {
                 static_cast<MonsterMeshModule *>(ctx)
@@ -2336,6 +2331,17 @@ int32_t MonsterMeshModule::runOnce()
             g_deviceUiLgfx->fillScreen(0x0000);
         }
 #endif
+        // Reclaim I2S pins — audioThread may have rerouted BCK/WS/DOUT to
+        // I2S_NUM_1 while we were in Meshtastic (e.g. DM ringtone). If so,
+        // writing to NUM_0 produces silence. Force a stop+begin cycle so
+        // i2s_set_pin re-routes the pins back to our port before frames run.
+        if (emu_.audio_) {
+            emu_.audio_->stop();
+            if (!emu_.audio_->begin()) {
+                delete emu_.audio_;
+                emu_.audio_ = nullptr;
+            }
+        }
         enterEmulatorMode();
         emulatorActive_ = true;
         kbSetMode(true);
@@ -4681,7 +4687,16 @@ void MonsterMeshModule::tryConsumeStagedParty()
             if (xp[i]) any = true;
             stagedXp_[i] = 0;
         }
-        if (any) terminal_.creditBattleXpPerSlot(xp);
+        if (any) {
+            terminal_.creditBattleXpPerSlot(xp);
+            // P2.40: re-arm the SAV write-back AFTER XP is credited so that
+            // the updated exp/level lands in the save file.  The write-back
+            // that was set at battle-end (line ~3733) fires on runOnce() /
+            // Core 1 before this LVGL-thread XP credit runs, so it was
+            // always saving the pre-level-up party.  A second trigger here
+            // guarantees a post-XP flush on the next runOnce() tick.
+            pendingSavWriteBack_ = true;
+        }
     }
     // Battle-result callback (terminal_.on*BattleEnded) — runs after the
     // LVGL cleanup so the panel is repainted before we add news lines.
@@ -5120,7 +5135,8 @@ void MonsterMeshModule::updateLvBattleScreen()
         if (curPhase == MonsterMeshTextBattle::Phase::WAIT_REMOTE ||
             curPhase == MonsterMeshTextBattle::Phase::ANIMATING ||
             curPhase == MonsterMeshTextBattle::Phase::WAIT_PEER_READY) {
-            const char *hint = "\n> Waiting for opponent...";
+            bool networked = (textBattle_.mode() == MonsterMeshTextBattle::Mode::NETWORKED);
+            const char *hint = networked ? "\n> Waiting for opponent..." : "\n> ...";
             for (const char *s = hint; *s && pos < sizeof(framed) - 1; ++s) {
                 framed[pos++] = *s;
             }
@@ -5887,6 +5903,12 @@ void MonsterMeshModule::renderBrowser()
             gfx->print(dispName);
         }
     }
+
+    // Controls footer — bottom of screen so users know the key bindings
+    gfx->setTextSize(1);
+    gfx->setTextColor(cDim);
+    gfx->setCursor(4, 228);
+    gfx->print("W/S:move  K/ENTER:open  L:back  ALT:exit");
 
     gfx->clearClipRect();
     gfx->endWrite();

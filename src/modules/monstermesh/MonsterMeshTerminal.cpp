@@ -476,6 +476,39 @@ void MonsterMeshTerminal::executeLine(const char *line)
         return;
     }
 
+    // TinyBBS-style menu: if a numbered menu is pending and this line is a
+    // bare positive integer, route it as a selection then clear the state.
+    if (pendingMenuCmd_ != MenuCmd::NONE) {
+        const char *p = line;
+        while (*p == ' ') ++p;
+        bool isNum = (*p >= '1' && *p <= '9');
+        const char *q = p;
+        while (*q >= '0' && *q <= '9') ++q;
+        bool onlyNum = isNum && (*q == '\0' || *q == '\r' || *q == '\n');
+        if (onlyNum) {
+            int n = 0;
+            const char *r = p;
+            while (*r >= '0' && *r <= '9') { n = n * 10 + (*r - '0'); ++r; }
+            MenuCmd cmd = pendingMenuCmd_;
+            pendingMenuCmd_ = MenuCmd::NONE;
+            char synth[32];
+            if (cmd == MenuCmd::GYM) {
+                snprintf(synth, sizeof(synth), "gym %d", n);
+            } else if (cmd == MenuCmd::MMG) {
+                snprintf(synth, sizeof(synth), "mmg %d", n);
+            } else if (cmd == MenuCmd::MMB) {
+                snprintf(synth, sizeof(synth), "mmb %d", n);
+            } else if (cmd == MenuCmd::FIGHT) {
+                snprintf(synth, sizeof(synth), "fight %d", n);
+            } else {
+                synth[0] = '\0';
+            }
+            if (synth[0]) { executeLine(synth); return; }
+        }
+        // Non-number clears the pending menu and falls through normally.
+        pendingMenuCmd_ = MenuCmd::NONE;
+    }
+
     if (strncmp(line, "help", 4) == 0) {
         const char *args = line + 4;
         while (*args == ' ') ++args;
@@ -489,21 +522,18 @@ void MonsterMeshTerminal::executeLine(const char *line)
             return;
         }
         println("commands:");
-        println("  party       - show your loaded SAV party");
-        println("  hb          - Hollaback: ping nearby peers");
-        println("  daycare     - daycare status + neighbors");
-        println("  gym         - Local Kanto Gym List");
-        println("  gym fight N - challenge gym N (1-9)");
-        println("  mmg         - discover MonsterMesh Gyms");
-        println("  mmg fight N - challenge MM gym N");
-        println("  mmb         - list peers online for battle");
-        println("  mmb <peer>  - MonsterMesh Battle (PvP, server-auth)");
-        println("  mmbold<peer>- legacy dual-engine PvP (fallback)");
-        println("  fight       - local CPU battle vs neighbor");
-        println("  explore     - Wild encounters nearby");
-        println("  news        - LoC news ring");
-        println("  achievements- list achievements earned");
-        println("  help sys    - system commands");
+        println("  party            - show your loaded SAV party");
+        println("  hb               - Hollaback: ping nearby peers");
+        println("  daycare (dc)     - daycare status + neighbors");
+        println("  beacon (bc)      - broadcast presence");
+        println("  gym [N]          - LoC gym list; N=fight");
+        println("  mmg [N]          - mesh gym list; N=fight");
+        println("  mmb [N/<peer>]   - peers online; N or name=PvP");
+        println("  fight [N]        - local battle menu; N=fight");
+        println("  explore          - Wild encounters nearby");
+        println("  news             - LoC news ring");
+        println("  achievements     - list achievements earned");
+        println("  help sys         - system commands");
         return;
     }
     // Accept `daycare` or the `dc` shortcut. Both forms take the same args
@@ -654,6 +684,20 @@ void MonsterMeshTerminal::executeLine(const char *line)
     if (strncmp(line, "gym", 3) == 0) {
         const char *args = line + 3;
         while (*args == ' ') ++args;
+        // `gym N` shortcut — bare number maps to `gym fight N`.
+        {
+            const char *p = args;
+            if (*p >= '1' && *p <= '9') {
+                const char *q = p;
+                while (*q >= '0' && *q <= '9') ++q;
+                if (*q == '\0' || *q == '\r' || *q == '\n') {
+                    char synth[16];
+                    snprintf(synth, sizeof(synth), "gym fight %s", p);
+                    executeLine(synth);
+                    return;
+                }
+            }
+        }
         // `gym fight [N]` — N is 1..9 (1-8 = Kanto gyms, 9 = Indigo Plateau
         // / Elite Four). With no number, auto-picks the lowest open +
         // uncleared entry so the user can just keep typing `gym fight` to
@@ -819,6 +863,8 @@ void MonsterMeshTerminal::executeLine(const char *line)
             snprintf(buf, sizeof(buf), "  9 %-12.12s %-10.10s [%s]",
                      "Indigo Plat.", "Elite Four", e4st);
             println(buf);
+            println("  type gym N to fight");
+            pendingMenuCmd_ = MenuCmd::GYM;
             return;
         }
         // `gym dev all8` — debug helper. Drops the player to "first-time
@@ -864,14 +910,6 @@ void MonsterMeshTerminal::executeLine(const char *line)
     if (strncmp(line, "fight", 5) == 0 && (line[5] == '\0' || line[5] == ' ')) {
         const char *args = line + 5;
         while (*args == ' ') ++args;
-        if (*args) {
-            // fight <shortname> → local CPU fight (name is ignored, use mmb for network)
-            if (!partyLoaded_ || party_.count < 1) { println("need a party to fight — load a SAV first"); return; }
-            if (!fightFn_) { println("fight not wired"); return; }
-            println("starting local battle vs CPU rival...");
-            fightFn_(fightCtx_);
-            return;
-        }
         if (!partyLoaded_ || party_.count < 1) {
             println("need a party to fight — load a SAV first");
             return;
@@ -879,6 +917,49 @@ void MonsterMeshTerminal::executeLine(const char *line)
         if (!fightFn_) {
             println("fight not wired");
             return;
+        }
+        // `fight N` — pick peer N from the list and start a local CPU battle.
+        // (The CPU will use a rival team regardless of the chosen peer; peer
+        // party mirroring is planned for a future build.)
+        if (*args >= '1' && *args <= '9') {
+            const char *q = args;
+            while (*q >= '0' && *q <= '9') ++q;
+            if (*q == '\0' || *q == '\r' || *q == '\n') {
+                // Valid number — start local fight (peer routing TODO).
+                println("starting local battle vs CPU rival...");
+                fightFn_(fightCtx_);
+                return;
+            }
+        }
+        // Bare `fight` or `fight <anything non-number>` → show numbered peer
+        // menu from the daycare neighbor list so the user can pick who to fight.
+        if (mmtListFn_) {
+            char buf[512] = {};
+            mmtListFn_(mmtListCtx_, buf, sizeof(buf));
+            int peerIdx = 0;
+            const char *p = buf;
+            while (*p) {
+                const char *nl = p;
+                while (*nl && *nl != '\n') ++nl;
+                size_t len = (size_t)(nl - p);
+                char tmp[80];
+                if (len >= sizeof(tmp)) len = sizeof(tmp) - 1;
+                memcpy(tmp, p, len);
+                tmp[len] = '\0';
+                if (len > 2 && tmp[0] == ' ' && tmp[1] == ' ') {
+                    char numbered[88];
+                    snprintf(numbered, sizeof(numbered), "%d.%s", ++peerIdx, tmp + 1);
+                    println(numbered);
+                } else {
+                    println(tmp);
+                }
+                p = (*nl) ? nl + 1 : nl;
+            }
+            if (peerIdx > 0) {
+                println("  type fight N for local CPU battle");
+                pendingMenuCmd_ = MenuCmd::FIGHT;
+                return;
+            }
         }
         println("starting local battle vs CPU rival...");
         fightFn_(fightCtx_);
@@ -894,6 +975,20 @@ void MonsterMeshTerminal::executeLine(const char *line)
         const char *args = line + 3;
         while (*args == ' ') ++args;
 
+        // `mmg N` shortcut — bare number maps to `mmg fight N`.
+        {
+            const char *p = args;
+            if (*p >= '1' && *p <= '9') {
+                const char *q = p;
+                while (*q >= '0' && *q <= '9') ++q;
+                if (*q == '\0' || *q == '\r' || *q == '\n') {
+                    char synth[16];
+                    snprintf(synth, sizeof(synth), "mmg fight %s", p);
+                    executeLine(synth);
+                    return;
+                }
+            }
+        }
         if (strncmp(args, "fight", 5) == 0) {
             const char *p = args + 5;
             while (*p == ' ') ++p;
@@ -926,15 +1021,18 @@ void MonsterMeshTerminal::executeLine(const char *line)
                          i + 1, g.gymName, g.badgeName, g.leader, g.rosterSize);
                 println(buf);
             }
+            println("  type mmg N to fight");
+            pendingMenuCmd_ = MenuCmd::MMG;
             return;
         }
 
-        // Default: trigger a fresh probe.
+        // Default: trigger a fresh probe, then show cached list if any.
         if (!bbsProbeFn_) { println("mmg probe not wired"); return; }
         discoveredCount_ = 0;     // reset cache; replies will repopulate
         bbsLastProbeMs_  = millis();
         println("Probing for MMG gyms (5s)...");
         bbsProbeFn_(bbsProbeCtx_);
+        pendingMenuCmd_ = MenuCmd::MMG;
         return;
     }
 
@@ -986,64 +1084,109 @@ void MonsterMeshTerminal::executeLine(const char *line)
         }
         return;
     }
-    // Bare `mmb` (no args) → list peers we've recently heard a daycare
-    // beacon from. Convenience for "who's online to fight?"
-    // `mmt` kept as a backward-compat alias for the old name.
-    if (strcasecmp(line, "mmb") == 0 || strcasecmp(line, "mmt") == 0) {
+    // `mmb` / `mmt` — list peers, numbered menu style.
+    bool isMmb = (strcasecmp(line, "mmb") == 0 || strcasecmp(line, "mmt") == 0) ||
+                 (strncasecmp(line, "mmb ", 4) == 0) || (strncasecmp(line, "mmt ", 4) == 0);
+    if (isMmb) {
+        // Extract args portion
+        const char *mmbArgs = line;
+        if (strncasecmp(line, "mmb", 3) == 0 || strncasecmp(line, "mmt", 3) == 0) {
+            mmbArgs = line + 3;
+            while (*mmbArgs == ' ') ++mmbArgs;
+        }
+
+        // `mmb N` — fight peer by menu index (reparse the peer list)
+        {
+            const char *p = mmbArgs;
+            bool isNum = (*p >= '1' && *p <= '9');
+            const char *q = p;
+            while (*q >= '0' && *q <= '9') ++q;
+            bool onlyNum = isNum && (*q == '\0' || *q == '\r' || *q == '\n');
+            if (onlyNum) {
+                int n = 0;
+                while (*p >= '0' && *p <= '9') { n = n * 10 + (*p - '0'); ++p; }
+                if (!mmtListFn_) { println("mmb: list not wired"); return; }
+                char listbuf[512] = {};
+                mmtListFn_(mmtListCtx_, listbuf, sizeof(listbuf));
+                // Walk indented peer lines to find the Nth entry.
+                int idx = 0;
+                const char *lp = listbuf;
+                while (*lp) {
+                    const char *nl = lp;
+                    while (*nl && *nl != '\n') ++nl;
+                    size_t len = (size_t)(nl - lp);
+                    if (len > 2 && lp[0] == ' ' && lp[1] == ' ') {
+                        ++idx;
+                        if (idx == n) {
+                            // Extract short name (before '/' or ' ')
+                            const char *start = lp + 2;
+                            const char *end = start;
+                            while (*end && *end != '/' && *end != ' ') ++end;
+                            char nameStr[32];
+                            size_t namelen = (size_t)(end - start);
+                            if (namelen >= sizeof(nameStr)) namelen = sizeof(nameStr) - 1;
+                            memcpy(nameStr, start, namelen);
+                            nameStr[namelen] = '\0';
+                            if (!mmb2Fn_) { println("mmb not wired"); return; }
+                            if (!partyLoaded_) { println("no party loaded — load a SAV first"); return; }
+                            char msgbuf[64];
+                            snprintf(msgbuf, sizeof(msgbuf), "Challenging %s...", nameStr);
+                            println(msgbuf);
+                            mmb2Fn_(mmb2Ctx_, nameStr);
+                            return;
+                        }
+                    }
+                    lp = (*nl) ? nl + 1 : nl;
+                }
+                println("peer not found — type mmb to refresh list");
+                return;
+            }
+        }
+
+        // `mmb <short_name>` — challenge by name
+        if (*mmbArgs && *mmbArgs != '\0') {
+            const char *p = mmbArgs;
+            while (*p == '@') ++p;
+            if (!mmb2Fn_) { println("mmb not wired"); return; }
+            if (!partyLoaded_) { println("no party loaded — load a SAV first"); return; }
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Challenging %s...", p);
+            println(buf);
+            mmb2Fn_(mmb2Ctx_, p);
+            return;
+        }
+
+        // Bare `mmb` — show numbered list
         if (!mmtListFn_) {
             println("mmb: peer list not wired");
-            println("usage: mmb <peer_short_name>");
             return;
         }
         char buf[512] = {};
         mmtListFn_(mmtListCtx_, buf, sizeof(buf));
+        int peerIdx = 0;
         const char *p = buf;
         while (*p) {
             const char *nl = p;
             while (*nl && *nl != '\n') ++nl;
+            size_t len = (size_t)(nl - p);
             char tmp[80];
-            size_t n = (size_t)(nl - p);
-            if (n >= sizeof(tmp)) n = sizeof(tmp) - 1;
-            memcpy(tmp, p, n);
-            tmp[n] = '\0';
-            println(tmp);
+            if (len >= sizeof(tmp)) len = sizeof(tmp) - 1;
+            memcpy(tmp, p, len);
+            tmp[len] = '\0';
+            if (len > 2 && tmp[0] == ' ' && tmp[1] == ' ') {
+                // Numbered peer line
+                char numbered[88];
+                snprintf(numbered, sizeof(numbered), "%d.%s", ++peerIdx, tmp + 1);
+                println(numbered);
+            } else {
+                println(tmp);
+            }
             p = (*nl) ? nl + 1 : nl;
         }
-        return;
-    }
-    // `mmbold <short>` (or backward-compat `mmt <short>`) — legacy
-    // dual-engine MonsterMesh Battle. Kept for testing / fallback only;
-    // the new default is the server-authoritative `mmb` below.
-    bool isBattleCmd = (strncasecmp(line, "mmbold ", 7) == 0 ||
-                        strncasecmp(line, "mmt ", 4) == 0);
-    if (isBattleCmd) {
-        const char *p = line + (strncasecmp(line, "mmbold ", 7) == 0 ? 7 : 4);
-        while (*p == ' ' || *p == '@') ++p;
-        if (!*p) { println("usage: mmbold <short_name>"); return; }
-        if (!mmtFn_) { println("mmbold not wired"); return; }
-        char buf[64];
-        snprintf(buf, sizeof(buf), "Challenging %s (legacy)...", p);
-        println(buf);
-        mmtFn_(mmtCtx_, p);
-        return;
-    }
-    // `mmb <short>` — server-authoritative MonsterMesh Battle. Single
-    // CHALLENGE packet carries our party; the receiver's screen lights up
-    // instantly on Y-accept (no party-exchange round-trip). This is the
-    // default; the legacy dual-engine path now lives under `mmbold`.
-    if (strncasecmp(line, "mmb ", 4) == 0) {
-        const char *p = line + 4;
-        while (*p == ' ' || *p == '@') ++p;
-        if (!*p) { println("usage: mmb <short_name>"); return; }
-        if (!mmb2Fn_) { println("mmb not wired"); return; }
-        if (!partyLoaded_) {
-            println("no party loaded — load a SAV first");
-            return;
+        if (peerIdx > 0) {
+            println("  type mmb N to fight");
+            pendingMenuCmd_ = MenuCmd::MMB;
         }
-        char buf[64];
-        snprintf(buf, sizeof(buf), "Challenging %s...", p);
-        println(buf);
-        mmb2Fn_(mmb2Ctx_, p);
         return;
     }
     if (strncmp(line, "explore", 7) == 0) {

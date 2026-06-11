@@ -133,16 +133,6 @@ class MonsterMeshTerminal {
     // can update LordRunStats + persist + print a flavor line.
     void onExploreBattleEnded(uint8_t routeIdx, bool playerWon, uint8_t lvl);
 
-    // T4: hook for `mmt <short>` — module resolves the short_name via
-    // NodeDB and sends an MMT:ON challenge DM. Receiver-side prompt +
-    // battle start land in a later build; this command kicks off the
-    // wire ping.
-    typedef void (*MmtChallengeFn)(void *ctx, const char *peerShortName);
-    void setMmtChallengeFn(MmtChallengeFn fn, void *ctx) {
-        mmtFn_ = fn;
-        mmtCtx_ = ctx;
-    }
-
     // Server-authoritative PvP entry: `mmb2 <short>`. Module resolves
     // the peer's short_name and calls textBattle_.startServerAuthAsInitiator
     // — single CHALLENGE packet carries our party so the receiver loads
@@ -254,6 +244,9 @@ class MonsterMeshTerminal {
     // -1 = no pending rematch confirmation. Otherwise the gym index whose
     // confirmation prompt is awaiting a yes/no on the next typed line.
     int8_t   pendingRematchGym_ = -1;
+    // TinyBBS-style menu state: which bare-number menu is active.
+    enum class MenuCmd : uint8_t { NONE, GYM, MMG, MMB, FIGHT };
+    MenuCmd  pendingMenuCmd_ = MenuCmd::NONE;
 
     DaycareStatusFn daycareStatusFn_ = nullptr;
     void           *daycareStatusCtx_ = nullptr;
@@ -273,8 +266,6 @@ class MonsterMeshTerminal {
     void               *exploreCtx_    = nullptr;
     E4FightFn           e4FightFn_     = nullptr;
     void               *e4FightCtx_    = nullptr;
-    MmtChallengeFn      mmtFn_         = nullptr;
-    void               *mmtCtx_        = nullptr;
     Mmb2ChallengeFn     mmb2Fn_        = nullptr;
     void               *mmb2Ctx_       = nullptr;
 
