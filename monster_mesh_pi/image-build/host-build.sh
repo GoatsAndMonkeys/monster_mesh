@@ -37,28 +37,38 @@ echo "== [host] Tarring source tree =="
 # Allowlist what customize.sh / build.sh actually need.  Skipping tools/
 # (host-only sprite-bake + 302-image .cache), firmware-builds/ (T-Deck
 # artifacts), and image-build/.cache / .build / dist (regenerable).
+# Include the cached base .img.gz in the tarball too.  The host reads it off
+# native APFS, it extracts onto the container's overlayfs, and build.sh
+# decompresses it locally — sidestepping the macOS VirtioFS bind-mount EDEADLK
+# ("Resource deadlock avoided") that breaks even a plain `cat` of a
+# bind-mounted base image on recent Docker Desktop.
+CACHE_TAR_ARG=()
+if compgen -G "$IB/.cache/*.img.gz" >/dev/null 2>&1 || \
+   compgen -G "$IB/.cache/*.img.xz" >/dev/null 2>&1; then
+    CACHE_TAR_ARG=(image-build/.cache)
+fi
 ( cd "$REPO_ROOT" && tar \
     --exclude='.DS_Store' \
     --exclude='__pycache__' \
+    --exclude='image-build/.cache/*.part' \
     -cf "$SRCTAR" \
     src CMakeLists.txt retropie tests \
     image-build/build.sh \
     image-build/customize.sh \
     image-build/config-patches \
     image-build/README.md \
+    "${CACHE_TAR_ARG[@]}" \
 )
 echo "Source tarball:"; ls -lh "$SRCTAR"
 
 echo "== [host] Launching builder container =="
-# Only single-file or single-large-file bind mounts:
-#   /srctree.tar               — our tarball (one big file)
-#   /work/image-build/.cache   — base RetroPie .img.gz (one big file)
-#   /work/image-build/dist     — output .img.xz (one big file)
-# WORK_ROOT is unset so build.sh defaults to /work/image-build, which is
-# fine: .cache and dist are bind-mounted there, .build is overlayfs.
+# Bind mounts kept to the bare minimum to dodge macOS VirtioFS EDEADLK:
+#   /srctree.tar  — our tarball (one big file; carries source + base .img.gz)
+#   /work/image-build/dist — output .img.xz (write-only on the way out)
+# The base image is NO LONGER bind-mounted: it rides in the tarball and lands
+# on the container overlayfs, so build.sh never reads it through VirtioFS.
 docker run --rm --privileged \
     --dns=1.1.1.1 --dns=8.8.8.8 \
-    -v "$IB/.cache:/work/image-build/.cache" \
     -v "$IB/dist:/work/image-build/dist" \
     -v "$SRCTAR:/srctree.tar:ro" \
     -e GIT_SHA_OVERRIDE="$GIT_SHA" \

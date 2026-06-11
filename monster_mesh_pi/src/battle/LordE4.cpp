@@ -79,12 +79,12 @@ const LordE4Member *lordE4Member(uint8_t idx)
 static void writeMonToParty(Gen1Party &out, uint8_t slot,
                             const LordGymMon &src, const char *nick)
 {
-    uint8_t lvl = lordScaleLevel(src.level, lordCurrentNgPlusTier(),
-                                 /*isE4=*/true);
+    uint8_t tier = lordCurrentNgPlusTier();
+    uint8_t lvl  = lordScaleLevel(src.level, tier, /*isE4=*/true);
 
     uint8_t moves[4];
     memcpy(moves, src.moves, 4);
-    lordApplyNgPlusMoves(src.species, lordCurrentNgPlusTier(), moves);
+    lordApplyNgPlusMoves(src.species, tier, moves);
 
     Gen1BattleEngine::BattlePoke tmp;
     Gen1BattleEngine::initBattlePokeFromBase(tmp, src.species, lvl, moves);
@@ -107,8 +107,19 @@ static void writeMonToParty(Gen1Party &out, uint8_t slot,
     setBe16(p.spc,   tmp.spc);
     p.type1   = tmp.type1;
     p.type2   = tmp.type2;
-    p.dvs[0]  = 0x88;
-    p.dvs[1]  = 0x88;
+    // NG+ Elite Four / Champion are fully trained: max DVs + full stat-exp so
+    // a scaled Lvl-N mon fights at Lvl-N.  Base game stays canonical.
+    bool buff = (tier > 0);
+    p.dvs[0]  = buff ? 0xFF : 0x88;
+    p.dvs[1]  = buff ? 0xFF : 0x88;
+    if (buff) {
+        setBe16(p.hpExp,  0xFFFF);
+        setBe16(p.atkExp, 0xFFFF);
+        setBe16(p.defExp, 0xFFFF);
+        setBe16(p.spdExp, 0xFFFF);
+        setBe16(p.spcExp, 0xFFFF);
+        setBe16(p.hp, 0xFFFF);   // engine clamps current HP to the recomputed full maxHp
+    }
     memcpy(p.moves, moves, 4);
     for (int i = 0; i < 4; ++i) {
         const Gen1MoveData *m = gen1Move(moves[i]);

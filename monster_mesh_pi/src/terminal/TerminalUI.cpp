@@ -320,7 +320,8 @@ void TerminalUI::run() {
         battleWindow_.pumpEvents();
 
         // Pentest Pikachu: the fight plays itself — auto-pick a move each beat.
-        if (inPentestBattle_) pentestAutoTick();
+        // Also tick while in standby so it keeps scanning for a vulnerable AP.
+        if (inPentestBattle_ || pentestStandby_) pentestAutoTick();
 
         render();
         usleep(16666);
@@ -332,15 +333,46 @@ void TerminalUI::run() {
 // whole fight is hands-off.  Stops as soon as the battle ends (runTurnWithXp
 // flips screen_ to BATTLE_END).
 void TerminalUI::pentestAutoTick() {
-    // Freeze the auto-fight + auto-advance while the status overlay is up.
+    // Freeze the auto-fight / standby rescan while the status overlay is up.
     if (pentestShowStatus_) return;
     uint64_t now = millis();
+
+    // Standby: no active battle — Pikachu is waiting for a vulnerable WiFi
+    // network.  Rescan periodically; the moment a vulnerable AP is in range,
+    // drop out of standby and start the fight.
+    if (pentestStandby_) {
+        if (now - pentestScanMs_ >= PENTEST_STANDBY_SCAN_MS) {
+            pentestScanMs_ = now;
+            pentestScanNetworks();
+            if (!pentestScanAvailable_ || !pentestNets_.empty()) {
+                pentestStandby_ = false;
+                startPentestBattle();      // picks the target + builds the fight
+            }
+        }
+        return;
+    }
 
     // Battle over: there's no "YOU WIN" screen for the pentest ROM — you can
     // read the result straight off the frozen battle frame.  Keep that frame
     // on screen for a couple of seconds, then chain into the next scan.
     if (battleResult_ != Gen1BattleEngine::Result::ONGOING) {
-        if (pentestEndMs_ == 0) pentestEndMs_ = now;   // begin the linger
+        if (pentestEndMs_ == 0) {
+            pentestEndMs_ = now;                         // begin the linger
+            // Tally this battle's outcome exactly once (player is P1).
+            if (!pentestTallied_) {
+                if (battleResult_ == Gen1BattleEngine::Result::P1_WIN) {
+                    pentestWins_++;
+                    // Beat a gym leader? Mark the badge so the next leader (and
+                    // its zones) unlock — drives progression like the T-Deck.
+                    if (pentestBattleGym_ < 8)
+                        pentestGymBeaten_ |= (uint8_t)(1u << pentestBattleGym_);
+                } else if (battleResult_ == Gen1BattleEngine::Result::P2_WIN) {
+                    pentestLosses_++;
+                }
+                pentestTallied_ = true;
+                pentestSaveProgress();
+            }
+        }
         screen_ = Screen::BATTLE;                       // suppress BATTLE_END
         if (now - pentestEndMs_ >= PENTEST_END_MS) startPentestBattle();
         return;
@@ -359,12 +391,12 @@ void TerminalUI::pentestAutoTick() {
     engine_.submitAction(1 - localSide_,  ca, ci);
     runTurnWithXp();
 
-    // runTurnWithXp() flips screen_ to BATTLE_END on the finishing blow; undo
-    // it immediately so the win screen never shows, and start the linger.
-    if (battleResult_ != Gen1BattleEngine::Result::ONGOING) {
-        screen_       = Screen::BATTLE;
-        pentestEndMs_ = now;
-    }
+    // runTurnWithXp() flips screen_ to BATTLE_END on the finishing blow; undo it
+    // so the win screen never shows.  DON'T start the linger here — leave
+    // pentestEndMs_ at 0 so the battle-over block at the top runs the W/L tally
+    // (it keys off pentestEndMs_ == 0) on the next tick, then begins the linger.
+    if (battleResult_ != Gen1BattleEngine::Result::ONGOING)
+        screen_ = Screen::BATTLE;       // suppress the BATTLE_END flash
 }
 
 // ── Rendering dispatch ────────────────────────────────────────────────────────
@@ -822,12 +854,12 @@ void TerminalUI::renderBattle() {
         if (g) {
             char hdr[80];
             int round = pendingTrainerIdx_ + 1;
-            const char *who = (pendingTrainerIdx_ >= LORD_GYM_LEADER_INDEX)
+            const char *who = (pendingTrainerIdx_ >= lordGymLeaderIndex(g))
                                 ? g->leaderName
                                 : g->trainers[pendingTrainerIdx_].name;
             snprintf(hdr, sizeof(hdr),
-                     "%s Gym  Round %d/5  vs %s",
-                     g->city, round, who);
+                     "%s Gym  Round %d/%u  vs %s",
+                     g->city, round, (unsigned)g->trainerCount, who);
             wattron(winInfo_, A_BOLD | COLOR_PAIR(4));
             mvwprintw(winInfo_, row, 0, "%-*.*s", infoCols, infoCols, hdr);
             wattroff(winInfo_, A_BOLD | COLOR_PAIR(4));
@@ -1268,7 +1300,7 @@ void TerminalUI::challengeButton(const ButtonEvent &ev) {
 void TerminalUI::battleButton(const ButtonEvent &ev) {
     // Pentest Pikachu owns its own input: A toggles the status overlay, the
     // fight is automatic, and exit/save is handled centrally.
-    if (inPentestBattle_) { pentestButton(ev); return; }
+    if (inPentestBattle_ || pentestStandby_) { pentestButton(ev); return; }
     if (inBattle_) {
         battleHandleButton(ev);
     } else {
@@ -1277,14 +1309,63 @@ void TerminalUI::battleButton(const ButtonEvent &ev) {
 }
 
 void TerminalUI::pentestButton(const ButtonEvent &ev) {
-    if (ev.button == GpiButton::A) {           // toggle the status overlay
-        pentestShowStatus_ = !pentestShowStatus_;
+    // ── Status overlay open: drive its little scrollable menu ──
+    // Two-option menu (default = Back, so a stray A just closes the overlay):
+    //   [Back]  [Reset Pikachu]   →  Reset opens a confirm step:
+    //   [No, keep playing]  [Yes, RESET]   (default = No)
+    // Status overlay up: drive its scrollable menu (default = Back).  This
+    // overlay is reachable both mid-fight and from standby (press A).
+    if (pentestShowStatus_) {
+        const int nOpts = 2;
+        switch (ev.button) {
+            case GpiButton::UP:
+            case GpiButton::LEFT:
+                pentestStatusSel_ = (pentestStatusSel_ + nOpts - 1) % nOpts;
+                return;
+            case GpiButton::DOWN:
+            case GpiButton::RIGHT:
+                pentestStatusSel_ = (pentestStatusSel_ + 1) % nOpts;
+                return;
+            case GpiButton::A:
+                if (!pentestConfirmReset_) {
+                    if (pentestStatusSel_ == 0) {            // Back
+                        pentestShowStatus_ = false;
+                        pentestStatusSel_  = 0;
+                    } else {                                  // Reset Pikachu
+                        pentestConfirmReset_ = true;
+                        pentestStatusSel_    = 0;             // default = No
+                    }
+                } else {
+                    if (pentestStatusSel_ == 1) {            // Yes, RESET
+                        pentestResetProgress();               // wipes + restarts
+                    } else {                                  // No, keep playing
+                        pentestConfirmReset_ = false;
+                        pentestStatusSel_    = 0;
+                    }
+                }
+                return;
+            case GpiButton::B:
+                if (pentestConfirmReset_) {                    // back out of confirm
+                    pentestConfirmReset_ = false;
+                    pentestStatusSel_    = 0;
+                } else {                                       // dismiss overlay
+                    pentestShowStatus_ = false;
+                    pentestStatusSel_  = 0;
+                }
+                return;
+            case GpiButton::START:
+            case GpiButton::SELECT:
+                break;            // fall through to exit-ROM handling below
+            default:
+                return;
+        }
+    } else if (ev.button == GpiButton::A) {     // open the status overlay
+        pentestShowStatus_   = true;
+        pentestStatusSel_    = 0;
+        pentestConfirmReset_ = false;
         return;
     }
-    if (ev.button == GpiButton::B && pentestShowStatus_) {
-        pentestShowStatus_ = false;            // B also dismisses the overlay
-        return;
-    }
+
     if (ev.button == GpiButton::B ||
         ev.button == GpiButton::START ||
         ev.button == GpiButton::SELECT) {
@@ -1299,6 +1380,36 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
         inBattle_        = false;
         requestQuit();
     }
+}
+
+// Wipe all pentest progress back to a fresh Level-5 Pikachu and immediately
+// begin a new scan.  inPentestBattle_ is cleared first so startPentestBattle()
+// doesn't carry the OLD engine level forward over the reset.
+void TerminalUI::pentestResetProgress() {
+    pentestLevel_  = 5;
+    pentestXp_     = 0;
+    memset(pentestDex_,    0, sizeof(pentestDex_));
+    memset(pentestBeaten_, 0, sizeof(pentestBeaten_));
+    pentestUsedSsid_  = 0;
+    pentestWins_      = 0;
+    pentestLosses_    = 0;
+    pentestGymBeaten_ = 0;
+    pentestSaveProgress();
+
+    pentestShowStatus_   = false;
+    pentestConfirmReset_ = false;
+    pentestStatusSel_    = 0;
+    pentestStandby_      = false;
+    pentestDoneSsids_.clear();   // forget every network cracked so far...
+    pentestNets_.clear();        // ...so they're all fair game again.
+#ifndef __APPLE__
+    // Kick one fresh scan so a reset immediately repopulates targets and drops
+    // straight into a fight (this is a rare, user-initiated action, so the
+    // brief scan is fine — unlike the standby loop, which stays cached-only).
+    (void)system("sudo -n wpa_cli -i wlan0 scan >/dev/null 2>&1");
+#endif
+    inPentestBattle_     = false;
+    startPentestBattle();
 }
 
 void TerminalUI::pentestMarkSeen(uint8_t dex) {
@@ -1316,18 +1427,25 @@ void TerminalUI::pentestMarkBeaten(uint8_t dex) {
 
 void TerminalUI::pentestBuildStatus(std::vector<std::string> &out) {
     char line[96];
-    // Gyms "cleared" = gym areas whose leader level the Pikachu has reached.
-    int gyms = 0;
-    bool counted[8] = {};
-    for (int i = 0; i < KANTO_ZONE_COUNT; i++) {
-        const KantoZone &z = KANTO_ZONES[i];
-        if (z.gymIdx < 8 && !counted[z.gymIdx] && pentestLevel_ >= z.gymLvl) {
-            counted[z.gymIdx] = true;
-            gyms++;
-        }
+    // Standby banner: Pikachu is idle, waiting for a vulnerable WiFi network.
+    if (pentestStandby_) {
+        out.push_back("== STANDBY ==");
+        out.push_back("Waiting for a vulnerable network...");
+        snprintf(line, sizeof(line), "APs in range: %d   Cracked: %d",
+                 pentestNetsSeen_, (int)pentestDoneSsids_.size());
+        out.push_back(line);
+        out.push_back("");
     }
+    // Gyms cleared = leaders actually defeated (drives zone unlock, like the
+    // T-Deck), not levels reached.
+    int gyms = __builtin_popcount(pentestGymBeaten_);
     snprintf(line, sizeof(line), "Gyms cleared: %d/8", gyms);   out.push_back(line);
-    snprintf(line, sizeof(line), "Pikachu:      Lv%u", (unsigned)pentestLevel_);
+    const char *mon = (pentestLevel_ >= 30) ? "Raichu " : "Pikachu";  // evolves at L30
+    snprintf(line, sizeof(line), "%s:      Lv%u", mon, (unsigned)pentestLevel_);
+    out.push_back(line);
+    unsigned w = pentestWins_, l = pentestLosses_, tot = w + l;
+    unsigned pct = tot ? (unsigned)((w * 100 + tot / 2) / tot) : 0;
+    snprintf(line, sizeof(line), "Record: %u W - %u L  (%u%%)", w, l, pct);
     out.push_back(line);
     int seen = 0, beaten = 0;
     for (int i = 0; i < 151; i++) {
@@ -1338,17 +1456,46 @@ void TerminalUI::pentestBuildStatus(std::vector<std::string> &out) {
     snprintf(line, sizeof(line), "Pokedex beaten: %d/151", beaten); out.push_back(line);
     out.push_back("");
 
-    const KantoZone &zone = kantoZoneForLevel(pentestLevel_);
-    snprintf(line, sizeof(line), "Area: %s", zone.name);        out.push_back(line);
-    out.push_back("Wild Pokemon here:");
-    std::string row;
-    for (int i = 0; i < zone.wildCount; i++) {
-        const char *nm = dexName(zone.wilds[i].dex);
-        if (!row.empty()) row += ", ";
-        row += (nm ? nm : "?");
-        if ((i % 3) == 2) { out.push_back("  " + row); row.clear(); }
+    // "Pokemon in current gym" = the next leader you have to beat (Brock until
+    // his badge is yours, then Misty, ...).  After all 8, show the last as the
+    // repeatable boss.
+    uint8_t gIdx = (uint8_t)gyms;
+    if (gIdx >= LORD_GYM_COUNT) gIdx = LORD_GYM_COUNT - 1;
+    const LordGym *g = lordGym(gIdx);
+    if (g) {
+        if (gyms >= LORD_GYM_COUNT)
+            snprintf(line, sizeof(line), "All badges! Rematch: %s", g->leaderName);
+        else
+            snprintf(line, sizeof(line), "Next gym: %s (%s)", g->city, g->leaderName);
+        out.push_back(line);
+        out.push_back("Leader's team:");
+        const LordGymTrainer &ldr = g->trainers[lordGymLeaderIndex(g)];
+        std::string row;
+        for (int i = 0; i < ldr.count; i++) {
+            const char *nm = dexName(ldr.party[i].species);
+            char cell[24];
+            snprintf(cell, sizeof(cell), "%s L%u", nm ? nm : "?",
+                     (unsigned)ldr.party[i].level);
+            if (!row.empty()) row += ", ";
+            row += cell;
+            if ((i % 2) == 1) { out.push_back("  " + row); row.clear(); }
+        }
+        if (!row.empty()) out.push_back("  " + row);
     }
-    if (!row.empty()) out.push_back("  " + row);
+
+    // ── Menu (scrollable; default selection = Back) ──
+    out.push_back("");
+    auto opt = [&](int idx, const char *label) {
+        out.push_back(std::string(pentestStatusSel_ == idx ? "> " : "  ") + label);
+    };
+    if (!pentestConfirmReset_) {
+        opt(0, "Back");
+        opt(1, "Reset Pikachu");
+    } else {
+        out.push_back("Reset to Level 5? Progress lost!");
+        opt(0, "No, keep playing");
+        opt(1, "Yes, RESET");
+    }
 }
 
 void TerminalUI::battleEndButton(const ButtonEvent &ev) {
@@ -1376,11 +1523,11 @@ void TerminalUI::battleEndButton(const ButtonEvent &ev) {
 
     // Gym gauntlet: chain wins into the next trainer without healing.
     if (inGymBattle_ && battleResult_ == Gen1BattleEngine::Result::P1_WIN) {
-        if (pendingTrainerIdx_ >= LORD_GYM_LEADER_INDEX) {
+        const LordGym *g = lordGym(pendingGymIdx_);
+        if (g && pendingTrainerIdx_ >= lordGymLeaderIndex(g)) {
             // Beat the leader -> award badge, mark gym cleared, return to menu
-            const LordGym *g = lordGym(pendingGymIdx_);
-            if (g) lordSave_.badges |= (uint8_t)(1u << g->badgeBit);
-            lordSave_.gymProgress[pendingGymIdx_] = LORD_GYM_TRAINERS;
+            lordSave_.badges |= (uint8_t)(1u << g->badgeBit);
+            lordSave_.gymProgress[pendingGymIdx_] = g->trainerCount;
             // Record which NG+ tier this gym was last cleared at, so the gym
             // list can flag it for a rematch after the next NG+ rollover.
             if (pendingGymIdx_ < LORD_GYM_COUNT)
@@ -1388,14 +1535,30 @@ void TerminalUI::battleEndButton(const ButtonEvent &ev) {
             lordSave(lordSave_);
             inGymBattle_ = false;
         } else {
-            // Advance to the next trainer. Engine.replaceOpponent keeps our
-            // party's HP/PP/status -- that's the no-healing gauntlet rule.
-            // No SAV writeback between rounds -- we treat the gauntlet as a
-            // single battle sequence and persist XP only when the gym is
-            // fully cleared, lost, or fled (at BATTLE_END below).
+            // Advance to the next trainer.  Like the real games — where you can
+            // walk out to the Poke Center between battles — the party is FULLY
+            // HEALED (HP, PP, status, stat stages) before each gym trainer, so
+            // each fight starts fresh instead of a no-heal gauntlet.
+            // XP keeps accumulating in slotLevelXp_; no SAV writeback until the
+            // gym is fully cleared, lost, or fled (at BATTLE_END below).
             pendingTrainerIdx_++;
             Gen1Party nextGymParty;
             if (lordBuildGymParty(pendingGymIdx_, pendingTrainerIdx_, nextGymParty)) {
+                Gen1BattleEngine::BattleParty &php = engine_.party(localSide_);
+                for (uint8_t i = 0; i < php.count; i++) {
+                    Gen1BattleEngine::BattlePoke &m = php.mons[i];
+                    m.hp           = m.maxHp;
+                    m.status       = 0;          // ST_NONE
+                    m.sleepTurns   = 0;
+                    m.confuseTurns = 0;
+                    m.toxicCounter = 0;
+                    m.atkBoost = m.defBoost = m.spdBoost = m.spcBoost = 0;
+                    m.accBoost = m.evaBoost = 0;
+                    for (int k = 0; k < 4; k++) {
+                        const Gen1MoveData *md = gen1Move(m.moves[k]);
+                        if (md && m.moves[k]) m.pp[k] = md->pp;
+                    }
+                }
                 engine_.replaceOpponent(nextGymParty);
                 battleLog_.clear();
                 moveSel_      = 0;
@@ -1732,32 +1895,52 @@ void TerminalUI::buildPlayerPartyForBattle() {
 
     uint8_t avgLv = avgPartyLevel();
 
-    // CPU party: Rival-style team at similar level
-    static const uint8_t RIVAL_MONS[][4] = {
-        {4, 1, 33, 45},   // Charmander: Scratch, Growl, ...
-        {7, 1, 33, 10},   // Squirtle: Tackle, Tail Whip
-        {1, 45, 22, 33},  // Bulbasaur: Tackle, Vine Whip, Tail Whip, Growl
-        {25, 84, 9, 73},  // Pikachu: ThunderShock, Thunder Wave, Tail Whip, Quick Attack
-        {52, 10, 44, 98}, // Meowth: Scratch, Growl, Bite, Pay Day
-        {6, 52, 19, 17},  // Charizard: Flamethrower, Slash, Fly, Wing Attack
+    // CPU party: a RANDOM team — different species, movesets and (slightly)
+    // levels every fight, so no two CPU battles feel the same.  Drawn from a
+    // varied Gen-1 pool with sensible moves, scaled to your party's level.
+    static const uint8_t CPU_POOL[][5] = {
+        // species, move1, move2, move3, move4
+        {  4,  10, 45,  52,  0 },  // Charmander  Scratch / Growl / Ember
+        {  7,  33, 39,  55,  0 },  // Squirtle    Tackle / Tail Whip / Water Gun
+        {  1,  33, 45,  22,  0 },  // Bulbasaur   Tackle / Growl / Vine Whip
+        { 25,  84, 45,  98,  0 },  // Pikachu     ThunderShock / Growl / Quick Attack
+        { 52,  10, 45,  44,  0 },  // Meowth      Scratch / Growl / Bite
+        {  6,  52, 17,  10,  0 },  // Charizard   Ember / Wing Attack / Scratch
+        { 16,  33, 45,  16,  0 },  // Pidgey      Tackle / Growl / Gust
+        { 19,  33, 39,  98,  0 },  // Rattata     Tackle / Tail Whip / Quick Attack
+        { 41,  33, 141, 0,   0 },  // Zubat       Tackle / Leech Life
+        { 74,  33, 88,  0,   0 },  // Geodude     Tackle / Rock Throw
+        { 92,  93, 45,  0,   0 },  // Gastly      Confusion / Growl
+        { 54,  55, 10,  0,   0 },  // Psyduck     Water Gun / Scratch
+        { 66,   2, 33,  0,   0 },  // Machop      Karate Chop / Tackle
+        { 60, 145, 33,  0,   0 },  // Poliwag     Bubble / Tackle
+        { 23,  33, 45,  44,  0 },  // Ekans       Tackle / Growl / Bite
+        { 27,  10, 33,  88,  0 },  // Sandshrew   Scratch / Tackle / Rock Throw
     };
+    const int POOL_N = (int)(sizeof(CPU_POOL) / sizeof(CPU_POOL[0]));
     Gen1Party cpu = {};
-    int cpuCount  = (int)party_.count;
+    int cpuCount = (int)party_.count;
     if (cpuCount > 6) cpuCount = 6;
     cpu.count = (uint8_t)cpuCount;
+    int prevIdx = -1;
     for (int i = 0; i < cpuCount; i++) {
-        uint8_t idx  = i % 6;
-        uint8_t mon  = RIVAL_MONS[idx][0];
-        cpu.species[i] = mon;
-        Gen1BattleEngine::BattlePoke tmp;
-        Gen1BattleEngine::initBattlePokeFromBase(tmp, mon, avgLv, RIVAL_MONS[idx] + 1);
-        // Pack back into Gen1Pokemon format (simplified - engine re-reads from party)
-        cpu.mons[i].species  = mon;
-        cpu.mons[i].level    = avgLv;
-        cpu.mons[i].boxLevel = avgLv;
-        memcpy(cpu.mons[i].moves, RIVAL_MONS[idx] + 1, 4);
+        int idx = rand() % POOL_N;
+        if (idx == prevIdx) idx = (idx + 1) % POOL_N;   // avoid back-to-back dupes
+        prevIdx = idx;
+        uint8_t mon = CPU_POOL[idx][0];                 // national dex
+        // The engine reads Gen1Pokemon.species as the INTERNAL Gen-1 code, not
+        // national dex — pass the raw dex and it resolves a blank/no-stat
+        // "ghost" that yields no XP.  Convert exactly like the gym/pentest paths.
+        uint8_t internal = dexToInternal[mon];
+        int lv = (int)avgLv + (rand() % 5) - 2;         // small per-mon variance
+        if (lv < 2)   lv = 2;
+        if (lv > 100) lv = 100;
+        cpu.species[i]       = internal;
+        cpu.mons[i].species  = internal;
+        cpu.mons[i].level    = (uint8_t)lv;
+        cpu.mons[i].boxLevel = (uint8_t)lv;
+        memcpy(cpu.mons[i].moves, CPU_POOL[idx] + 1, 4);
     }
-    cpu.count = (uint8_t)cpuCount;
 
     uint32_t seed = (uint32_t)(millis() ^ (uint32_t)(uintptr_t)this);
     engine_.start(party_, cpu, seed);
@@ -1832,6 +2015,13 @@ void TerminalUI::pentestLoadProgress() {
         // Pokedex bitsets are optional (older saves won't have them).
         fread(pentestDex_,    sizeof(pentestDex_),    1, f);
         fread(pentestBeaten_, sizeof(pentestBeaten_), 1, f);
+        // Used-SSID mask is optional too (saves older than this feature).
+        fread(&pentestUsedSsid_, sizeof(pentestUsedSsid_), 1, f);
+        // W/L tally is optional as well (older saves won't have it).
+        fread(&pentestWins_,   sizeof(pentestWins_),   1, f);
+        fread(&pentestLosses_, sizeof(pentestLosses_), 1, f);
+        // Gym-beaten bitset (optional — older saves predate gym progression).
+        fread(&pentestGymBeaten_, sizeof(pentestGymBeaten_), 1, f);
     }
     fclose(f);
 }
@@ -1845,7 +2035,163 @@ void TerminalUI::pentestSaveProgress() {
     fwrite(&pentestXp_,     sizeof(pentestXp_),     1, f);
     fwrite(pentestDex_,     sizeof(pentestDex_),    1, f);
     fwrite(pentestBeaten_,  sizeof(pentestBeaten_), 1, f);
+    fwrite(&pentestUsedSsid_, sizeof(pentestUsedSsid_), 1, f);
+    fwrite(&pentestWins_,   sizeof(pentestWins_),   1, f);
+    fwrite(&pentestLosses_, sizeof(pentestLosses_), 1, f);
+    fwrite(&pentestGymBeaten_, sizeof(pentestGymBeaten_), 1, f);
     fclose(f);
+}
+
+// Canonical Gen-1 Pikachu learnset (level -> move id), sorted by level.  As the
+// pentest Pikachu climbs, its active 4 moves are the most-recently-learned ones
+// (oldest drops off), and at L30 it evolves into Raichu — mirroring the T-Deck
+// Pentest Pikachu.  Raichu learns nothing more after evolving in Gen 1.
+namespace {
+struct PikaLearn { uint8_t level; uint8_t move; };
+static const PikaLearn kPikaLearnset[] = {
+    { 1,  84},  // Thunder Shock
+    { 1,  45},  // Growl
+    { 6,  39},  // Tail Whip
+    { 8,  86},  // Thunder Wave
+    {11,  98},  // Quick Attack
+    {15, 104},  // Double Team
+    {20,  21},  // Slam
+    {26,  85},  // Thunderbolt
+    {33,  97},  // Agility
+    {41,  87},  // Thunder
+};
+static constexpr uint8_t PIKACHU_EVOLVE_LEVEL = 30;  // Pikachu -> Raichu
+
+// Fill out[4] with the 4 most-recently-learned moves at `level` (oldest drops
+// when a 5th is learned), backfilled with Thunder Shock so there's always an
+// attacking move in slot 0.
+static void pikaMovesForLevel(uint8_t level, uint8_t out[4]) {
+    uint8_t window[4] = {0, 0, 0, 0};
+    int n = 0;
+    for (const PikaLearn &e : kPikaLearnset) {
+        if (e.level > level) break;             // table is level-sorted
+        if (n < 4) {
+            window[n++] = e.move;
+        } else {                                // slide window, drop oldest
+            window[0] = window[1];
+            window[1] = window[2];
+            window[2] = window[3];
+            window[3] = e.move;
+        }
+    }
+    for (int i = 0; i < 4; i++) out[i] = window[i] ? window[i] : 84;
+}
+}  // namespace
+
+// Map a wpa_cli "flags" field to a real-world WiFi weakness.  Only WPS, WEP and
+// open networks are considered exploitable enough to "fight" — a plain WPA2/WPA3
+// network with no WPS is treated as secure (no battle).  Returns false (secure)
+// or true with `out` set to a flavour description of the weakness.
+static bool pentestVulnForFlags(const char *flags, std::string &out) {
+    std::string f = flags ? flags : "";
+    auto has = [&](const char *s) { return f.find(s) != std::string::npos; };
+    if (has("WPS")) { out = "WPS PIN attack (Pixie Dust)";   return true; }
+    if (has("WEP")) { out = "WEP IV collision / key reuse";  return true; }
+    if (!has("WPA") && !has("RSN")) {           // no WPA/WPA2/WPA3 => open
+        out = "Open network - cleartext sniffing";
+        return true;
+    }
+    return false;                               // WPA/WPA2/WPA3 secured, no WPS
+}
+
+// Scan nearby WiFi via wpa_cli and refresh pentestNets_ with the VULNERABLE
+// networks currently in range that haven't been cracked yet this session.
+// Sets pentestScanAvailable_ false when no scanner is reachable (off-device or
+// no WiFi) so the caller can fall back to the fictional demo list.
+void TerminalUI::pentestScanNetworks() {
+    pentestNets_.clear();
+    pentestNetsSeen_      = 0;
+    pentestScanAvailable_ = false;
+#ifndef __APPLE__
+    // Read the supplicant's CACHED scan results — do NOT trigger an active
+    // `wpa_cli scan`.  An active scan briefly drops the WiFi association, and
+    // firing one every standby tick knocks the Pi off the network (and kills
+    // SSH).  wpa_supplicant scans on its own (frequently when unassociated), so
+    // cached results stay fresh enough for the game without disrupting WiFi.
+    FILE *f = popen("sudo -n wpa_cli -i wlan0 scan_results 2>/dev/null", "r");
+    if (!f) return;
+    char buf[256];
+    bool header = true;
+    while (fgets(buf, sizeof(buf), f)) {
+        if (header) { header = false; pentestScanAvailable_ = true; continue; }
+        char *save  = nullptr;
+        (void)strtok_r(buf,     "\t", &save);            // bssid
+        (void)strtok_r(nullptr, "\t", &save);            // frequency
+        (void)strtok_r(nullptr, "\t", &save);            // signal
+        char *flags = strtok_r(nullptr, "\t", &save);    // flags
+        char *ssid  = strtok_r(nullptr, "\t\r\n", &save);// ssid (may be empty/hidden)
+        if (!ssid || !*ssid) continue;
+        pentestNetsSeen_++;
+        std::string vuln;
+        if (!pentestVulnForFlags(flags ? flags : "", vuln)) continue;  // secure — skip
+        bool skip = false;
+        for (auto &d : pentestDoneSsids_) if (d == ssid) { skip = true; break; }
+        for (auto &n : pentestNets_)      if (n.ssid == ssid) { skip = true; break; }
+        if (skip) continue;
+        pentestNets_.push_back({ ssid, vuln });
+    }
+    pclose(f);
+#endif
+}
+
+// Choose the next WiFi target.  Returns true with pentestSsid_/pentestVuln_ set,
+// or false when a working scanner found NO vulnerable network in range (→ the
+// caller drops to standby).  With no scanner at all, falls back to the fictional
+// demo list so the ROM still plays off-device.
+bool TerminalUI::pentestPickTarget() {
+    if (pentestNets_.empty()) pentestScanNetworks();
+
+    if (pentestScanAvailable_) {
+        if (pentestNets_.empty()) return false;          // nothing vulnerable nearby
+        int pick = rand() % (int)pentestNets_.size();
+        snprintf(pentestSsid_, sizeof(pentestSsid_), "%s", pentestNets_[pick].ssid.c_str());
+        snprintf(pentestVuln_, sizeof(pentestVuln_), "%s", pentestNets_[pick].vuln.c_str());
+        pentestDoneSsids_.push_back(pentestNets_[pick].ssid);   // don't refight this sweep
+        pentestNets_.erase(pentestNets_.begin() + pick);
+        return true;
+    }
+
+    // ── No scanner: fictional demo list (no-repeat via a bitmask) ──
+    static const char *SSIDS[] = {
+        "linksys",   "NETGEAR47",  "xfinitywifi",  "ATT-WiFi-2G",
+        "TP-Link_5G","HOME-A1B2",  "dlink-guest",  "CenturyLink",
+        "Pixel_5599","FBI_Van_3",  "Starbucks",    "iPhone",
+    };
+    static const char *VULNS[] = {
+        "WPS PIN brute (CVE-2011-5053)",
+        "WEP key reuse / IV collision",
+        "KRACK 4-way handshake replay",
+        "Default admin creds (admin:admin)",
+        "WPA2 PMKID hashcat -m 16800",
+        "Evil-twin deauth (802.11w off)",
+    };
+    const int NUM_SSID = (int)(sizeof(SSIDS)/sizeof(SSIDS[0]));
+    if (pentestUsedSsid_ == (uint16_t)((1u << NUM_SSID) - 1))
+        pentestUsedSsid_ = 0;
+    int unused[NUM_SSID], nUnused = 0;
+    for (int i = 0; i < NUM_SSID; i++)
+        if (!(pentestUsedSsid_ & (1u << i))) unused[nUnused++] = i;
+    int pick = unused[rand() % nUnused];
+    pentestUsedSsid_ |= (uint16_t)(1u << pick);
+    snprintf(pentestSsid_, sizeof(pentestSsid_), "%s", SSIDS[pick]);
+    snprintf(pentestVuln_, sizeof(pentestVuln_), "%s",
+             VULNS[rand() % (int)(sizeof(VULNS)/sizeof(VULNS[0]))]);
+    return true;
+}
+
+// Enter standby: no battle, just wait + scan for a vulnerable network.  The SDL
+// window renders the status/standby screen (driven from syncBattleWindow).
+void TerminalUI::pentestEnterStandby() {
+    pentestStandby_  = true;
+    inPentestBattle_ = false;
+    inBattle_        = false;
+    pentestScanMs_   = millis();
+    screen_          = Screen::BATTLE;     // keeps the SDL window up for the overlay
 }
 
 // Pentest Pikachu ROM: a self-contained Pikachu-vs-zone battle that doesn't
@@ -1866,12 +2212,22 @@ void TerminalUI::startPentestBattle() {
         pentestLoaded_ = true;
     }
 
+    // Pikachu only fights networks with a real weakness.  Pick a vulnerable
+    // WiFi target (real scan via wpa_cli, or the demo list off-device); if none
+    // is in range, drop to standby and keep scanning.
+    if (!pentestPickTarget()) {
+        pentestEnterStandby();
+        return;
+    }
+
     battleLog_.clear();
     roguelike_         = false;
     inGymBattle_       = false;
     inE4Battle_        = false;
     inPentestBattle_   = true;
+    pentestStandby_    = false;
     pentestShowStatus_ = false;
+    pentestTallied_    = false;
     localSide_         = 0;
     moveSel_           = 0;
     switchMode_        = false;
@@ -1882,7 +2238,14 @@ void TerminalUI::startPentestBattle() {
     // the INTERNAL Gen-1 code (not national dex), so convert via dexToInternal
     // exactly like buildPlayerPartyForBattle / lordBuildGymParty do — passing
     // raw dex 25 makes the engine resolve a different (ghost) species.
-    uint8_t pikaInternal = dexToInternal[25];   // Pikachu
+    // Species + moveset track the Pikachu's level: it evolves into Raichu at
+    // L30, and carries the 4 most-recently-learned moves from the Gen-1
+    // learnset (recomputed each scan, so leveling up brings new moves online).
+    bool    evolved      = (pentestLevel_ >= PIKACHU_EVOLVE_LEVEL);
+    uint8_t pikaDex      = evolved ? 26 : 25;       // Raichu : Pikachu
+    uint8_t pikaInternal = dexToInternal[pikaDex];
+    uint8_t pikaMoves[4];
+    pikaMovesForLevel(pentestLevel_, pikaMoves);
     memset(&party_, 0, sizeof(party_));
     party_.count            = 1;
     party_.species[0]       = pikaInternal;
@@ -1891,14 +2254,13 @@ void TerminalUI::startPentestBattle() {
     party_.mons[0].boxLevel = pentestLevel_;
     party_.mons[0].dvs[0]   = 0x88;
     party_.mons[0].dvs[1]   = 0x88;
-    static const uint8_t pikaMoves[4] = { 84, 98, 39, 86 }; // ThunderShock, Quick Attack, Tail Whip, Thunder Wave
     memcpy(party_.mons[0].moves, pikaMoves, 4);
     for (int m = 0; m < 4; m++) {
         const Gen1MoveData *md = gen1Move(pikaMoves[m]);
         party_.mons[0].pp[m] = md ? md->pp : 0;
     }
     memset(party_.nicknames[0], 0x50, 11);          // 0x50 = Gen1 string term
-    const char *nk = "PIKACHU";
+    const char *nk = evolved ? "RAICHU" : "PIKACHU";
     for (int j = 0; nk[j] && j < 10; j++)
         party_.nicknames[0][j] = (uint8_t)(0x80 + (nk[j] - 'A'));
 
@@ -1906,43 +2268,116 @@ void TerminalUI::startPentestBattle() {
     slotLevelXp_[0] = pentestXp_;
     sessionXp_[0]   = 0;
 
-    // Opponent: drawn from the Kanto zone for the Pikachu's current level, so
-    // it fights the Pokemon of the area it's progressing through (like the
-    // T-Deck pentest project).  Mix: 60% zone wild, 30% the zone's gym-leader
-    // ace, 10% a fully random Gen-1 mon.
-    const KantoZone &zone = kantoZoneForLevel(pentestLevel_);
-    snprintf(pentestZone_, sizeof(pentestZone_), "%s", zone.name);
+    // ── Opponent selection — faithful to the T-Deck / Heltec Pentest Pikachu ──
+    //   85% wild from ALL currently-unlocked zones (progression = number of gym
+    //        leaders BEATEN, not Pikachu's level).
+    //   15% the NEXT gym leader in sequence (Brock, then Misty, ...); after all
+    //        8 are beaten it clamps to Viridian as a repeatable boss.
+    // Beating a leader sets a bit in pentestGymBeaten_, unlocking the next set
+    // of zones — so the wild pool grows as you earn badges, just like the games.
+    uint8_t gymsBeaten = (uint8_t)__builtin_popcount(pentestGymBeaten_);
+
+    uint8_t unlockedZones[KANTO_ZONE_COUNT];
+    uint8_t nUnlocked = 0;
+    for (uint8_t i = 0; i < KANTO_ZONE_COUNT; ++i)
+        if (KANTO_ZONES[i].unlockedAfter <= gymsBeaten && KANTO_ZONES[i].wildCount > 0)
+            unlockedZones[nUnlocked++] = i;
+    if (nUnlocked == 0) unlockedZones[nUnlocked++] = 0;   // Route 1 fallback
+
+    // Wild level: uniform across [pikaLvl/2, pikaLvl+1] (min 2, max 100) — the
+    // wide-variance scaling the T-Deck uses (easy laps + occasional matched fight).
+    auto scaledWildLvl = [&]() -> uint8_t {
+        int lo = (int)pentestLevel_ / 2;
+        int hi = (int)pentestLevel_ + 1;
+        if (lo < 2) lo = 2;
+        if (hi < lo + 1) hi = lo + 1;
+        if (hi > 100) hi = 100;
+        int lvl = lo + rand() % (hi - lo + 1);
+        if (lvl < 2)   lvl = 2;
+        if (lvl > 100) lvl = 100;
+        return (uint8_t)lvl;
+    };
+    // Rarity gate (accept-per-1000): legendaries 5, pseudo-legendaries 20,
+    // rares 50, everything else always.  Keeps Mewtwo/Dragonite/etc. trophies.
+    auto rarityPermille = [](uint8_t dex) -> uint16_t {
+        if (dex==144||dex==145||dex==146||dex==150||dex==151) return 5;
+        if (dex==147||dex==148||dex==149)                     return 20;
+        if (dex==113||dex==130||dex==131||dex==137||dex==142||
+            dex==143||dex==134 ||dex==135||dex==136)          return 50;
+        return 0;
+    };
 
     uint8_t wildDex, wildLv;
+    uint8_t wildMoves[4] = { 0, 0, 0, 0 };
+    const char *gymTrainerName = nullptr;   // set for gym fights (shown in log)
     int roll = rand() % 100;
-    if (roll < 30 && zone.gymIdx != 255) {
-        // Gym-leader ace for this area.
-        const LordGym *g = lordGym(zone.gymIdx);
-        const LordGymMon *ace = nullptr;
-        if (g) {
-            const LordGymTrainer &ldr = g->trainers[LORD_GYM_LEADER_INDEX];
-            if (ldr.party && ldr.count > 0) ace = &ldr.party[ldr.count - 1];
+    if (roll < 85) {
+        // ── Wild from an unlocked zone ──
+        const KantoZone &z = KANTO_ZONES[unlockedZones[rand() % nUnlocked]];
+        const KantoWildMon *wm = &z.wilds[rand() % z.wildCount];
+        // Reroll up to 8 times for a common if we hit a gated rare species.
+        uint16_t perm = rarityPermille(wm->dex);
+        if (perm != 0 && (uint16_t)(rand() % 1000) >= perm) {
+            for (int t = 0; t < 8; ++t) {
+                const KantoWildMon *c = &z.wilds[rand() % z.wildCount];
+                if (rarityPermille(c->dex) == 0) { wm = c; break; }
+            }
         }
-        wildDex = ace ? ace->species : 25;
-        wildLv  = zone.gymLvl ? zone.gymLvl : pentestLevel_;
-    } else if (roll < 90 && zone.wildCount > 0) {
-        // Zone wild.
-        const KantoWildMon &w = zone.wilds[rand() % zone.wildCount];
-        wildDex = w.dex;
-        int span = (int)w.maxLvl - (int)w.minLvl;
-        wildLv = (uint8_t)(w.minLvl + (span > 0 ? rand() % (span + 1) : 0));
+        // 2% rare-overlay: a slim chance any encounter dips into the global
+        // legendary/pseudo pool (still gated by per-species accept rate).
+        static const uint8_t RARE_POOL[] = {
+            113,130,131,134,135,136,137,142,143, 147,148,149, 144,145,146,150,151,
+        };
+        uint8_t overlayDex = 0;
+        if (rand() % 100 < 2) {
+            uint8_t d = RARE_POOL[rand() % (int)(sizeof(RARE_POOL))];
+            uint16_t op = rarityPermille(d); if (op == 0) op = 50;
+            if ((uint16_t)(rand() % 1000) < op) overlayDex = d;
+        }
+        wildDex = overlayDex ? overlayDex : wm->dex;
+        wildLv  = scaledWildLvl();
+        wildMoves[0] = 1; wildMoves[1] = 33;          // Pound, Tackle
+        if (wildLv >= 10) wildMoves[2] = 45;          // + Growl
+        snprintf(pentestZone_, sizeof(pentestZone_), "%s", z.name);
+        pentestBattleGym_ = 255;
     } else {
-        // Random Gen-1 safety net, near the Pikachu's level.
-        wildDex = (uint8_t)(1 + rand() % 151);
-        int wl = (int)pentestLevel_ + (rand() % 7) - 3;
-        if (wl < 2) wl = 2;
-        if (wl > 100) wl = 100;
-        wildLv = (uint8_t)wl;
+        // ── Gym fight: face ANY of the gym's trainers, not just the leader ──
+        // You work through the gym's junior trainers and its leader, like the
+        // real games.  The leader appears ~40% of gym encounters; junior
+        // trainers fill the rest.  Only beating the LEADER clears the gym
+        // (marks the badge and unlocks the next gym + its zones).
+        uint8_t gIdx = gymsBeaten;
+        if (gIdx >= LORD_GYM_COUNT) gIdx = LORD_GYM_COUNT - 1;
+        const LordGym *g = lordGym(gIdx);
+        const LordGymMon *foe = nullptr;
+        bool isLeader = false;
+        if (g) {
+            uint8_t leaderIdx = lordGymLeaderIndex(g);
+            // 40% leader, 60% a random junior trainer (or always the leader if
+            // this gym somehow has no juniors).
+            uint8_t tIdx = (leaderIdx == 0 || rand() % 100 < 40)
+                             ? leaderIdx
+                             : (uint8_t)(rand() % leaderIdx);
+            const LordGymTrainer *tr = &g->trainers[tIdx];
+            if (!tr->party || tr->count == 0) {                   // empty slot? use leader
+                tIdx = leaderIdx;
+                tr   = &g->trainers[tIdx];
+            }
+            isLeader       = (tIdx == leaderIdx);
+            gymTrainerName = tr->name;
+            if (tr->party && tr->count > 0)
+                foe = &tr->party[rand() % tr->count];             // random mon of that trainer
+        }
+        wildDex = foe ? foe->species : 25;
+        wildLv  = (foe && foe->level) ? foe->level : pentestLevel_;
+        if (foe) memcpy(wildMoves, foe->moves, 4);
+        else     wildMoves[0] = 84;                    // Thunder Shock fallback
+        snprintf(pentestZone_, sizeof(pentestZone_), "%s Gym",
+                 g ? g->city : "Kanto");
+        // Only a LEADER win advances progression; junior fights are 255 (no badge).
+        pentestBattleGym_ = isLeader ? gIdx : 255;
     }
-    pentestMarkSeen(wildDex);                        // log to the Pokedex
-
-    uint8_t wildMoves[4] = { 1, 33, 0, 0 };          // Pound, Tackle
-    if (wildLv >= 10) wildMoves[2] = 45;             // + Growl
+    pentestMarkSeen(wildDex);                          // log to the Pokedex
 
     uint8_t wildInternal = dexToInternal[wildDex];
     Gen1Party wild = {};
@@ -1953,23 +2388,7 @@ void TerminalUI::startPentestBattle() {
     wild.mons[0].boxLevel = wildLv;
     memcpy(wild.mons[0].moves, wildMoves, 4);
 
-    // Pentest flavour: a random WiFi target + a vulnerability for the on-screen
-    // text.  Pure fiction — the Pi has no scanner; this is the pentest theme.
-    static const char *SSIDS[] = {
-        "linksys",   "NETGEAR47",  "xfinitywifi",  "ATT-WiFi-2G",
-        "TP-Link_5G","HOME-A1B2",  "dlink-guest",  "CenturyLink",
-        "Pixel_5599","FBI_Van_3",  "Starbucks",    "iPhone",
-    };
-    static const char *VULNS[] = {
-        "WPS PIN brute (CVE-2011-5053)",
-        "WEP key reuse / IV collision",
-        "KRACK 4-way handshake replay",
-        "Default admin creds (admin:admin)",
-        "WPA2 PMKID hashcat -m 16800",
-        "Evil-twin deauth (802.11w off)",
-    };
-    snprintf(pentestSsid_, sizeof(pentestSsid_), "%s", SSIDS[rand() % (int)(sizeof(SSIDS)/sizeof(SSIDS[0]))]);
-    snprintf(pentestVuln_, sizeof(pentestVuln_), "%s", VULNS[rand() % (int)(sizeof(VULNS)/sizeof(VULNS[0]))]);
+    // (SSID + vulnerability were chosen by pentestPickTarget() above.)
     pentestEndMs_ = 0;
 
     // Seed the (now full-height) scrolling log with the exploit narration; the
@@ -1979,6 +2398,10 @@ void TerminalUI::startPentestBattle() {
         snprintf(line, sizeof(line), "[%s]  PIKACHU Lv%u",
                  pentestZone_, (unsigned)pentestLevel_);
         battleLog_.push_back(line);
+        if (gymTrainerName) {                       // gym fight: name the trainer
+            snprintf(line, sizeof(line), "%s wants to battle!", gymTrainerName);
+            battleLog_.push_back(line);
+        }
         snprintf(line, sizeof(line), "Scanning %s ...", pentestSsid_);
         battleLog_.push_back(line);
         snprintf(line, sizeof(line), "Vuln: %s", pentestVuln_);
@@ -2075,6 +2498,22 @@ void TerminalUI::runTurnWithXp() {
                 snprintf(line, sizeof(line), "%s grew to L%u!",
                          mon.nickname, (unsigned)newLevel);
                 battleLog_.push_back(line);
+
+                // Pentest Pikachu: announce any move learned at this level and
+                // the L30 evolution.  Both take effect on the NEXT scan, when
+                // the party is rebuilt from the new level (the engine's active
+                // moveset/species is fixed for the current battle).
+                if (inPentestBattle_) {
+                    for (const PikaLearn &e : kPikaLearnset) {
+                        if (e.level == newLevel) {
+                            snprintf(line, sizeof(line), "Learned %s!",
+                                     moveName(e.move));
+                            battleLog_.push_back(line);
+                        }
+                    }
+                    if (newLevel == PIKACHU_EVOLVE_LEVEL)
+                        battleLog_.push_back("PIKACHU evolved into RAICHU!");
+                }
             }
         }
     }
@@ -2961,12 +3400,14 @@ void TerminalUI::syncBattleWindow() {
     s.foe.level   = em.level;
     s.foe.hp      = em.hp;
     s.foe.maxHp   = em.maxHp;
+    s.foe.status  = em.status;
     snprintf(s.foe.nickname, sizeof(s.foe.nickname), "%s", em.nickname);
 
     s.you.species = pm.species;
     s.you.level   = pm.level;
     s.you.hp      = pm.hp;
     s.you.maxHp   = pm.maxHp;
+    s.you.status  = pm.status;
     snprintf(s.you.nickname, sizeof(s.you.nickname), "%s", pm.nickname);
 
     for (int i = 0; i < 4; i++) {
@@ -3022,11 +3463,12 @@ void TerminalUI::syncBattleWindow() {
         const LordGym *g = lordGym(pendingGymIdx_);
         if (g) {
             int round = pendingTrainerIdx_ + 1;
-            const char *who = (pendingTrainerIdx_ >= LORD_GYM_LEADER_INDEX)
+            const char *who = (pendingTrainerIdx_ >= lordGymLeaderIndex(g))
                                 ? g->leaderName
                                 : g->trainers[pendingTrainerIdx_].name;
             snprintf(s.header, sizeof(s.header),
-                     "%s Gym  Round %d/5  vs %s", g->city, round, who);
+                     "%s Gym  Round %d/%u  vs %s",
+                     g->city, round, (unsigned)g->trainerCount, who);
         }
     } else if (inE4Battle_) {
         const LordE4Member *m = lordE4Member(pendingE4Idx_);
@@ -3041,9 +3483,77 @@ void TerminalUI::syncBattleWindow() {
         // the name row keeps the actual species so it still reads as a battle.
         snprintf(s.foeTag, sizeof(s.foeTag), "%s", pentestSsid_);
         snprintf(s.foe.nickname, sizeof(s.foe.nickname), "%s", dexName(em.species));
-        // Status overlay (toggled with A): gyms / current area / Pokedex.
+        // Status overlay toggled with A during a fight: gyms / Pokedex / reset.
         s.showStatus = pentestShowStatus_;
         if (pentestShowStatus_) pentestBuildStatus(s.statusLines);
+    } else if (pentestStandby_ && pentestShowStatus_) {
+        // Standby + user pressed A: show the full status overlay (+ reset menu).
+        snprintf(s.header, sizeof(s.header), "PENTEST PIKACHU");
+        s.pentest    = true;
+        s.showStatus = true;
+        pentestBuildStatus(s.statusLines);
+    } else if (pentestStandby_) {
+        // Standby keeps the T114-style battle screen: Pikachu stands by with no
+        // opponent, and the live stats fill the message box.  (Press A for the
+        // full status overlay + reset menu.)
+        snprintf(s.header, sizeof(s.header), "PENTEST PIKACHU");
+        s.pentest = true;
+        s.showStatus = false;
+
+        // Player Pikachu/Raichu from saved progress (the engine party is stale).
+        bool evolved = (pentestLevel_ >= 30);
+        uint8_t pdex = evolved ? 26 : 25;
+        uint8_t pmv[4]; pikaMovesForLevel(pentestLevel_, pmv);
+        Gen1BattleEngine::BattlePoke tmp;
+        Gen1BattleEngine::initBattlePokeFromBase(tmp, pdex, pentestLevel_, pmv);
+        s.you.species = pdex;
+        s.you.level   = pentestLevel_;
+        s.you.maxHp   = tmp.maxHp;
+        s.you.hp      = tmp.maxHp;                 // full HP while idle
+        snprintf(s.you.nickname, sizeof(s.you.nickname), "%s",
+                 evolved ? "RAICHU" : "PIKACHU");
+
+        // No opponent yet — empty foe box, no sprite (species 0 is skipped).
+        s.foe.species = 0;
+        s.foe.level   = 0;
+        s.foe.hp      = 0;
+        s.foe.maxHp   = 0;
+        snprintf(s.foeTag,       sizeof(s.foeTag),       "%s", "SCANNING");
+        snprintf(s.foe.nickname, sizeof(s.foe.nickname), "%s", "(no target)");
+
+        // EXP bar from saved partial XP.
+        {
+            uint32_t L = pentestLevel_;
+            uint32_t delta = (L + 1) * (L + 1) * (L + 1) - L * L * L;
+            uint32_t have  = pentestXp_; if (have > delta) have = delta;
+            s.expPermille = delta ? (int)(have * 1000 / delta) : 0;
+        }
+
+        // Stats into the message box (this is the "text box" the user sees).
+        s.log.clear();
+        char b[96];
+        s.log.push_back("PIKACHU is waiting for an opponent...");
+        s.log.push_back("Scanning for a vulnerable network.");
+        s.log.push_back("");
+        int gyms = __builtin_popcount(pentestGymBeaten_);
+        int seen = 0, beaten = 0;
+        for (int i = 0; i < 151; i++) {
+            if (pentestDex_[i >> 3]    & (1u << (i & 7))) seen++;
+            if (pentestBeaten_[i >> 3] & (1u << (i & 7))) beaten++;
+        }
+        snprintf(b, sizeof(b), "%s Lv%u    Gyms %d/8",
+                 evolved ? "RAICHU" : "PIKACHU", (unsigned)pentestLevel_, gyms);
+        s.log.push_back(b);
+        snprintf(b, sizeof(b), "Pokedex  seen %d / beaten %d", seen, beaten);
+        s.log.push_back(b);
+        snprintf(b, sizeof(b), "Record   %u W - %u L",
+                 (unsigned)pentestWins_, (unsigned)pentestLosses_);
+        s.log.push_back(b);
+        snprintf(b, sizeof(b), "WiFi  in range %d  /  cracked %d",
+                 pentestNetsSeen_, (int)pentestDoneSsids_.size());
+        s.log.push_back(b);
+        s.log.push_back("");
+        s.log.push_back("A: status / reset    B: exit");
     }
 
     // End overlay

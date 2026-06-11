@@ -43,36 +43,37 @@ getent hosts raspbian.raspberrypi.org || echo "WARN: getent failed — apt will 
 # ── 0b. Patch apt sources for archived Buster repos ─────────────────────────
 # RetroPie 4.8 is Raspbian Buster (Debian 10), which went archive-only in
 # 2024.  raspbian.raspberrypi.org (the Pi Foundation's CDN mirror) dropped
-# Buster entirely → 404 on Release.  Two-part fix:
-#   1. Redirect Raspbian sources to archive.raspbian.org (community archive,
-#      still serves Buster).
-#   2. Add archive.debian.org/debian buster as a fallback so .debs missing
-#      from the Raspbian archive (libsdl2-image-dev, libncurses-dev,
-#      python3-venv, etc.) come from Debian's permanent archive instead.
-# Pi Zero 2W is Cortex-A53 (ARMv7); Debian armhf binaries run fine on the
-# Raspbian armhf (ARMv6) userland because A53 is backward-compatible.
-echo "[0b/8] Patching apt sources for archived Buster repos…"
+# Buster, and so did archive.raspbian.org (404 on dists/buster/Release).  The
+# host that STILL serves Buster armhf is legacy.raspbian.org — point apt there.
+#
+# CRITICAL — DO NOT add archive.debian.org/debian buster as a fallback here.
+# Debian armhf packages are built for ARMv7 (Cortex-A7 baseline); they run on a
+# Pi Zero 2 W (ARMv7) but SIGILL / segfault on a genuine Pi Zero W (ARMv6).  A
+# previous build pointed at the 404'ing archive.raspbian.org, the Raspbian
+# `apt-get update` silently failed, and apt pulled kbd (setfont), the entire
+# ncurses family (libncursesw.so.6!), libSDL2_image, libcrypto, etc. from the
+# Debian fallback → ~160 ARMv7 files → the Zero W image crashed on boot
+# (`setfont` segfault, `mmterm` Illegal instruction).  legacy.raspbian.org has
+# every package we need as proper ARMv6, so no Debian source is required.  See
+# memory/armv6-image-contamination.md.
+echo "[0b/8] Patching apt sources for archived Buster repos (legacy.raspbian.org)…"
 
 # Buster signatures have expired; don't refuse updates over it.
 cat > /etc/apt/apt.conf.d/99-monsternix-archive <<APT_EOF
 Acquire::Check-Valid-Until "false";
 APT_EOF
 
-# Swap dead CDN host for the still-alive archive host.
+# Point every Raspbian source at the one host that still serves Buster armhf.
+# Cover all the historical CDN/mirror hostnames so the rewrite is robust no
+# matter which one the base image shipped with.
 for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
     [ -f "$f" ] || continue
-    sed -i 's|http://raspbian\.raspberrypi\.org/raspbian|http://archive.raspbian.org/raspbian|g' "$f"
+    sed -i -E 's|https?://(raspbian\.raspberrypi\.org\|mirrordirector\.raspbian\.org\|archive\.raspbian\.org)/raspbian|http://legacy.raspbian.org/raspbian|g' "$f"
 done
 
-# Debian Buster archive as fallback.  trusted=yes because we don't ship the
-# expired-signature archive key in the chroot.  Acceptable for build-time
-# package install; we strip this list at end-of-build so the runtime image
-# isn't trusting Debian-archive unsigned.
-if [ ! -f /etc/apt/sources.list.d/debian-buster-archive.list ]; then
-    cat > /etc/apt/sources.list.d/debian-buster-archive.list <<DEB_EOF
-deb [trusted=yes] http://archive.debian.org/debian buster main contrib non-free
-DEB_EOF
-fi
+# Belt-and-suspenders: nuke any Debian-archive fallback a prior build may have
+# left in the base image — it is the ARMv7 contamination source.
+rm -f /etc/apt/sources.list.d/debian-buster-archive.list
 
 echo "Current apt sources:"
 grep -rh '^deb ' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null || true
@@ -82,10 +83,15 @@ echo "[1/8] Installing runtime + build deps…"
 # DEBIAN_FRONTEND keeps debconf quiet during qemu-emulated installs.
 export DEBIAN_FRONTEND=noninteractive
 
-# Now that sources point at live archives, apt-get update should succeed.
-# If it doesn't, the install below may still work from cached lists — keep
-# going so we see the real error.
-apt-get update || echo "warning: apt-get update failed — falling through"
+# Now that sources point at legacy.raspbian.org, apt-get update MUST succeed.
+# A previous build treated this as non-fatal and silently fell back to the
+# Debian (ARMv7) archive, producing an image that crashed on real ARMv6
+# hardware.  Fail loudly instead of shipping a contaminated image.
+if ! apt-get update; then
+    echo "FATAL: apt-get update failed — Raspbian Buster archive unreachable." >&2
+    echo "Refusing to build: apt would fall back to non-Raspbian (ARMv7) packages." >&2
+    exit 1
+fi
 
 apt-get install -y --no-install-recommends \
     libsdl2-2.0-0 \
@@ -104,6 +110,52 @@ apt-get install -y --no-install-recommends \
     pkg-config \
     kbd \
     console-setup
+
+# ── 1b. ARMv6 contamination guard ───────────────────────────────────────────
+# Detect the base image's CPU baseline from a known base binary, then assert
+# that nothing apt just installed is built for a HIGHER arch.  This is the
+# canary that would have caught the archive.raspbian.org → Debian/ARMv7 fiasco
+# before it ever reached hardware: a Zero W base is ARMv6, so an ARMv7 (v7)
+# library/binary = a package that came from the wrong (Debian) archive and
+# WILL SIGILL/segfault on real ARMv6 silicon.
+echo "[1b/8] Verifying installed packages match the base CPU arch…"
+cpu_arch() { readelf -A "$1" 2>/dev/null | sed -n 's/.*Tag_CPU_arch: *//p' | head -1; }
+BASE_ARCH="$(cpu_arch /bin/bash)"
+echo "  base userland (/bin/bash) is: ${BASE_ARCH:-unknown}"
+# NOTE: libcrypto.so.1.1 (OpenSSL) is deliberately NOT checked.  It is tagged
+# Tag_CPU_arch v7 because it ships NEON/ARMv7 assembly, but OpenSSL selects
+# those paths at RUNTIME via HWCAP/CPU detection and falls back to ARMv6 — the
+# official RetroPie rpi1_zero (Zero W, ARMv6) base image itself ships libcrypto
+# as v7 and boots fine.  mmterm doesn't link it anyway.  Flagging it is a false
+# positive.  We check only the libs that genuinely SIGILL on ARMv6 (no runtime
+# dispatch): the ncurses family, SDL, and the kbd console tools.
+if [ "$BASE_ARCH" = "v6" ] || [ "$BASE_ARCH" = "v6KZ" ]; then
+    BAD=""
+    for f in \
+        "$(command -v setfont || echo /usr/bin/setfont)" \
+        "$(command -v kbd_mode || echo /usr/bin/kbd_mode)" \
+        /usr/lib/arm-linux-gnueabihf/libncursesw.so.6 \
+        /usr/lib/arm-linux-gnueabihf/libtinfo.so.6 \
+        /usr/lib/arm-linux-gnueabihf/libpanelw.so.6 \
+        /usr/lib/arm-linux-gnueabihf/libSDL2-2.0.so.0 \
+        /lib/arm-linux-gnueabihf/libSDL2-2.0.so.0 \
+        /usr/lib/arm-linux-gnueabihf/libSDL2_image-2.0.so.0 \
+        /lib/arm-linux-gnueabihf/libSDL2_image-2.0.so.0; do
+        [ -e "$f" ] || continue
+        A="$(cpu_arch "$f")"
+        case "$A" in
+            v7|v7e|v8|v8-a) echo "  CONTAMINATED ($A): $f"; BAD="yes" ;;
+        esac
+    done
+    if [ -n "$BAD" ]; then
+        echo "FATAL: ARMv7 packages found on an ARMv6 base — apt used the wrong archive." >&2
+        echo "These binaries SIGILL on a real Pi Zero W.  See memory/armv6-image-contamination.md." >&2
+        exit 1
+    fi
+    echo "  OK — all checked runtime files are ARMv6."
+else
+    echo "  base is ${BASE_ARCH:-non-v6}; skipping ARMv6 contamination guard."
+fi
 
 # ── 2. Compile mmd + mmterm from source ─────────────────────────────────────
 echo "[2/8] Building Monster Nix from source (slow under qemu; expect 10-20 min)…"
@@ -206,6 +258,21 @@ cmake -DCMAKE_BUILD_TYPE=Release \
 make -j1 mmd mmterm
 file mmd mmterm
 
+# Our own binaries must match the base CPU arch too.  gcc on Buster defaults to
+# the Raspbian ARMv6 baseline, but assert it so a toolchain/flag regression
+# can't silently produce ARMv7 code that crashes the Zero W.
+if [ "$BASE_ARCH" = "v6" ] || [ "$BASE_ARCH" = "v6KZ" ]; then
+    for b in mmd mmterm; do
+        A="$(cpu_arch "$b")"
+        case "$A" in
+            v7|v7e|v8|v8-a)
+                echo "FATAL: built $b is $A but base is ARMv6 — would SIGILL on a Pi Zero W." >&2
+                exit 1 ;;
+        esac
+        echo "  $b CPU arch: ${A:-unknown} (OK for ARMv6 base)"
+    done
+fi
+
 # ── 3. Install binaries + launcher + systemd unit ──────────────────────────
 echo "[3/8] Installing binaries to /opt/monstermesh…"
 install -d /opt/monstermesh/bin
@@ -213,6 +280,12 @@ install -m 0755 mmd      /opt/monstermesh/bin/mmd
 install -m 0755 mmterm   /opt/monstermesh/bin/mmterm
 install -m 0755 "${SRC}/retropie/launch.sh"          /opt/monstermesh/bin/launch.sh
 install -m 0644 "${SRC}/retropie/monstermesh.service" /etc/systemd/system/monstermesh.service
+# Admin command: reset Legend of Charizard gym/league progress (callable as
+# `mm-reset-gyms` from any shell).
+if [ -f "${SRC}/retropie/mm-reset-gyms" ]; then
+    install -m 0755 "${SRC}/retropie/mm-reset-gyms" /opt/monstermesh/bin/mm-reset-gyms
+    ln -sf /opt/monstermesh/bin/mm-reset-gyms /usr/local/bin/mm-reset-gyms
+fi
 
 # State dir (saves, daycare, neighbor cache) — pi-owned.
 install -d -o pi -g pi /var/lib/monstermesh
@@ -235,9 +308,9 @@ ES_CFG=/etc/emulationstation/es_systems.cfg
 ROM_DIR=/home/pi/RetroPie/roms/monstermesh
 install -d -o pi -g pi "$ROM_DIR"
 # ROMs for the MonsterMesh system.  Each .mm file is a launch marker; its name
-# selects the experience in launch.sh.  "MonsterMesh" is the terminal; "Pentest
-# Pikachu" boots straight into its battle screen.
-sudo -u pi touch "${ROM_DIR}/MonsterMesh.mm"
+# selects the experience in launch.sh.  "MonsterMesh Terminal" is the terminal;
+# "Pentest Pikachu" boots straight into its battle screen.
+sudo -u pi touch "${ROM_DIR}/MonsterMesh Terminal.mm"
 sudo -u pi touch "${ROM_DIR}/Pentest Pikachu.mm"
 
 if ! grep -q '<name>monstermesh</name>' "$ES_CFG" 2>/dev/null; then
@@ -257,6 +330,23 @@ fi
 if [ -d "${SRC}/retropie/themes/monstermesh" ]; then
     cp -r "${SRC}/retropie/themes/monstermesh" /etc/emulationstation/themes/ || true
 fi
+
+# Carbon theme tweaks for the small GPI screen: a readable ROM-list font and a
+# tall stacked "Monster/Mesh" carousel logo.  Without a logo asset carbon shows
+# the system name as huge truncated text.  We drop in a monstermesh.svg (the
+# glyphs are baked to vector PATHS, since ES can't render SVG <text>), which
+# only affects the monstermesh system — every other system keeps its own .svg.
+for CARBON in /etc/emulationstation/themes/carbon*; do
+    [ -d "$CARBON" ] || continue
+    # Bigger ROM-list text (carbon's default 32 ≈ 14px once scaled to 480p).
+    find "$CARBON" -name theme.xml -exec sed -i \
+        's|<themeGamelistFontSize>32</themeGamelistFontSize>|<themeGamelistFontSize>56</themeGamelistFontSize>|' {} \;
+    # MonsterMesh carousel logo (matches carbon's systems/<theme>.svg lookup).
+    if [ -f "${SRC}/retropie/es-art/monstermesh.svg" ]; then
+        install -d "$CARBON/art/systems"
+        cp "${SRC}/retropie/es-art/monstermesh.svg" "$CARBON/art/systems/monstermesh.svg" || true
+    fi
+done
 
 # ── 5. Python meshtastic relay venv ─────────────────────────────────────────
 echo "[5/8] Setting up meshtastic Python venv…"

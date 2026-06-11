@@ -337,6 +337,29 @@ private:
     bool     pentestShowStatus_ = false;  // status overlay toggled with A
     uint8_t  pentestDex_[19]    = {};     // 151-bit "seen" Pokedex (bitset)
     uint8_t  pentestBeaten_[19] = {};     // 151-bit "beaten" Pokedex (bitset)
+    uint16_t pentestUsedSsid_   = 0;      // bitmask of WiFi targets already hit
+                                          // (no repeats until all are exhausted)
+    uint32_t pentestWins_       = 0;      // lifetime W/L tally (persisted)
+    uint32_t pentestLosses_     = 0;
+    bool     pentestTallied_    = false;  // guard: count each battle's W/L once
+    uint8_t  pentestGymBeaten_  = 0;      // bitset of gym leaders defeated
+                                          // (drives zone unlock + next leader)
+    uint8_t  pentestBattleGym_  = 255;    // gym idx of the current fight (255=wild)
+    int      pentestStatusSel_  = 0;      // selected option in the status menu
+    bool     pentestConfirmReset_ = false;// status menu is in the reset-confirm step
+    void     pentestResetProgress();      // wipe save + restart a fresh L5 run
+    // ── Real WiFi targeting (Pikachu only fights vulnerable networks) ──
+    struct PentestNet { std::string ssid; std::string vuln; };
+    std::vector<PentestNet>  pentestNets_;       // vulnerable APs in range, not yet cracked
+    std::vector<std::string> pentestDoneSsids_;  // SSIDs already cracked this session
+    bool     pentestStandby_       = false;  // waiting for a vulnerable network
+    bool     pentestScanAvailable_ = false;  // wpa_cli scanner reachable?
+    uint64_t pentestScanMs_        = 0;      // last standby rescan (throttle)
+    int      pentestNetsSeen_      = 0;      // total APs in the last scan (status)
+    static constexpr uint64_t PENTEST_STANDBY_SCAN_MS = 6000;  // rescan cadence
+    void pentestScanNetworks();           // refresh pentestNets_ via wpa_cli
+    bool pentestPickTarget();             // choose SSID/vuln; false => none in range
+    void pentestEnterStandby();           // drop to the waiting/status screen
     void pentestLoadProgress();       // read level/xp/dex from disk (default L5)
     void pentestSaveProgress();       // write level/xp/dex to disk
     void pentestButton(const ButtonEvent &ev);  // input while in a pentest scan

@@ -1,0 +1,48 @@
+#!/bin/bash
+# mm-reset-gyms — reset the "Legend of Charizard" gym / league progress so the
+# gyms can be challenged again from the start.  Clears gym badges, per-gym
+# progress, the Elite Four, and the NG+ tier (back to the base game).  Explore
+# stats and news are preserved.
+#
+# Pentest Pikachu has its own, separate gym progress — reset that from its
+# in-game menu (press A -> Reset Pikachu), not here.
+#
+# Usage:  mm-reset-gyms          (run on the Pi; quit the Terminal ROM first)
+set -e
+LORD="${MONSTERMESH_LORD_SAVE:-/var/lib/monstermesh/lord.dat}"
+
+if [ ! -f "$LORD" ]; then
+    echo "No save at $LORD — gyms are already cleared (0/8 badges)."
+    exit 0
+fi
+
+# The Terminal loads lord.dat at launch and rewrites it on exit, so editing it
+# while the ROM is open would just get clobbered.
+if pgrep -x mmterm >/dev/null 2>&1; then
+    echo "MonsterMesh Terminal is running. Quit the ROM first, then re-run." >&2
+    exit 1
+fi
+
+cp -a "$LORD" "${LORD}.bak-$(date +%Y%m%d-%H%M%S)"
+
+python3 - "$LORD" <<'PY'
+import sys
+p = sys.argv[1]
+b = bytearray(open(p, "rb").read())
+# Packed LordSave is exactly 268 bytes, magic 'LORD' (0x4C4F5244, little-endian).
+if len(b) != 268 or bytes(b[0:4]) != bytes([0x44, 0x52, 0x4F, 0x4C]):
+    sys.exit("Unexpected lord.dat (size=%d) — refusing to reset." % len(b))
+def z(off, n):
+    for i in range(off, off + n):
+        b[i] = 0
+z(5,   1)   # badges
+z(32,  8)   # gymProgress[8]
+z(140, 3)   # e4Progress, leagueCleared, ngPlusTier
+z(144, 8)   # gymTierCleared[8]
+z(152, 1)   # e4TierCleared
+open(p, "wb").write(b)
+print("Gyms reset: 0/8 badges, Elite Four + NG+ cleared (back to base game).")
+PY
+
+# If invoked via sudo, keep the save owned by the pi user.
+chown pi:pi "$LORD" 2>/dev/null || true

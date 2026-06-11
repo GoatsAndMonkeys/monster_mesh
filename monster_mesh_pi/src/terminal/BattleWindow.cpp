@@ -78,6 +78,7 @@ bool BattleWindow::open() {
     // no blending, no anti-aliasing, no dropped/doubled columns.
     SDL_RenderSetIntegerScale(renderer_, SDL_TRUE);
     SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
+    SDL_ShowCursor(SDL_DISABLE);   // no mouse pointer over the battle window
 
     Gen2SpriteCache::init();
     initOk_ = true;
@@ -150,6 +151,17 @@ void BattleWindow::drawBox(int x, int y, int w, int h, SDL_Color fill, SDL_Color
     SDL_RenderFillRect(renderer_, &cTR);
     SDL_RenderFillRect(renderer_, &cBL);
     SDL_RenderFillRect(renderer_, &cBR);
+}
+
+// Gen-1 status byte -> 3-letter battle-card tag.  Sleep is the low 3 bits (the
+// turn counter); poison/burn/freeze/paralysis are single bits.
+static const char *statusTag(uint8_t st) {
+    if (st & 0x07) return "SLP";
+    if (st & 0x08) return "PSN";
+    if (st & 0x10) return "BRN";
+    if (st & 0x20) return "FRZ";
+    if (st & 0x40) return "PAR";
+    return nullptr;
 }
 
 void BattleWindow::drawHpBar(int x, int y, int w, int h, uint16_t hp, uint16_t maxHp) {
@@ -284,6 +296,12 @@ void BattleWindow::drawFoeBox() {
     snprintf(lv, sizeof(lv), "L%d", (int)state_.foe.level);
     int lvW = BitmapFont::stringWidth(lv, 2);
     BitmapFont::drawString(renderer_, bx + bw - 8 - lvW, by + 20, lv, COL_INK, 2);
+    // Status tag (SLP/PAR/PSN/BRN/FRZ) just left of the level.
+    if (const char *st = statusTag(state_.foe.status)) {
+        int stW = BitmapFont::stringWidth(st, 2);
+        BitmapFont::drawString(renderer_, bx + bw - 8 - lvW - 10 - stW, by + 20,
+                               st, COL_INK, 2);
+    }
 
     // HP label at scale 2 so it reads at arm's length on the GPI Case.
     // 24-px "HP" + 6-px gap → bar starts at bx + 38.
@@ -317,6 +335,12 @@ void BattleWindow::drawYouBox() {
     snprintf(lv, sizeof(lv), "L%d", (int)state_.you.level);
     int lvW = BitmapFont::stringWidth(lv, 2);
     BitmapFont::drawString(renderer_, bx + bw - 8 - lvW, by + 20, lv, COL_INK, 2);
+    // Status tag (SLP/PAR/PSN/BRN/FRZ) just left of the level.
+    if (const char *st = statusTag(state_.you.status)) {
+        int stW = BitmapFont::stringWidth(st, 2);
+        BitmapFont::drawString(renderer_, bx + bw - 8 - lvW - 10 - stW, by + 20,
+                               st, COL_INK, 2);
+    }
 
     // HP row: scale-2 "HP" label, scale-1 bar shrunk to leave room for the
     // scale-2 numeric on the right.  24-px label + 6-px gap = bar starts
@@ -327,9 +351,11 @@ void BattleWindow::drawYouBox() {
     snprintf(hps, sizeof(hps), "%3d/%-3d", (int)state_.you.hp, (int)state_.you.maxHp);
     int hpsW = BitmapFont::stringWidth(hps, 2);
     int hpsX = bx + bw - 8 - hpsW;
-    int barW = hpsX - (bx + 38) - 8;
+    // HP bar starts at the same x as the EXP bar (bx+46) so their left edges
+    // line up — the wider "EXP" label sets the shared left margin.
+    int barW = hpsX - (bx + 46) - 8;
     if (barW < 20) barW = 20;
-    drawHpBar(bx + 38, by + 50, barW, 10, state_.you.hp, state_.you.maxHp);
+    drawHpBar(bx + 46, by + 50, barW, 10, state_.you.hp, state_.you.maxHp);
     BitmapFont::drawString(renderer_, hpsX, by + 46, hps, COL_INK, 2);
 
     // EXP row: same scale-2 label treatment.  Bar runs full remaining width and
@@ -530,7 +556,8 @@ void BattleWindow::render() {
             if (y > LOGICAL_H - 40) break;
         }
         BitmapFont::drawString(renderer_, 28, LOGICAL_H - 34,
-                               "A: back   START: exit", COL_DIMINK, 1);
+                               "Up/Down: move   A: select   B: close   START: exit",
+                               COL_DIMINK, 1);
         SDL_RenderPresent(renderer_);
         return;
     }

@@ -20,18 +20,23 @@ struct LordGymTrainer {
     const LordGymMon *party;
 };
 
+static constexpr uint8_t LORD_GYM_COUNT         = 8;
+static constexpr uint8_t LORD_GYM_MAX_TRAINERS  = 10;  // array bound (biggest gym + leader)
+
 struct LordGym {
     const char       *city;
     const char       *leaderName;
     const char       *badgeName;
     uint8_t           badgeBit;        // 0..7 — matches bit in LordSave::badges
     uint8_t           minLevelHint;    // advisory
-    LordGymTrainer    trainers[5];     // 4 grunts + leader as index 4
+    uint8_t           trainerCount;    // real # of trainers in this gym (varies per gym)
+    LordGymTrainer    trainers[LORD_GYM_MAX_TRAINERS];  // leader is the LAST one (index trainerCount-1)
 };
 
-static constexpr uint8_t LORD_GYM_COUNT         = 8;
-static constexpr uint8_t LORD_GYM_TRAINERS      = 5;   // 4 grunts + leader
-static constexpr uint8_t LORD_GYM_LEADER_INDEX  = 4;
+// The gym leader is always the final trainer fought.
+inline uint8_t lordGymLeaderIndex(const LordGym *g) {
+    return (g && g->trainerCount) ? (uint8_t)(g->trainerCount - 1) : 0;
+}
 
 extern const LordGym LORD_GYMS[LORD_GYM_COUNT];
 
