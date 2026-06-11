@@ -67,11 +67,11 @@
 #ifndef BTN_GAMEPAD
 #define BTN_GAMEPAD     0x130
 #endif
-#ifndef BTN_TL
-#define BTN_TL          0x136   // left shoulder (L)
+#ifndef BTN_WEST
+#define BTN_WEST        0x134   // X face button (left)
 #endif
-#ifndef BTN_TR
-#define BTN_TR          0x137   // right shoulder (R)
+#ifndef BTN_NORTH
+#define BTN_NORTH       0x133   // Y face button (top)
 #endif
 #endif  // __linux__
 
@@ -137,12 +137,12 @@ GpiButton InputHandler::mapKeyCode(int code)
         case KEY_ENTER:     return GpiButton::A;
         case BTN_EAST:
         case KEY_BACKSPACE: return GpiButton::B;
+        case BTN_WEST:      return GpiButton::X;
+        case BTN_NORTH:     return GpiButton::Y;
         case BTN_START:
         case KEY_SPACE:     return GpiButton::START;
         case BTN_SELECT:
         case KEY_LEFTSHIFT: return GpiButton::SELECT;
-        case BTN_TL:        return GpiButton::L;
-        case BTN_TR:        return GpiButton::R;
         default:            return GpiButton::NONE;
     }
 #else

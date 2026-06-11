@@ -3,15 +3,15 @@
 #include <functional>
 #include <string>
 
-// GPI Case button mapping (Game Boy buttons)
+// GPI Case button mapping (Xbox 360 layout on GPI Case 2W)
 enum class GpiButton : uint8_t {
     UP = 0, DOWN, LEFT, RIGHT,
-    A,      // confirm/select
-    B,      // back/cancel
+    A,      // bottom face button (BTN_SOUTH) — confirm/select
+    B,      // right face button  (BTN_EAST)  — back/cancel
+    X,      // left face button   (BTN_WEST)  — screen off
+    Y,      // top face button    (BTN_NORTH) — boss key
     START,  // open command menu
     SELECT, // toggle help
-    L,      // left shoulder  (boss key Y on keyboard)
-    R,      // right shoulder (screen off X on keyboard)
     NONE
 };
 

@@ -311,9 +311,9 @@ void TerminalUI::run() {
                 case KEY_BACKSPACE: case 127:
                     ev.button = GpiButton::SELECT; handleButton(ev); break;
                 case 'y': case 'Y':
-                    ev.button = GpiButton::L;      handleButton(ev); break;
+                    ev.button = GpiButton::Y;      handleButton(ev); break;
                 case 'x': case 'X':
-                    ev.button = GpiButton::R;      handleButton(ev); break;
+                    ev.button = GpiButton::X;      handleButton(ev); break;
                 case 'q': case 'Q':
                     shouldQuit_ = true; break;
                 default: break;
@@ -1438,7 +1438,7 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
     }
 
     // R (shoulder) — toggle screen off / back on.
-    if (ev.button == GpiButton::R && ev.pressed) {
+    if (ev.button == GpiButton::X && ev.pressed) {
         pentestScreenOff_ = !pentestScreenOff_;
         if (!pentestScreenOff_) {
             // Restore backlight when turning screen back on.
@@ -1455,7 +1455,7 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
     }
 
     // L (shoulder) — toggle boss-key / normal-battle mode.
-    if (ev.button == GpiButton::L && ev.pressed) {
+    if (ev.button == GpiButton::Y && ev.pressed) {
         if (inPentestBattle_ && inBattle_ &&
             battleResult_ == Gen1BattleEngine::Result::ONGOING) {
             pentestBossMode_ = !pentestBossMode_;
