@@ -1149,12 +1149,11 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             containsIgnoreCase(txt, len, "MMB ON", 6);
         if (isChallenge) {
             mmtChallengerPeer_     = mp.from;
-            // 10-minute window so user has reasonable time to type Y.
-            // Originally 60s, but real chat reaction time + DeviceUI
-            // input lag routinely exceeded that and the resulting
-            // chunks were silently dropped (observed b358, 4+min Y).
             mmtChallengerExpireMs_ = millis() + 600000;
-            LOG_INFO("[MonsterMesh] mmt: challenge DM from 0x%08X — armed 10min\n",
+            // Open terminal immediately so the user sees the Y/N overlay
+            // when the CHALLENGE BattlePacket arrives from the sender.
+            pendingOpenTerminal_   = true;
+            LOG_INFO("[MonsterMesh] mmt: challenge DM from 0x%08X — armed 10min, opening terminal\n",
                      (unsigned)mp.from);
         }
     }
@@ -1329,12 +1328,28 @@ void MonsterMeshModule::sniffPhoneOutboundDM(meshtastic_MeshPacket *p)
     const char *txt = (const char *)p->decoded.payload.bytes;
     size_t      len = p->decoded.payload.size;
     if (!mmContainsIgnoreCase(txt, len, "MMB ON", 6)) return;
-    if (mmtAwaitingReplyFrom_ == p->to) return; // already armed for this peer
-    mmtAwaitingReplyFrom_ = p->to;
-    mmtOnTxTarget_        = p->to;
-    pendingMmtOnTx_       = true;
-    LOG_INFO("[MonsterMesh] mmt: phone OUT MMB ON -> 0x%08X — armed + queuing challenge DM\n",
-             (unsigned)p->to);
+    if (pendingMmb2Initiator_ && pendingMmb2Target_ == p->to) return; // already pending
+    // Look up the target's short name for the challenge packet.
+    char peerShort[12] = {};
+    size_t total = nodeDB->getNumMeshNodes();
+    for (size_t i = 0; i < total; ++i) {
+        const meshtastic_NodeInfoLite *n = nodeDB->getMeshNodeByIndex(i);
+        if (n && n->num == p->to && n->has_user) {
+            strncpy(peerShort, n->user.short_name, sizeof(peerShort) - 1);
+            break;
+        }
+    }
+    // Use the server-auth mmb2 path: sends a CHALLENGE BattlePacket and
+    // opens the terminal, exactly like typing "mmb2 <peer>" in the terminal.
+    // The receiver sees the Y/N overlay in the battle screen automatically
+    // when the CHALLENGE arrives — no DM round-trip needed.
+    pendingMmb2Target_ = p->to;
+    strncpy(pendingMmb2PeerShort_, peerShort, sizeof(pendingMmb2PeerShort_) - 1);
+    pendingMmb2PeerShort_[sizeof(pendingMmb2PeerShort_) - 1] = '\0';
+    pendingMmb2Initiator_   = true;
+    pendingOpenTerminal_    = true;
+    LOG_INFO("[MonsterMesh] MMB ON (phone out) → 0x%08X '%s' — queued mmb2 challenge + open terminal\n",
+             (unsigned)p->to, peerShort);
 }
 
 void MonsterMeshModule::challengePeerByShortName(const char *peerShort)
@@ -4698,6 +4713,22 @@ void MonsterMeshModule::tryConsumeStagedParty()
     if (pendingTerminalLine_valid_) {
         pendingTerminalLine_valid_ = false;
         terminal_.printLine(pendingTerminalLine_);
+    }
+    // Open the terminal panel when triggered by an MMB ON DM (sender or receiver).
+    if (pendingOpenTerminal_) {
+        pendingOpenTerminal_ = false;
+        if (!terminalActive_) {
+#if HAS_TFT
+            lv_obj_t *parent = g_terminalParent ? g_terminalParent : lv_screen_active();
+            if (parent) {
+                terminal_.open(parent);
+                terminalActive_ = true;
+                if (!terminal_.hasParty()) {
+                    terminalNeedsParty_ = true;
+                }
+            }
+#endif
+        }
     }
 
     if (!terminalPartyStaged_) return;

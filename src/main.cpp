@@ -228,7 +228,16 @@ std::pair<uint8_t, TwoWire *> nodeTelemetrySensorsMap[_meshtastic_TelemetrySenso
 
 Router *router = NULL; // Users of router don't care what sort of subclass implements that API
 
+#if defined(MONSTERMESH_BUILD)
+#define MM_FW_STR_(x) #x
+#define MM_FW_STR(x) MM_FW_STR_(x)
+static const char mm_firmware_version_str[] = "b" MM_FW_STR(MONSTERMESH_BUILD);
+#undef MM_FW_STR
+#undef MM_FW_STR_
+const char *firmware_version = mm_firmware_version_str;
+#else
 const char *firmware_version = optstr(APP_VERSION_SHORT);
+#endif
 
 const char *getDeviceName()
 {
