@@ -4858,7 +4858,7 @@ void MonsterMeshModule::buildLvBattleScreen()
                   (unsigned)sizeof(lvPlayerCanvasBuf_));
     lv_obj_t *pSpr = lv_canvas_create(scr);
     lv_obj_set_size(pSpr, LV_PLAYER_W, LV_PLAYER_H);
-    lv_obj_align(pSpr, LV_ALIGN_TOP_LEFT, 4, 100);
+    lv_obj_align(pSpr, LV_ALIGN_TOP_LEFT, 4, 94);
     lv_canvas_set_buffer(pSpr, lvPlayerCanvasBuf_, LV_PLAYER_W, LV_PLAYER_H,
                          LV_COLOR_FORMAT_RGB565);
     lv_canvas_fill_bg(pSpr, lv_color_white(), LV_OPA_COVER);
@@ -4877,15 +4877,15 @@ void MonsterMeshModule::buildLvBattleScreen()
     lvPlayerPanel_  = you;
 
     // ── Battle log (lower box) ────────────────────────────────────────
-    lv_obj_t *logp = mkPanel(scr, 2, 148, 316, 44);
-    lvLogLabel_ = mkLabel(logp, 0, 0, 308, 38, lv_color_black());
+    lv_obj_t *logp = mkPanel(scr, 2, 144, 316, 52);
+    lvLogLabel_ = mkLabel(logp, 0, 0, 308, 46, lv_color_black());
     lvLogPanel_ = logp;
     lvMoveMenu_ = lvLogLabel_;
 
     // ── Menu footer (6 cells, 2 cols × 3 rows). WAIT_ACTION shows 4
     // moves (cells 4-5 blank); WAIT_SWITCH shows party of up to 6.
     // Hidden when not needed so the log panel can expand to fill the space.
-    lv_obj_t *footer = mkPanel(scr, 2, 196, 316, 42);
+    lv_obj_t *footer = mkPanel(scr, 2, 198, 316, 40);
     lvFooterPanel_ = footer;
     for (int i = 0; i < 6; ++i) {
         int col = i % 2;
@@ -5096,7 +5096,7 @@ void MonsterMeshModule::updateLvBattleScreen()
     bool footerNeeded = (curPhase == MonsterMeshTextBattle::Phase::WAIT_ACTION ||
                          curPhase == MonsterMeshTextBattle::Phase::WAIT_SWITCH);
     char logBuf[512];
-    textBattle_.getRecentLog(logBuf, sizeof(logBuf), 3);
+    textBattle_.getRecentLog(logBuf, sizeof(logBuf), 4);
     if (logBuf[0] == '\0') setLabel(lvLogLabel_, "Battle begins!");
     else {
         // Prepend ">" to each line so it matches the Gen-1 mockup.
