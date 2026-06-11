@@ -307,12 +307,15 @@ void MonsterMeshTextBattle::exit()
     role_  = Role::LEGACY;
     awaitingAccept_ = false;
     awaitingFirstUpdate_ = false;
-    unackedUpdate_  = false;
-    challengeTries_ = 0;
+    unackedUpdate_   = false;
+    pendingKeyExit_  = false;
+    finishedAtMs_    = 0;
+    challengeTries_  = 0;
     clientActionType_ = 0xFF;
     clientTurn_ = 0;
     clientNeedsFullState_ = false;
     unshippedLogLines_ = 0;
+    preAcceptUpdateLen_ = 0;
     dirty_ = true;
 }
 
@@ -864,7 +867,19 @@ void MonsterMeshTextBattle::tick(uint32_t nowMs)
 
     if (mode_ == Mode::NETWORKED) {
         if (role_ == Role::SERVER) {
+            // Stamp when the server first reaches FINISHED (for pendingKeyExit_ timeout).
+            if (phase_ == Phase::FINISHED && finishedAtMs_ == 0) {
+                finishedAtMs_ = nowMs;
+            }
             serverAuthRetransmit(nowMs);
+            // Release the key-exit hold once client acked or 45 s have elapsed.
+            if (pendingKeyExit_) {
+                if (!unackedUpdate_ || (finishedAtMs_ && (nowMs - finishedAtMs_) > 45000u)) {
+                    pendingKeyExit_ = false;
+                    exit();
+                    return;
+                }
+            }
         } else if (role_ == Role::CLIENT) {
             clientAuthRetransmit(nowMs);
         } else {
@@ -919,7 +934,17 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
     dirty_ = true;
 
     if (phase_ == Phase::FINISHED) {
-        // Any key dismisses the result screen.
+        // Server: if the final UPDATE hasn't been acked yet, hold the
+        // screen until the client confirms (or 45s fallback). This prevents
+        // exit() from clearing unackedUpdate_ and stopping the retransmit
+        // before the opponent receives the battle result.
+        if (role_ == Role::SERVER && unackedUpdate_ && !pendingKeyExit_) {
+            pendingKeyExit_ = true;
+            snprintf(endPromptOverride_, sizeof(endPromptOverride_),
+                     "Syncing to opponent...");
+            dirty_ = true;
+            return;
+        }
         exit();
         return;
     }
@@ -2146,6 +2171,7 @@ void MonsterMeshTextBattle::clientAuthOnChallengePkt(uint32_t fromId,
     clientActionType_     = 0xFF;
     clientNeedsFullState_ = false;
     pendingRemoteAction_  = false;
+    preAcceptUpdateLen_   = 0;
 
     memset(peerTbName_, 0, sizeof(peerTbName_));
     memcpy(peerTbName_, pkt->payload + 6, nameLen);
@@ -2228,6 +2254,14 @@ void MonsterMeshTextBattle::clientAuthSendAccept(bool accepted)
     lastRecvMs_ = millis();
     dirty_ = true;
     Serial.printf("[MMB] server-auth ACCEPT(1) tx — awaiting first UPDATE\n");
+
+    // If the server sent TURN_UPDATE before we pressed Y, apply it now.
+    if (preAcceptUpdateLen_ > 0) {
+        size_t plen = preAcceptUpdateLen_;
+        preAcceptUpdateLen_ = 0;
+        Serial.printf("[MMB] applying buffered pre-accept UPDATE len=%u\n", (unsigned)plen);
+        clientAuthOnUpdatePkt(preAcceptUpdateBuf_, plen);
+    }
 }
 
 // Apply an UPDATE delta to engine_ so the renderer shows authoritative
@@ -2242,6 +2276,15 @@ void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len
     if (pkt->sessionId() != session_) {
         Serial.printf("[MMB] client UPDATE session mismatch pkt=0x%04X our=0x%04X\n",
                       (unsigned)pkt->sessionId(), (unsigned)session_);
+        return;
+    }
+    // Engine not started yet — buffer this UPDATE for after Y is pressed.
+    if (phase_ == Phase::WAIT_CHALLENGE_OVERLAY) {
+        size_t copy = len < sizeof(preAcceptUpdateBuf_) ? len : sizeof(preAcceptUpdateBuf_);
+        memcpy(preAcceptUpdateBuf_, buf, copy);
+        preAcceptUpdateLen_ = copy;
+        Serial.printf("[MMB] client UPDATE buffered (pre-accept) seq=%u\n",
+                      (unsigned)pkt->seq);
         return;
     }
     Serial.printf("[MMB] client UPDATE rx seq=%u len=%u flags=0x%04X\n",
@@ -2653,7 +2696,12 @@ void MonsterMeshTextBattle::clientAuthRetransmit(uint32_t nowMs)
     // Blocked while clientNeedsFullState_ — retransmitting with an advanced
     // clientTurn_ while the state is diverged causes the server to advance
     // another turn from the wrong base, producing a cascade of mismatches.
+    // clientActionTurn_ guard: after each UPDATE clientTurn_ advances; only
+    // retransmit if the stored action was for THIS turn (not a stale action
+    // from the previous turn that would advance the server without the user
+    // picking a fresh move).
     if (!clientNeedsFullState_ && clientActionType_ != 0xFF &&
+        clientActionTurn_ == clientTurn_ &&
         (nowMs - lastClientActionSendMs_) >= TB_ACTION_RESEND_MS) {
         clientAuthSendActionV2(clientActionType_, clientActionIndex_);
     }

@@ -180,6 +180,7 @@ static void mmToggle()
 // Called from device-ui's map button (we repurposed it as the terminal entry).
 // device-ui hands us the LVGL panel to parent into so the left nav stays visible.
 extern "C" __attribute__((weak)) void monstermesh_set_terminal_cb(void (*cb)(void *parent)) { (void)cb; }
+extern "C" __attribute__((weak)) void monstermesh_navigate_to_terminal(void) {}
 static lv_obj_t *g_terminalParent = nullptr;
 // ALT-close suppresses re-open from the map-button callback for a brief
 // window. LVGL's keypad indev forwards an ALT press as a CLICK on the
@@ -1150,9 +1151,8 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
         if (isChallenge) {
             mmtChallengerPeer_     = mp.from;
             mmtChallengerExpireMs_ = millis() + 600000;
-            // Open terminal immediately so the user sees the Y/N overlay
-            // when the CHALLENGE BattlePacket arrives from the sender.
             pendingOpenTerminal_   = true;
+            pendingMmbOnAckTarget_ = mp.from;  // reply "challenge received" to sender
             LOG_INFO("[MonsterMesh] mmt: challenge DM from 0x%08X — armed 10min, opening terminal\n",
                      (unsigned)mp.from);
         }
@@ -2471,6 +2471,13 @@ int32_t MonsterMeshModule::runOnce()
     // from the router context (per feedback_mm_defer_tx_from_router.md).
     // The body is human-readable so the recipient sees a normal DM in
     // their Meshtastic app — the "MMT:ON" prefix is just our parser key.
+    // ACK the "MMB ON" DM back to the sender so their phone sees confirmation.
+    if (pendingMmbOnAckTarget_) {
+        uint32_t tgt = pendingMmbOnAckTarget_;
+        pendingMmbOnAckTarget_ = 0;
+        sendTextDM(tgt, "Challenge received! Opening MonsterMesh terminal...");
+        LOG_INFO("[MonsterMesh] mmb-on ack DM → 0x%08X\n", (unsigned)tgt);
+    }
     if (pendingMmtOnTx_) {
         pendingMmtOnTx_ = false;
         if (mmtOnTxTarget_) {
@@ -4715,20 +4722,14 @@ void MonsterMeshModule::tryConsumeStagedParty()
         terminal_.printLine(pendingTerminalLine_);
     }
     // Open the terminal panel when triggered by an MMB ON DM (sender or receiver).
+    // monstermesh_navigate_to_terminal() simulates a map-button tap, which
+    // switches to the correct panel (nav bar stays visible) and then calls
+    // toggleTerminal() via the registered callback.
     if (pendingOpenTerminal_) {
         pendingOpenTerminal_ = false;
-        if (!terminalActive_) {
 #if HAS_TFT
-            lv_obj_t *parent = g_terminalParent ? g_terminalParent : lv_screen_active();
-            if (parent) {
-                terminal_.open(parent);
-                terminalActive_ = true;
-                if (!terminal_.hasParty()) {
-                    terminalNeedsParty_ = true;
-                }
-            }
+        monstermesh_navigate_to_terminal();
 #endif
-        }
     }
 
     if (!terminalPartyStaged_) return;

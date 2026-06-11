@@ -331,6 +331,8 @@ private:
     // SERVER: UPDATE retransmit until client's next ACTION_V2 acks the seq.
     uint8_t  updateSeq_         = 0;     // monotonic across UPDATEs (header.seq)
     bool     unackedUpdate_     = false; // set on send, cleared on matching ACK
+    bool     pendingKeyExit_    = false; // user pressed key on FINISHED but unackedUpdate_ still set
+    uint32_t finishedAtMs_      = 0;    // server: millis() when phase went FINISHED
     uint32_t lastUpdateSendMs_  = 0;
     uint8_t  lastUpdateBuf_[BATTLELINK_MAX_PKT] = {};
     size_t   lastUpdateLen_     = 0;
@@ -354,6 +356,10 @@ private:
     // CHALLENGE retransmit lost contact with our ACCEPT.
     bool     awaitingFirstUpdate_    = false;
     uint32_t lastAcceptSendMs_       = 0;
+    // UPDATE buffered while still in WAIT_CHALLENGE_OVERLAY (before Y).
+    // Applied immediately after engine_.start() in clientAuthSendAccept.
+    uint8_t  preAcceptUpdateBuf_[BATTLELINK_MAX_PKT] = {};
+    size_t   preAcceptUpdateLen_     = 0;
 
     // CLIENT: current turn tracker. We never call engine_.executeTurn, so
     // engine_.turn() stays at 0 forever on the client. The server reports

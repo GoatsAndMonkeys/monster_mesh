@@ -231,7 +231,8 @@ Router *router = NULL; // Users of router don't care what sort of subclass imple
 #if defined(MONSTERMESH_BUILD)
 #define MM_FW_STR_(x) #x
 #define MM_FW_STR(x) MM_FW_STR_(x)
-static const char mm_firmware_version_str[] = "b" MM_FW_STR(MONSTERMESH_BUILD);
+static const char mm_firmware_version_str[] =
+    "MonsterMesh b" MM_FW_STR(MONSTERMESH_BUILD) "\nMeshtastic " xstr(APP_VERSION_SHORT);
 #undef MM_FW_STR
 #undef MM_FW_STR_
 const char *firmware_version = mm_firmware_version_str;

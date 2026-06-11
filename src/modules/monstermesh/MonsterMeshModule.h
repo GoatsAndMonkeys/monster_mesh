@@ -383,7 +383,9 @@ public:
     // a reply from, and handleReceived parses any DM from that peer for
     // Y/N. Drains stage outbound TX from runOnce per
     // feedback_mm_defer_tx_from_router.md.
-    volatile bool pendingMmtOnTx_         = false;  // queued challenge DM
+    volatile bool pendingMmtOnTx_         = false;  // queued challenge DM (legacy)
+    volatile bool pendingOpenTerminal_    = false;  // open terminal panel on next runOnce
+    uint32_t      pendingMmbOnAckTarget_  = 0;      // send "challenge received" DM reply to this node
     uint32_t      mmtOnTxTarget_          = 0;
     uint32_t      mmtAwaitingReplyFrom_   = 0;      // sender: peer we expect a Y/N from
     char          mmtPeerShort_[12]       = {};     // peer's short_name for prompts

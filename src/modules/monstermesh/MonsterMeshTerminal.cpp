@@ -146,7 +146,15 @@ void MonsterMeshTerminal::open(lv_obj_t *parent)
     // append the listing when the deferred SAV load completes. Re-entries
     // skip this entirely so the user keeps their scrollback (handled by the
     // early-return above).
+#ifdef MONSTERMESH_BUILD
+#define MM_STR_(x) #x
+#define MM_STR(x) MM_STR_(x)
+    println("MonsterMesh b" MM_STR(MONSTERMESH_BUILD) " — type 'help' for menu");
+#undef MM_STR
+#undef MM_STR_
+#else
     println("Type 'help' for main menu");
+#endif
     if (partyLoaded_) {
         showParty();
     }
@@ -541,15 +549,19 @@ void MonsterMeshTerminal::executeLine(const char *line)
     }
     if (strncmp(line, "version", 7) == 0) {
         char buf[64];
-#ifdef MONSTERMESH_VERSION
-        snprintf(buf, sizeof(buf), "MonsterMesh " MONSTERMESH_VERSION);
-#elif defined(MONSTERMESH_BUILD)
 #define MM_STRINGIFY_(x) #x
 #define MM_STRINGIFY(x) MM_STRINGIFY_(x)
+#if defined(MONSTERMESH_BUILD) && defined(MONSTERMESH_VERSION)
+        snprintf(buf, sizeof(buf), "MonsterMesh b" MM_STRINGIFY(MONSTERMESH_BUILD) " (" MONSTERMESH_VERSION ")");
+#elif defined(MONSTERMESH_BUILD)
         snprintf(buf, sizeof(buf), "MonsterMesh b" MM_STRINGIFY(MONSTERMESH_BUILD));
+#elif defined(MONSTERMESH_VERSION)
+        snprintf(buf, sizeof(buf), "MonsterMesh " MONSTERMESH_VERSION);
 #else
         snprintf(buf, sizeof(buf), "MonsterMesh (unknown)");
 #endif
+#undef MM_STRINGIFY
+#undef MM_STRINGIFY_
         println(buf);
         return;
     }
@@ -849,7 +861,19 @@ void MonsterMeshTerminal::executeLine(const char *line)
         println(buf);
         return;
     }
-    if (strncmp(line, "fight", 5) == 0) {
+    if (strncmp(line, "fight", 5) == 0 && (line[5] == '\0' || line[5] == ' ')) {
+        const char *args = line + 5;
+        while (*args == ' ') ++args;
+        if (*args) {
+            // fight <shortname> → challenge that peer (same as mmb <shortname>)
+            if (!mmb2Fn_) { println("mmb not wired"); return; }
+            if (!partyLoaded_) { println("no party loaded — load a SAV first"); return; }
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Challenging %s...", args);
+            println(buf);
+            mmb2Fn_(mmb2Ctx_, args);
+            return;
+        }
         if (!partyLoaded_) {
             println("no party loaded — load a SAV first");
             return;
