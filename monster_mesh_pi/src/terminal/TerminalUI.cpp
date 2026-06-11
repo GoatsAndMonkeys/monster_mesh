@@ -1443,12 +1443,12 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
         if (!pentestScreenOff_) {
             // Restore backlight when turning screen back on.
 #ifndef __APPLE__
-            (void)system("echo 255 > /sys/class/backlight/*/brightness 2>/dev/null || true");
+            (void)system("sudo -n bash -c 'for f in /sys/class/backlight/*/brightness; do echo 255 > \"$f\"; done' 2>/dev/null || true");
 #endif
         } else {
             // Kill backlight when screen goes off.
 #ifndef __APPLE__
-            (void)system("echo 0 > /sys/class/backlight/*/brightness 2>/dev/null || true");
+            (void)system("sudo -n bash -c 'for f in /sys/class/backlight/*/brightness; do echo 0 > \"$f\"; done' 2>/dev/null || true");
 #endif
         }
         return;
@@ -3296,12 +3296,10 @@ void TerminalUI::runTurnWithXp() {
 }
 
 void TerminalUI::battleHandleButton(const ButtonEvent &ev) {
-    // Pentest Pikachu: the fight is automatic, so manual move/switch input is
-    // ignored.  Start or Select exits the ROM back to the MonsterMesh system.
-    if (inPentestBattle_) {
+    // Pentest Pikachu auto-mode: fight runs on its own, block all move input.
+    // Boss mode (pentestBossMode_) is the exception — player controls manually.
+    if (inPentestBattle_ && !pentestBossMode_) {
         if (ev.button == GpiButton::START || ev.button == GpiButton::SELECT) {
-            // Capture the latest level/XP from the live battle, then persist
-            // before exiting so progress isn't lost mid-scan.
             const Gen1BattleEngine::BattleParty &pp = engine_.party(0);
             if (pp.count > 0 && pp.mons[0].level > 0) {
                 pentestLevel_ = pp.mons[0].level;

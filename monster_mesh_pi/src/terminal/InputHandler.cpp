@@ -137,8 +137,8 @@ GpiButton InputHandler::mapKeyCode(int code)
         case KEY_ENTER:     return GpiButton::A;
         case BTN_EAST:
         case KEY_BACKSPACE: return GpiButton::B;
-        case BTN_WEST:      return GpiButton::X;
-        case BTN_NORTH:     return GpiButton::Y;
+        case BTN_WEST:      return GpiButton::Y;   // GPI Case physical Y = SNES-left = Xbox BTN_WEST
+        case BTN_NORTH:     return GpiButton::X;   // GPI Case physical X = SNES-top  = Xbox BTN_NORTH
         case BTN_START:
         case KEY_SPACE:     return GpiButton::START;
         case BTN_SELECT:
