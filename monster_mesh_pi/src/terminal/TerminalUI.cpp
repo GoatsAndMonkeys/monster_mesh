@@ -1358,79 +1358,96 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
     //   4: Captures    → SIGINT_CAPTURES
     //   5: Reset Pikachu → confirm step (nOpts shrinks to 2)
     if (pentestShowStatus_) {
-        const int nOpts = pentestConfirmReset_ ? 2 : 6;
+        // ── Status detail sub-page: only B navigates back ────────────────────
+        if (pentestStatusDetail_) {
+            if (ev.button == GpiButton::B && ev.pressed) {
+                pentestStatusDetail_ = false;
+                pentestStatusSel_    = 1;   // leave cursor on Status
+            }
+            return;
+        }
+
+        // ── Confirm-reset sub-step ────────────────────────────────────────────
+        if (pentestConfirmReset_) {
+            switch (ev.button) {
+                case GpiButton::UP: case GpiButton::DOWN:
+                case GpiButton::LEFT: case GpiButton::RIGHT:
+                    pentestStatusSel_ = 1 - pentestStatusSel_;
+                    return;
+                case GpiButton::A:
+                    if (pentestStatusSel_ == 0) pentestResetProgress();
+                    else { pentestConfirmReset_ = false; pentestStatusSel_ = 6; }
+                    return;
+                case GpiButton::B:
+                    if (ev.pressed) { pentestConfirmReset_ = false; pentestStatusSel_ = 6; }
+                    return;
+                default: return;
+            }
+        }
+
+        // ── Main in-log menu (7 items) ────────────────────────────────────────
+        //   0 Back  1 Status  2 AP Scanner  3 Probe Sniffer
+        //   4 Deauth Log  5 Captures  6 Reset Pikachu
+        const int nOpts = 7;
         switch (ev.button) {
-            case GpiButton::UP:
-            case GpiButton::LEFT:
+            case GpiButton::UP:   case GpiButton::LEFT:
                 pentestStatusSel_ = (pentestStatusSel_ + nOpts - 1) % nOpts;
                 return;
-            case GpiButton::DOWN:
-            case GpiButton::RIGHT:
+            case GpiButton::DOWN: case GpiButton::RIGHT:
                 pentestStatusSel_ = (pentestStatusSel_ + 1) % nOpts;
                 return;
             case GpiButton::A:
-                if (!pentestConfirmReset_) {
-                    switch (pentestStatusSel_) {
-                        case 0:  // Back
-                            pentestShowStatus_ = false;
-                            pentestStatusSel_  = 0;
-                            break;
-                        case 1:  // AP Scanner
-                            pentestShowStatus_ = false;
-                            sigintLoadAllNets();
-                            sigintNetSel_ = sigintNetScroll_ = 0;
-                            screen_ = Screen::SIGINT_SCANNER;
-                            break;
-                        case 2:  // Probe Sniffer
-                            pentestShowStatus_ = false;
-                            sigintLoadProbes();
-                            sigintProbeSel_ = sigintProbeScroll_ = 0;
-                            screen_ = Screen::SIGINT_PROBES;
-                            break;
-                        case 3:  // Deauth Log
-                            pentestShowStatus_ = false;
-                            sigintLoadDeauths();
-                            sigintDeauthSel_ = sigintDeauthScroll_ = 0;
-                            screen_ = Screen::SIGINT_DEAUTHS;
-                            break;
-                        case 4:  // Captures
-                            pentestShowStatus_ = false;
-                            sigintLoadCapFiles();
-                            sigintCapSel_ = sigintCapScroll_ = 0;
-                            screen_ = Screen::SIGINT_CAPTURES;
-                            break;
-                        case 5:  // Reset Pikachu
-                            pentestConfirmReset_ = true;
-                            pentestStatusSel_    = 0;
-                            break;
-                    }
-                } else {
-                    if (pentestStatusSel_ == 1) {            // Yes, RESET
-                        pentestResetProgress();
-                    } else {                                  // No, keep playing
-                        pentestConfirmReset_ = false;
+                switch (pentestStatusSel_) {
+                    case 0:  // Back
+                        pentestShowStatus_ = false;
+                        pentestStatusSel_  = 0;
+                        break;
+                    case 1:  // Status
+                        pentestStatusDetail_ = true;
+                        break;
+                    case 2:  // AP Scanner
+                        pentestShowStatus_ = false;
+                        sigintLoadAllNets();
+                        sigintNetSel_ = sigintNetScroll_ = 0;
+                        screen_ = Screen::SIGINT_SCANNER;
+                        break;
+                    case 3:  // Probe Sniffer
+                        pentestShowStatus_ = false;
+                        sigintLoadProbes();
+                        sigintProbeSel_ = sigintProbeScroll_ = 0;
+                        screen_ = Screen::SIGINT_PROBES;
+                        break;
+                    case 4:  // Deauth Log
+                        pentestShowStatus_ = false;
+                        sigintLoadDeauths();
+                        sigintDeauthSel_ = sigintDeauthScroll_ = 0;
+                        screen_ = Screen::SIGINT_DEAUTHS;
+                        break;
+                    case 5:  // Captures
+                        pentestShowStatus_ = false;
+                        sigintLoadCapFiles();
+                        sigintCapSel_ = sigintCapScroll_ = 0;
+                        screen_ = Screen::SIGINT_CAPTURES;
+                        break;
+                    case 6:  // Reset Pikachu
+                        pentestConfirmReset_ = true;
                         pentestStatusSel_    = 0;
-                    }
+                        break;
                 }
                 return;
             case GpiButton::B:
-                if (pentestConfirmReset_) {
-                    pentestConfirmReset_ = false;
+                if (ev.pressed) {
+                    pentestShowStatus_   = false;
                     pentestStatusSel_    = 0;
-                } else {
-                    pentestShowStatus_ = false;
-                    pentestStatusSel_  = 0;
                 }
                 return;
-            case GpiButton::START:
-            case GpiButton::SELECT:
-                break;
             default:
                 return;
         }
     } else if (ev.button == GpiButton::A) {
         if (!pentestBossMode_) {
             pentestShowStatus_   = true;
+            pentestStatusDetail_ = false;
             pentestStatusSel_    = 0;
             pentestConfirmReset_ = false;
         }
@@ -1565,6 +1582,46 @@ void TerminalUI::pentestMarkBeaten(uint8_t dex) {
     int idx = dex - 1;
     pentestBeaten_[idx >> 3] |= (uint8_t)(1u << (idx & 7));
     pentestDex_[idx >> 3]    |= (uint8_t)(1u << (idx & 7));  // beaten implies seen
+}
+
+// Build the in-log menu (or status detail sub-page) that appears in the battle
+// message box when the player presses A.  Uses menuMode so each line owns its
+// own ">" selector arrow — drawMessageLog skips the global "> " prefix.
+void TerminalUI::pentestBuildMenuLog(std::vector<std::string> &out) {
+    // ── Status detail sub-page: show stats, B returns to menu ────────────────
+    if (pentestStatusDetail_) {
+        pentestBuildStatus(out);
+        out.push_back("");
+        out.push_back("  B: back to menu");
+        return;
+    }
+
+    // ── Confirm-reset sub-step ────────────────────────────────────────────────
+    if (pentestConfirmReset_) {
+        out.push_back("  RESET ALL progress?");
+        out.push_back("");
+        out.push_back(pentestStatusSel_ == 0 ? "> Yes, RESET ALL" : "  Yes, RESET ALL");
+        out.push_back(pentestStatusSel_ == 1 ? "> Cancel"         : "  Cancel");
+        return;
+    }
+
+    // ── Main menu ─────────────────────────────────────────────────────────────
+    static const char *items[] = {
+        "Back",
+        "Status",
+        "AP Scanner",
+        "Probe Sniffer",
+        "Deauth Log",
+        "Captures",
+        "Reset Pikachu",
+    };
+    static constexpr int N = 7;
+    for (int i = 0; i < N; i++) {
+        char line[48];
+        snprintf(line, sizeof(line), "%s %s",
+                 (i == pentestStatusSel_) ? ">" : " ", items[i]);
+        out.push_back(line);
+    }
 }
 
 void TerminalUI::pentestBuildStatus(std::vector<std::string> &out) {
@@ -4244,30 +4301,24 @@ void TerminalUI::syncBattleWindow() {
                      pendingE4Idx_ + 1, LORD_E4_COUNT, m->title, m->name);
     } else if (inPentestBattle_) {
         if (!pentestBossMode_) {
-            // Normal pentest mode: show the PENTEST PIKACHU header + SSID tag.
+            // Normal pentest mode: header + SSID tag always visible.
             snprintf(s.header, sizeof(s.header), "PENTEST PIKACHU");
             s.pentest = true;
             snprintf(s.foeTag, sizeof(s.foeTag), "%s", pentestSsid_);
             snprintf(s.foe.nickname, sizeof(s.foe.nickname), "%s", dexName(em.species));
-            s.showStatus = pentestShowStatus_;
-            if (pentestShowStatus_) pentestBuildStatus(s.statusLines);
+            if (pentestShowStatus_) {
+                s.menuMode = true;
+                s.log.clear();
+                pentestBuildMenuLog(s.log);
+            }
         }
         // Boss mode: no pentest header/tag/overlay — looks like a regular battle.
-    } else if (pentestStandby_ && pentestShowStatus_) {
-        // Standby + user pressed A: show the full status overlay (+ reset menu).
-        snprintf(s.header, sizeof(s.header), "PENTEST PIKACHU");
-        s.pentest    = true;
-        s.showStatus = true;
-        pentestBuildStatus(s.statusLines);
     } else if (pentestStandby_) {
-        // Standby keeps the T114-style battle screen: Pikachu stands by with no
-        // opponent, and the live stats fill the message box.  (Press A for the
-        // full status overlay + reset menu.)
+        // Standby: Pikachu waits for a target.  Sprites + HP boxes stay up;
+        // the log box shows stats or the menu when A is pressed.
         snprintf(s.header, sizeof(s.header), "PENTEST PIKACHU");
         s.pentest = true;
-        s.showStatus = false;
 
-        // Player Pikachu/Raichu from saved progress (the engine party is stale).
         bool evolved = (pentestLevel_ >= 30);
         uint8_t pdex = evolved ? 26 : 25;
         uint8_t pmv[4]; pikaMovesForLevel(pentestLevel_, pmv);
@@ -4276,51 +4327,46 @@ void TerminalUI::syncBattleWindow() {
         s.you.species = pdex;
         s.you.level   = pentestLevel_;
         s.you.maxHp   = tmp.maxHp;
-        s.you.hp      = tmp.maxHp;                 // full HP while idle
+        s.you.hp      = tmp.maxHp;
         snprintf(s.you.nickname, sizeof(s.you.nickname), "%s",
                  evolved ? "RAICHU" : "PIKACHU");
 
-        // No opponent yet — empty foe box, no sprite (species 0 is skipped).
-        s.foe.species = 0;
-        s.foe.level   = 0;
-        s.foe.hp      = 0;
-        s.foe.maxHp   = 0;
+        s.foe.species = 0; s.foe.level = 0; s.foe.hp = 0; s.foe.maxHp = 0;
         snprintf(s.foeTag,       sizeof(s.foeTag),       "%s", "SCANNING");
         snprintf(s.foe.nickname, sizeof(s.foe.nickname), "%s", "(no target)");
 
-        // EXP bar from saved partial XP.
-        {
-            uint32_t L = pentestLevel_;
-            uint32_t delta = (L + 1) * (L + 1) * (L + 1) - L * L * L;
-            uint32_t have  = pentestXp_; if (have > delta) have = delta;
-            s.expPermille = delta ? (int)(have * 1000 / delta) : 0;
-        }
+        uint32_t L = pentestLevel_;
+        uint32_t delta = (L+1)*(L+1)*(L+1) - L*L*L;
+        uint32_t have  = pentestXp_; if (have > delta) have = delta;
+        s.expPermille = delta ? (int)(have * 1000 / delta) : 0;
 
-        // Stats into the message box (this is the "text box" the user sees).
-        s.log.clear();
-        char b[96];
-        s.log.push_back("PIKACHU is waiting for an opponent...");
-        s.log.push_back("Scanning for a vulnerable network.");
-        s.log.push_back("");
-        int gyms = __builtin_popcount(pentestGymBeaten_);
-        int seen = 0, beaten = 0;
-        for (int i = 0; i < 151; i++) {
-            if (pentestDex_[i >> 3]    & (1u << (i & 7))) seen++;
-            if (pentestBeaten_[i >> 3] & (1u << (i & 7))) beaten++;
+        if (pentestShowStatus_) {
+            s.menuMode = true;
+            s.log.clear();
+            pentestBuildMenuLog(s.log);
+        } else {
+            s.log.clear();
+            char b[96];
+            int gyms = __builtin_popcount(pentestGymBeaten_);
+            int seen = 0, beaten = 0;
+            for (int i = 0; i < 151; i++) {
+                if (pentestDex_[i >> 3]    & (1u << (i & 7))) seen++;
+                if (pentestBeaten_[i >> 3] & (1u << (i & 7))) beaten++;
+            }
+            s.log.push_back("Scanning for a vulnerable network...");
+            s.log.push_back("");
+            snprintf(b, sizeof(b), "%s Lv%u    Gyms %d/8",
+                     evolved ? "RAICHU" : "PIKACHU", (unsigned)pentestLevel_, gyms);
+            s.log.push_back(b);
+            snprintf(b, sizeof(b), "Pokedex  seen %d / beaten %d", seen, beaten);
+            s.log.push_back(b);
+            snprintf(b, sizeof(b), "Record   %u W - %u L",
+                     (unsigned)pentestWins_, (unsigned)pentestLosses_);
+            s.log.push_back(b);
+            snprintf(b, sizeof(b), "WiFi  in range %d  /  cracked %d",
+                     pentestNetsSeen_, (int)pentestDoneSsids_.size());
+            s.log.push_back(b);
         }
-        snprintf(b, sizeof(b), "%s Lv%u    Gyms %d/8",
-                 evolved ? "RAICHU" : "PIKACHU", (unsigned)pentestLevel_, gyms);
-        s.log.push_back(b);
-        snprintf(b, sizeof(b), "Pokedex  seen %d / beaten %d", seen, beaten);
-        s.log.push_back(b);
-        snprintf(b, sizeof(b), "Record   %u W - %u L",
-                 (unsigned)pentestWins_, (unsigned)pentestLosses_);
-        s.log.push_back(b);
-        snprintf(b, sizeof(b), "WiFi  in range %d  /  cracked %d",
-                 pentestNetsSeen_, (int)pentestDoneSsids_.size());
-        s.log.push_back(b);
-        s.log.push_back("");
-        s.log.push_back("A: status / reset    B: exit");
     }
 
     // End overlay

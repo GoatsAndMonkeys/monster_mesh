@@ -343,7 +343,8 @@ private:
     uint8_t  pentestLevel_      = 5;
     uint32_t pentestXp_         = 0;  // partial XP toward the next level
     bool     pentestLoaded_     = false;
-    bool     pentestShowStatus_ = false;  // status overlay toggled with A
+    bool     pentestShowStatus_   = false; // in-log menu open (A to open)
+    bool     pentestStatusDetail_ = false; // showing status detail sub-page
     uint8_t  pentestDex_[19]    = {};     // 151-bit "seen" Pokedex (bitset)
     uint8_t  pentestBeaten_[19] = {};     // 151-bit "beaten" Pokedex (bitset)
     uint16_t pentestUsedSsid_   = 0;      // bitmask of WiFi targets already hit
@@ -379,7 +380,8 @@ private:
     void pentestButton(const ButtonEvent &ev);  // input while in a pentest scan
     void pentestMarkSeen(uint8_t dex);          // flag a species as encountered
     void pentestMarkBeaten(uint8_t dex);        // flag a species as defeated
-    void pentestBuildStatus(std::vector<std::string> &out);  // status overlay text
+    void pentestBuildMenuLog(std::vector<std::string> &out); // in-log menu lines
+    void pentestBuildStatus(std::vector<std::string> &out);  // status detail lines
     static constexpr uint64_t PENTEST_TURN_MS = 900;
     static constexpr uint64_t PENTEST_END_MS  = 2500;  // victory linger before next
     char pentestSsid_[24] = {};      // WiFi target name shown in the fight

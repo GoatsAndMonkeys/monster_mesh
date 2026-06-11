@@ -82,11 +82,9 @@ public:
         // Player EXP progress toward the next level, 0..1000 (per-mille).  Drives
         // the EXP bar in the YOU box.
         int  expPermille      = 0;
-        // Pentest status overlay: when true the window draws a full-screen
-        // status readout (gyms / current-area mons / Pokedex) from statusLines
-        // instead of the battle.
-        bool showStatus       = false;
-        std::vector<std::string> statusLines;
+        // When true, drawMessageLog skips its own "> " prefix — callers embed
+        // their own selector arrow in each log line (used for in-log menus).
+        bool menuMode         = false;
     };
 
     BattleWindow();

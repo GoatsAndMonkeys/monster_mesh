@@ -392,12 +392,16 @@ void BattleWindow::drawMessageLog() {
 
     int n = (int)state_.log.size();
     int start = std::max(0, n - maxLines);
+    int maxChars = (bw - 20) / (BitmapFont::GLYPH_ADVANCE * 2);
     for (int i = start; i < n; i++) {
-        char prefix[260];
-        snprintf(prefix, sizeof(prefix), "> %s", state_.log[i].c_str());
-        int maxChars = (bw - 20) / (BitmapFont::GLYPH_ADVANCE * 2);
-        if ((int)strlen(prefix) > maxChars) prefix[maxChars] = '\0';
-        BitmapFont::drawString(renderer_, bx + 10, textY, prefix, COL_INK, 2);
+        char line[260];
+        if (state_.menuMode) {
+            snprintf(line, sizeof(line), "%s", state_.log[i].c_str());
+        } else {
+            snprintf(line, sizeof(line), "> %s", state_.log[i].c_str());
+        }
+        if ((int)strlen(line) > maxChars) line[maxChars] = '\0';
+        BitmapFont::drawString(renderer_, bx + 10, textY, line, COL_INK, 2);
         textY += LINE_STRIDE;
     }
 }
@@ -535,32 +539,6 @@ void BattleWindow::drawEndOverlay() {
 
 void BattleWindow::render() {
     if (!renderer_) return;
-
-    // Pentest status overlay: full-screen text readout (gyms / current-area
-    // mons / Pokedex), drawn instead of the battle when toggled on with A.
-    if (state_.showStatus) {
-        SDL_SetRenderDrawColor(renderer_, 255, 255, 255, 255);
-        SDL_RenderClear(renderer_);
-        drawBackground();
-        drawBox(16, 16, LOGICAL_W - 32, LOGICAL_H - 32, COL_WHITE, COL_INK);
-        BitmapFont::drawString(renderer_, 28, 28, "PENTEST PIKACHU - STATUS",
-                               COL_DIMINK, 2);
-        int y = 28 + BitmapFont::GLYPH_H * 2 + 10;
-        for (const auto &ln : state_.statusLines) {
-            char buf[96];
-            snprintf(buf, sizeof(buf), "%s", ln.c_str());
-            int maxChars = (LOGICAL_W - 56) / (BitmapFont::GLYPH_ADVANCE * 2);
-            if ((int)strlen(buf) > maxChars && maxChars > 0) buf[maxChars] = '\0';
-            BitmapFont::drawString(renderer_, 28, y, buf, COL_INK, 2);
-            y += BitmapFont::GLYPH_H * 2 + 4;
-            if (y > LOGICAL_H - 40) break;
-        }
-        BitmapFont::drawString(renderer_, 28, LOGICAL_H - 34,
-                               "Up/Down: move   A: select   B: close   START: exit",
-                               COL_DIMINK, 1);
-        SDL_RenderPresent(renderer_);
-        return;
-    }
 
     // Letterbox bars (visible when the window's aspect != 4:3 thanks to
     // SDL_RenderSetIntegerScale) paint white too, so the whole window reads
