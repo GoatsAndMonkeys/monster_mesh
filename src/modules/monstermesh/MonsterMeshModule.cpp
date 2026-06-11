@@ -3257,7 +3257,7 @@ int32_t MonsterMeshModule::runOnce()
     // LVGL flush the same way the emulator path does, clear the screen, and
     // hand the staged party + a CPU mirror-match to startLocal().
     if (textBattleStartReq_ && !textBattleActive_ && setupDone_ &&
-        !emulatorActive_ && !browserActive_ && terminal_.getParty().count == 6) {
+        !emulatorActive_ && !browserActive_ && terminal_.getParty().count >= 1) {
         textBattleStartReq_ = false;
         pendingBattleEndCleanup_ = false;  // cancel any stale cleanup so it doesn't hide this new fight
         hideLvBattleScreen();              // reset lvBattleActive_ so takeover fires next tick
