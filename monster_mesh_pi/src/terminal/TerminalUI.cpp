@@ -17,7 +17,10 @@
 #include <time.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <dirent.h>
 #include <unistd.h>
+#include <algorithm>
 
 // ── Local helpers ─────────────────────────────────────────────────────────────
 
@@ -430,13 +433,24 @@ void TerminalUI::render() {
 
     // Pentest Pikachu renders ONLY through the SDL window — no ncurses content
     // is painted, so the green terminal never flashes before/after the battle.
+    // Exception: SIGINT tool screens use ncurses; the SDL window is closed while
+    // they're visible and reopens when B returns to Screen::BATTLE.
     if (pentestMode_) {
-        if (!battleWindow_.isOpen()) battleWindow_.open();
-        if (battleWindow_.isOpen()) {
-            syncBattleWindow();
-            battleWindow_.render();
+        bool isSigint = (screen_ == Screen::SIGINT_SCANNER  ||
+                         screen_ == Screen::SIGINT_PROBES   ||
+                         screen_ == Screen::SIGINT_DEAUTHS  ||
+                         screen_ == Screen::SIGINT_CAPTURES);
+        if (isSigint) {
+            if (battleWindow_.isOpen()) battleWindow_.close();
+            // fall through to standard ncurses render path
+        } else {
+            if (!battleWindow_.isOpen()) battleWindow_.open();
+            if (battleWindow_.isOpen()) {
+                syncBattleWindow();
+                battleWindow_.render();
+            }
+            return;
         }
-        return;
     }
 
     // Resize the info / menu split per screen so battle gets a tight
@@ -460,9 +474,13 @@ void TerminalUI::render() {
         case Screen::GYM_SELECT:    renderGymSelect();                       break;
         case Screen::PVP_BATTLE:    renderPvpBattle();                       break;
         case Screen::PVP_BATTLE_END:renderPvpBattleEnd();                    break;
-        case Screen::HELP:          renderHelp();                            break;
+        case Screen::HELP:            renderHelp();                            break;
         case Screen::CONFIRM_QUIT:  renderConfirmQuit();                     break;
         case Screen::CHALLENGE:     renderChallenge();                       break;
+        case Screen::SIGINT_SCANNER:  renderSigintScanner();                 break;
+        case Screen::SIGINT_PROBES:   renderSigintProbes();                  break;
+        case Screen::SIGINT_DEAUTHS:  renderSigintDeauths();                 break;
+        case Screen::SIGINT_CAPTURES: renderSigintCaptures();                break;
     }
 
     // SDL2 battle window lifecycle.  Open/sync while we're on a battle screen,
@@ -1167,9 +1185,13 @@ void TerminalUI::handleButton(const ButtonEvent &ev) {
         case Screen::GYM_SELECT:    gymSelectButton(ev);    break;
         case Screen::PVP_BATTLE:    pvpBattleButton(ev);    break;
         case Screen::PVP_BATTLE_END:pvpBattleEndButton(ev); break;
-        case Screen::HELP:          helpButton(ev);         break;
-        case Screen::CONFIRM_QUIT:  confirmQuitButton(ev);  break;
-        case Screen::CHALLENGE:     challengeButton(ev);    break;
+        case Screen::HELP:            helpButton(ev);              break;
+        case Screen::CONFIRM_QUIT:  confirmQuitButton(ev);        break;
+        case Screen::CHALLENGE:     challengeButton(ev);          break;
+        case Screen::SIGINT_SCANNER:  sigintScannerButton(ev);    break;
+        case Screen::SIGINT_PROBES:   sigintProbesButton(ev);     break;
+        case Screen::SIGINT_DEAUTHS:  sigintDeauthsButton(ev);    break;
+        case Screen::SIGINT_CAPTURES: sigintCapturesButton(ev);   break;
     }
 }
 
@@ -1309,14 +1331,15 @@ void TerminalUI::battleButton(const ButtonEvent &ev) {
 }
 
 void TerminalUI::pentestButton(const ButtonEvent &ev) {
-    // ── Status overlay open: drive its little scrollable menu ──
-    // Two-option menu (default = Back, so a stray A just closes the overlay):
-    //   [Back]  [Reset Pikachu]   →  Reset opens a confirm step:
-    //   [No, keep playing]  [Yes, RESET]   (default = No)
-    // Status overlay up: drive its scrollable menu (default = Back).  This
-    // overlay is reachable both mid-fight and from standby (press A).
+    // ── Status overlay open: 6-option menu ───────────────────────────────────
+    //   0: Back
+    //   1: AP Scanner  → SIGINT_SCANNER (ncurses, B returns to BATTLE)
+    //   2: Probe Sniffer → SIGINT_PROBES
+    //   3: Deauth Log  → SIGINT_DEAUTHS
+    //   4: Captures    → SIGINT_CAPTURES
+    //   5: Reset Pikachu → confirm step (nOpts shrinks to 2)
     if (pentestShowStatus_) {
-        const int nOpts = 2;
+        const int nOpts = pentestConfirmReset_ ? 2 : 6;
         switch (ev.button) {
             case GpiButton::UP:
             case GpiButton::LEFT:
@@ -1328,16 +1351,43 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
                 return;
             case GpiButton::A:
                 if (!pentestConfirmReset_) {
-                    if (pentestStatusSel_ == 0) {            // Back
-                        pentestShowStatus_ = false;
-                        pentestStatusSel_  = 0;
-                    } else {                                  // Reset Pikachu
-                        pentestConfirmReset_ = true;
-                        pentestStatusSel_    = 0;             // default = No
+                    switch (pentestStatusSel_) {
+                        case 0:  // Back
+                            pentestShowStatus_ = false;
+                            pentestStatusSel_  = 0;
+                            break;
+                        case 1:  // AP Scanner
+                            pentestShowStatus_ = false;
+                            sigintLoadAllNets();
+                            sigintNetSel_ = sigintNetScroll_ = 0;
+                            screen_ = Screen::SIGINT_SCANNER;
+                            break;
+                        case 2:  // Probe Sniffer
+                            pentestShowStatus_ = false;
+                            sigintLoadProbes();
+                            sigintProbeSel_ = sigintProbeScroll_ = 0;
+                            screen_ = Screen::SIGINT_PROBES;
+                            break;
+                        case 3:  // Deauth Log
+                            pentestShowStatus_ = false;
+                            sigintLoadDeauths();
+                            sigintDeauthSel_ = sigintDeauthScroll_ = 0;
+                            screen_ = Screen::SIGINT_DEAUTHS;
+                            break;
+                        case 4:  // Captures
+                            pentestShowStatus_ = false;
+                            sigintLoadCapFiles();
+                            sigintCapSel_ = sigintCapScroll_ = 0;
+                            screen_ = Screen::SIGINT_CAPTURES;
+                            break;
+                        case 5:  // Reset Pikachu
+                            pentestConfirmReset_ = true;
+                            pentestStatusSel_    = 0;
+                            break;
                     }
                 } else {
                     if (pentestStatusSel_ == 1) {            // Yes, RESET
-                        pentestResetProgress();               // wipes + restarts
+                        pentestResetProgress();
                     } else {                                  // No, keep playing
                         pentestConfirmReset_ = false;
                         pentestStatusSel_    = 0;
@@ -1345,21 +1395,21 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
                 }
                 return;
             case GpiButton::B:
-                if (pentestConfirmReset_) {                    // back out of confirm
+                if (pentestConfirmReset_) {
                     pentestConfirmReset_ = false;
                     pentestStatusSel_    = 0;
-                } else {                                       // dismiss overlay
+                } else {
                     pentestShowStatus_ = false;
                     pentestStatusSel_  = 0;
                 }
                 return;
             case GpiButton::START:
             case GpiButton::SELECT:
-                break;            // fall through to exit-ROM handling below
+                break;
             default:
                 return;
         }
-    } else if (ev.button == GpiButton::A) {     // open the status overlay
+    } else if (ev.button == GpiButton::A) {
         pentestShowStatus_   = true;
         pentestStatusSel_    = 0;
         pentestConfirmReset_ = false;
@@ -1490,7 +1540,18 @@ void TerminalUI::pentestBuildStatus(std::vector<std::string> &out) {
     };
     if (!pentestConfirmReset_) {
         opt(0, "Back");
-        opt(1, "Reset Pikachu");
+        // Capture status inline with the Scanner option
+        if (sigintCapActive_) {
+            char capLine[64];
+            snprintf(capLine, sizeof(capLine), "AP Scanner  [capturing: %.20s]", sigintCapSSID_);
+            opt(1, capLine);
+        } else {
+            opt(1, "AP Scanner");
+        }
+        opt(2, "Probe Sniffer");
+        opt(3, "Deauth Log");
+        opt(4, "Captures");
+        opt(5, "Reset Pikachu");
     } else {
         out.push_back("Reset to Level 5? Progress lost!");
         opt(0, "No, keep playing");
@@ -1773,8 +1834,28 @@ void TerminalUI::activateLocalItem(int item) {
 
 void TerminalUI::activateSystemItem(int item) {
     switch (item) {
-        case 0: screen_ = Screen::HELP;         break;
-        case 1: screen_ = Screen::CONFIRM_QUIT; break;
+        case 0: screen_ = Screen::HELP; break;
+        case 1:
+            sigintLoadAllNets();
+            sigintNetSel_ = sigintNetScroll_ = 0;
+            screen_ = Screen::SIGINT_SCANNER;
+            break;
+        case 2:
+            sigintLoadProbes();
+            sigintProbeSel_ = sigintProbeScroll_ = 0;
+            screen_ = Screen::SIGINT_PROBES;
+            break;
+        case 3:
+            sigintLoadDeauths();
+            sigintDeauthSel_ = sigintDeauthScroll_ = 0;
+            screen_ = Screen::SIGINT_DEAUTHS;
+            break;
+        case 4:
+            sigintLoadCapFiles();
+            sigintCapSel_ = sigintCapScroll_ = 0;
+            screen_ = Screen::SIGINT_CAPTURES;
+            break;
+        case 5: screen_ = Screen::CONFIRM_QUIT; break;
     }
 }
 
@@ -2191,6 +2272,541 @@ void TerminalUI::pentestBleScan() {
             "Apple BLE adv detected (iBeacon/device nearby)" });
 #endif
 }
+
+// ── SIGINT tools ──────────────────────────────────────────────────────────────
+// AP Scanner, Probe Sniffer, Deauth Log, Captures — reachable from both the
+// Pentest Pikachu status overlay (press A) and the normal mmterm SYSTEM tab.
+
+const char *TerminalUI::sigintCaptureDir() {
+#ifdef __APPLE__
+    return "/tmp/monstermesh/captures";
+#else
+    return "/var/lib/monstermesh/captures";
+#endif
+}
+
+// Tier thresholds shared by sigintLoadAllNets and renderSigintScanner.
+// Returns: 3=RARE(WEP) 2=UNCOMMON(WPS) 1=COMMON(open/TKIP/hidden) 0=secure.
+static uint8_t sigintTierForFlags(const char *flags) {
+    if (!flags || !*flags) return 0;
+    if (strstr(flags, "WEP"))  return 3;
+    if (strstr(flags, "WPS"))  return 2;
+    if (strstr(flags, "TKIP")) return 1;
+    if (!strstr(flags, "WPA") && !strstr(flags, "RSN")) return 1;  // open
+    return 0;
+}
+
+static const char *sigintTierTag(uint8_t tier) {
+    switch (tier) {
+        case 3: return "RARE";
+        case 2: return "UNCO";
+        case 1: return "OPEN";
+        default: return "    ";
+    }
+}
+
+// Load ALL nearby APs from wpa_cli scan_results (not just vulnerable ones).
+// Sorted strongest RSSI first so juicy targets float to the top.
+void TerminalUI::sigintLoadAllNets() {
+    sigintNets_.clear();
+#ifndef __APPLE__
+    FILE *f = popen("sudo -n wpa_cli -i wlan0 scan_results 2>/dev/null", "r");
+    if (!f) return;
+    char buf[256];
+    bool header = true;
+    while (fgets(buf, sizeof(buf), f)) {
+        if (header) { header = false; continue; }
+        char *save  = nullptr;
+        char *bssid = strtok_r(buf,     "\t", &save);
+        (void)strtok_r(nullptr, "\t", &save);            // freq
+        char *rssi  = strtok_r(nullptr, "\t", &save);
+        char *flags = strtok_r(nullptr, "\t", &save);
+        char *ssid  = strtok_r(nullptr, "\t\r\n", &save);
+        if (!bssid) continue;
+        SigintNet n = {};
+        snprintf(n.bssid, sizeof(n.bssid), "%.17s", bssid);
+        n.rssi = rssi ? atoi(rssi) : -100;
+        snprintf(n.flags, sizeof(n.flags), "%.63s", flags ? flags : "");
+        if (ssid && *ssid)
+            snprintf(n.ssid, sizeof(n.ssid), "%.39s", ssid);
+        else {
+            int blen = (int)strlen(n.bssid);
+            snprintf(n.ssid, sizeof(n.ssid), "(hidden-%s)",
+                     blen >= 8 ? n.bssid + blen - 8 : "??:??:??");
+        }
+        n.tier = sigintTierForFlags(n.flags);
+        sigintNets_.push_back(n);
+    }
+    pclose(f);
+    // Sort: vulnerable first (tier desc), then by RSSI desc.
+    std::sort(sigintNets_.begin(), sigintNets_.end(),
+              [](const SigintNet &a, const SigintNet &b) {
+                  if (a.tier != b.tier) return a.tier > b.tier;
+                  return a.rssi > b.rssi;
+              });
+#endif
+}
+
+// Run a 5-second passive probe-request sniff via tcpdump.  Extracts unique
+// source MACs + target SSIDs (from parenthesised SSID in tcpdump output).
+// Blocks for up to 5 seconds — acceptable since the user just pressed Rescan.
+void TerminalUI::sigintLoadProbes() {
+    sigintProbes_.clear();
+#ifndef __APPLE__
+    FILE *f = popen(
+        "sudo -n timeout 5 tcpdump -i wlan0 -l -e type mgt subtype probe-req 2>/dev/null",
+        "r");
+    if (!f) return;
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        // tcpdump -e probe-req line format (varies by version):
+        //   "HH:MM:SS.us  SRCMAC (oui X) > BCAST, Probe Request (SSID)"
+        // Extract source MAC: first 17-char token after timestamp.
+        char *src = nullptr;
+        // Skip timestamp (field ends at first space after the dot in usecs)
+        char *p = strchr(line, ' ');
+        if (p) p = p + 1;
+        if (p && strlen(p) >= 17) src = p;
+        if (!src) continue;
+        char mac[18] = {};
+        int colons = 0;
+        for (int i = 0; i < 17 && src[i]; i++) {
+            if (src[i] == ':') colons++;
+            mac[i] = src[i];
+        }
+        mac[17] = '\0';
+        if (colons < 5) continue;  // not a valid MAC
+
+        // Extract SSID from "(SSID)" at end of line; "()" = broadcast probe.
+        char ssid[40] = {};
+        const char *lp = strrchr(line, '(');
+        const char *rp = strrchr(line, ')');
+        if (lp && rp && rp > lp + 1) {
+            int len = (int)(rp - lp - 1);
+            if (len >= (int)sizeof(ssid)) len = (int)sizeof(ssid) - 1;
+            strncpy(ssid, lp + 1, len);
+            ssid[len] = '\0';
+        }
+
+        // Merge duplicate (mac, ssid) pairs.
+        bool found = false;
+        for (auto &pr : sigintProbes_) {
+            if (strcmp(pr.mac, mac) == 0 && strcmp(pr.ssid, ssid) == 0) {
+                pr.count++;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            SigintProbe pr = {};
+            strncpy(pr.mac,  mac,  sizeof(pr.mac)  - 1);
+            strncpy(pr.ssid, ssid, sizeof(pr.ssid) - 1);
+            pr.count = 1;
+            sigintProbes_.push_back(pr);
+        }
+    }
+    pclose(f);
+#endif
+}
+
+// Pull deauth / disconnect events from wpa_supplicant's ring log.
+// On Pi this catches when the AP deauth'd US — useful for detecting
+// deauth-attack campaigns targeting our own connection.
+void TerminalUI::sigintLoadDeauths() {
+    sigintDeauths_.clear();
+#ifndef __APPLE__
+    // wpa_cli log outputs the supplicant ring buffer (most recent entries).
+    // Filter for deauth/disassoc/disconnect keywords.
+    FILE *f = popen(
+        "sudo -n wpa_cli -i wlan0 log 2>/dev/null | "
+        "grep -i 'deauth\\|disassoc\\|disconnect\\|Disconnected\\|CTRL-EVENT'",
+        "r");
+    if (!f) return;
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        // Strip trailing newline
+        int n = (int)strlen(line);
+        while (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = '\0';
+        if (n == 0) continue;
+        SigintDeauth d = {};
+        strncpy(d.line, line, sizeof(d.line) - 1);
+        sigintDeauths_.push_back(d);
+        if (sigintDeauths_.size() >= 80) break;  // cap to avoid unbounded growth
+    }
+    pclose(f);
+#endif
+}
+
+// List .pcap files in the capture directory.
+void TerminalUI::sigintLoadCapFiles() {
+    sigintCaps_.clear();
+    const char *dir = sigintCaptureDir();
+#ifndef __APPLE__
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != nullptr) {
+        if (strstr(ent->d_name, ".pcap") == nullptr) continue;
+        SigintCap cap = {};
+        snprintf(cap.name, sizeof(cap.name), "%.79s", ent->d_name);
+        char path[256];
+        snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
+        struct stat st = {};
+        if (stat(path, &st) == 0) cap.sizeBytes = (long)st.st_size;
+        sigintCaps_.push_back(cap);
+    }
+    closedir(d);
+    // Sort alphabetically (newest timestamp names sort last).
+    std::sort(sigintCaps_.begin(), sigintCaps_.end(),
+              [](const SigintCap &a, const SigintCap &b) {
+                  return strcmp(a.name, b.name) < 0;
+              });
+#else
+    (void)dir;
+#endif
+}
+
+// Start a background tcpdump capturing EAPOL frames (which includes the
+// 4-way handshake WPA key exchange + PMKID in Message 1) to a .pcap file.
+// hcxtools / hashcat can extract the PMKID and handshake from the pcap
+// offline: hcxpcapngtool -o out.22000 cap_SSID.pcap
+void TerminalUI::sigintStartCapture(const SigintNet &net) {
+    const char *dir = sigintCaptureDir();
+    // Sanitise SSID for use as a filename component (keep alnum + dash/underscore).
+    char safeSsid[40] = {};
+    const char *s = net.ssid;
+    int j = 0;
+    for (int i = 0; s[i] && j < 30; i++) {
+        char c = s[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_')
+            safeSsid[j++] = c;
+        else if (c == ' ')
+            safeSsid[j++] = '_';
+    }
+    if (j == 0) snprintf(safeSsid, sizeof(safeSsid), "unknown");
+
+    char cmd[512];
+    // mkdir -p first; tcpdump -c 500 stops after 500 EAPOL frames (~a few
+    // complete handshakes), then the background job exits naturally.
+    snprintf(cmd, sizeof(cmd),
+             "mkdir -p %s && "
+             "sudo -n tcpdump -i wlan0 -w %s/cap_%.30s_$(date +%%s).pcap "
+             "ether proto 0x888e -c 500 2>/dev/null &",
+             dir, dir, safeSsid);
+    system(cmd);
+
+    sigintCapActive_ = true;
+    snprintf(sigintCapSSID_, sizeof(sigintCapSSID_), "%.39s", net.ssid);
+}
+
+// ── Render: AP Scanner ────────────────────────────────────────────────────────
+void TerminalUI::renderSigintScanner() {
+    werase(winInfo_);
+    werase(winMenu_);
+
+    int infoRows = getmaxy(winInfo_);
+    int infoCols = getmaxx(winInfo_);
+
+    // Header
+    char hdr[80];
+    if (sigintCapActive_)
+        snprintf(hdr, sizeof(hdr), " AP SCANNER [%d APs] [cap: %.16s]",
+                 (int)sigintNets_.size(), sigintCapSSID_);
+    else
+        snprintf(hdr, sizeof(hdr), " AP SCANNER [%d APs]  [A]=Capture  [B]=Back",
+                 (int)sigintNets_.size());
+    wattron(winInfo_, A_REVERSE | COLOR_PAIR(4));
+    mvwprintw(winInfo_, 0, 0, "%-*.*s", infoCols, infoCols, hdr);
+    wattroff(winInfo_, A_REVERSE | COLOR_PAIR(4));
+
+    if (sigintNets_.empty()) {
+        mvwprintw(winInfo_, 2, 2, "No APs found (wpa_cli unavailable or no scan results)");
+        mvwprintw(winInfo_, 3, 2, "Run:  sudo wpa_cli -i wlan0 scan");
+        mvwprintw(winMenu_, 1, 1, "[A]=Rescan  [B]=Back");
+        return;
+    }
+
+    // Column header
+    wattron(winInfo_, A_BOLD);
+    mvwprintw(winInfo_, 1, 1, "%-4s %4s  %-18s %s",
+              "TIER", "RSSI", "BSSID", "SSID");
+    wattroff(winInfo_, A_BOLD);
+    mvwhline(winInfo_, 2, 1, ACS_HLINE, infoCols - 2);
+
+    int listRows = infoRows - 3;
+    int total    = (int)sigintNets_.size();
+    if (sigintNetSel_ < sigintNetScroll_) sigintNetScroll_ = sigintNetSel_;
+    if (sigintNetSel_ >= sigintNetScroll_ + listRows)
+        sigintNetScroll_ = sigintNetSel_ - listRows + 1;
+
+    for (int i = 0; i < listRows; i++) {
+        int idx = sigintNetScroll_ + i;
+        if (idx >= total) break;
+        const SigintNet &n = sigintNets_[idx];
+        bool sel = (idx == sigintNetSel_);
+
+        // Pick color based on tier
+        int cp = 5;  // default (secure)
+        if (n.tier == 3) cp = 3;        // RARE  → pair 3 (red-ish / A_REVERSE)
+        else if (n.tier == 2) cp = 2;   // UNCO  → pair 2 (yellow-ish)
+        else if (n.tier == 1) cp = 1;   // OPEN  → pair 1 (green)
+
+        if (sel) wattron(winInfo_, A_REVERSE | COLOR_PAIR(cp));
+        else     wattron(winInfo_, COLOR_PAIR(cp));
+
+        mvwprintw(winInfo_, 3 + i, 1, "%-4s %4d %-18s %s",
+                  sigintTierTag(n.tier), n.rssi, n.bssid,
+                  n.ssid[0] ? n.ssid : "(hidden)");
+
+        if (sel) wattroff(winInfo_, A_REVERSE | COLOR_PAIR(cp));
+        else     wattroff(winInfo_, COLOR_PAIR(cp));
+    }
+
+    // Scroll hint
+    if (total > listRows) {
+        mvwprintw(winInfo_, infoRows - 1, infoCols - 12, "[%d/%d]",
+                  sigintNetSel_ + 1, total);
+    }
+
+    // Menu bar shows flags of selected network
+    if (sigintNetSel_ < total) {
+        const SigintNet &sel = sigintNets_[sigintNetSel_];
+        mvwprintw(winMenu_, 1, 1, "Flags: %-40s", sel.flags);
+    }
+}
+
+void TerminalUI::sigintScannerButton(const ButtonEvent &ev) {
+    int total = (int)sigintNets_.size();
+    switch (ev.button) {
+        case GpiButton::UP:
+            if (sigintNetSel_ > 0) sigintNetSel_--;
+            break;
+        case GpiButton::DOWN:
+            if (sigintNetSel_ < total - 1) sigintNetSel_++;
+            break;
+        case GpiButton::A:
+            if (total > 0)
+                sigintStartCapture(sigintNets_[sigintNetSel_]);
+            else {
+                sigintLoadAllNets();
+                sigintNetSel_ = 0;
+            }
+            break;
+        case GpiButton::B:
+            screen_ = pentestMode_ ? Screen::BATTLE : Screen::MENU;
+            break;
+        case GpiButton::SELECT:
+            // Rescan on SELECT
+            sigintLoadAllNets();
+            sigintNetSel_ = 0;
+            break;
+        default: break;
+    }
+}
+
+// ── Render: Probe Sniffer ─────────────────────────────────────────────────────
+void TerminalUI::renderSigintProbes() {
+    werase(winInfo_);
+    werase(winMenu_);
+
+    int infoRows = getmaxy(winInfo_);
+    int infoCols = getmaxx(winInfo_);
+
+    wattron(winInfo_, A_REVERSE | COLOR_PAIR(4));
+    char hdr[80];
+    snprintf(hdr, sizeof(hdr), " PROBE SNIFFER [%d devices]  [A]=Rescan  [B]=Back",
+             (int)sigintProbes_.size());
+    mvwprintw(winInfo_, 0, 0, "%-*.*s", infoCols, infoCols, hdr);
+    wattroff(winInfo_, A_REVERSE | COLOR_PAIR(4));
+
+    if (sigintProbes_.empty()) {
+        mvwprintw(winInfo_, 2, 2, "No probe requests captured.");
+        mvwprintw(winInfo_, 3, 2, "[A] to run a 5-second scan.");
+        return;
+    }
+
+    wattron(winInfo_, A_BOLD);
+    mvwprintw(winInfo_, 1, 1, "%-3s %-17s  %s", "CNT", "SOURCE MAC", "PROBED SSID");
+    wattroff(winInfo_, A_BOLD);
+    mvwhline(winInfo_, 2, 1, ACS_HLINE, infoCols - 2);
+
+    int listRows = infoRows - 3;
+    int total    = (int)sigintProbes_.size();
+    if (sigintProbeSel_ < sigintProbeScroll_) sigintProbeScroll_ = sigintProbeSel_;
+    if (sigintProbeSel_ >= sigintProbeScroll_ + listRows)
+        sigintProbeScroll_ = sigintProbeSel_ - listRows + 1;
+
+    for (int i = 0; i < listRows; i++) {
+        int idx = sigintProbeScroll_ + i;
+        if (idx >= total) break;
+        const SigintProbe &p = sigintProbes_[idx];
+        bool sel = (idx == sigintProbeSel_);
+        if (sel) wattron(winInfo_, A_REVERSE | COLOR_PAIR(3));
+        const char *ssidLabel = p.ssid[0] ? p.ssid : "<broadcast>";
+        mvwprintw(winInfo_, 3 + i, 1, "%3d %-17s  %s",
+                  p.count, p.mac, ssidLabel);
+        if (sel) wattroff(winInfo_, A_REVERSE | COLOR_PAIR(3));
+    }
+    if (total > listRows)
+        mvwprintw(winInfo_, infoRows - 1, infoCols - 12, "[%d/%d]",
+                  sigintProbeSel_ + 1, total);
+}
+
+void TerminalUI::sigintProbesButton(const ButtonEvent &ev) {
+    int total = (int)sigintProbes_.size();
+    switch (ev.button) {
+        case GpiButton::UP:   if (sigintProbeSel_ > 0) sigintProbeSel_--; break;
+        case GpiButton::DOWN: if (sigintProbeSel_ < total - 1) sigintProbeSel_++; break;
+        case GpiButton::A:
+        case GpiButton::SELECT:
+            sigintLoadProbes();
+            sigintProbeSel_ = sigintProbeScroll_ = 0;
+            break;
+        case GpiButton::B:
+            screen_ = pentestMode_ ? Screen::BATTLE : Screen::MENU;
+            break;
+        default: break;
+    }
+}
+
+// ── Render: Deauth Log ────────────────────────────────────────────────────────
+void TerminalUI::renderSigintDeauths() {
+    werase(winInfo_);
+    werase(winMenu_);
+
+    int infoRows = getmaxy(winInfo_);
+    int infoCols = getmaxx(winInfo_);
+
+    wattron(winInfo_, A_REVERSE | COLOR_PAIR(4));
+    char hdr[80];
+    snprintf(hdr, sizeof(hdr), " DEAUTH LOG [%d events]  [A]=Refresh  [B]=Back",
+             (int)sigintDeauths_.size());
+    mvwprintw(winInfo_, 0, 0, "%-*.*s", infoCols, infoCols, hdr);
+    wattroff(winInfo_, A_REVERSE | COLOR_PAIR(4));
+
+    if (sigintDeauths_.empty()) {
+        mvwprintw(winInfo_, 2, 2, "No deauth / disconnect events in wpa_supplicant log.");
+        mvwprintw(winInfo_, 3, 2, "Events appear here when deauth attacks are detected.");
+        return;
+    }
+
+    int listRows = infoRows - 1;
+    int total    = (int)sigintDeauths_.size();
+    if (sigintDeauthSel_ < sigintDeauthScroll_) sigintDeauthScroll_ = sigintDeauthSel_;
+    if (sigintDeauthSel_ >= sigintDeauthScroll_ + listRows)
+        sigintDeauthScroll_ = sigintDeauthSel_ - listRows + 1;
+
+    for (int i = 0; i < listRows; i++) {
+        int idx = sigintDeauthScroll_ + i;
+        if (idx >= total) break;
+        bool sel = (idx == sigintDeauthSel_);
+        if (sel) wattron(winInfo_, A_REVERSE | COLOR_PAIR(3));
+        // Truncate to window width
+        char truncated[128];
+        snprintf(truncated, sizeof(truncated), "%-*.*s",
+                 infoCols - 2, infoCols - 2, sigintDeauths_[idx].line);
+        mvwprintw(winInfo_, 1 + i, 1, "%s", truncated);
+        if (sel) wattroff(winInfo_, A_REVERSE | COLOR_PAIR(3));
+    }
+    if (total > listRows)
+        mvwprintw(winInfo_, infoRows - 1, infoCols - 12, "[%d/%d]",
+                  sigintDeauthSel_ + 1, total);
+}
+
+void TerminalUI::sigintDeauthsButton(const ButtonEvent &ev) {
+    int total = (int)sigintDeauths_.size();
+    switch (ev.button) {
+        case GpiButton::UP:   if (sigintDeauthSel_ > 0) sigintDeauthSel_--; break;
+        case GpiButton::DOWN: if (sigintDeauthSel_ < total - 1) sigintDeauthSel_++; break;
+        case GpiButton::A:
+        case GpiButton::SELECT:
+            sigintLoadDeauths();
+            sigintDeauthSel_ = sigintDeauthScroll_ = 0;
+            break;
+        case GpiButton::B:
+            screen_ = pentestMode_ ? Screen::BATTLE : Screen::MENU;
+            break;
+        default: break;
+    }
+}
+
+// ── Render: Captures ─────────────────────────────────────────────────────────
+void TerminalUI::renderSigintCaptures() {
+    werase(winInfo_);
+    werase(winMenu_);
+
+    int infoRows = getmaxy(winInfo_);
+    int infoCols = getmaxx(winInfo_);
+
+    wattron(winInfo_, A_REVERSE | COLOR_PAIR(4));
+    char hdr[80];
+    snprintf(hdr, sizeof(hdr), " CAPTURES  [%s]", sigintCaptureDir());
+    mvwprintw(winInfo_, 0, 0, "%-*.*s", infoCols, infoCols, hdr);
+    wattroff(winInfo_, A_REVERSE | COLOR_PAIR(4));
+
+    if (sigintCaps_.empty()) {
+        mvwprintw(winInfo_, 2, 2, "No captures yet.");
+        mvwprintw(winInfo_, 3, 2, "Go to AP Scanner and press [A] on a target.");
+        mvwprintw(winInfo_, 4, 2, "Offline crack with:");
+        mvwprintw(winInfo_, 5, 2, "  hcxpcapngtool -o out.22000 cap_SSID.pcap");
+        mvwprintw(winInfo_, 6, 2, "  hashcat -m 22000 out.22000 wordlist.txt");
+        mvwprintw(winMenu_, 1, 1, "[A]=Refresh  [B]=Back");
+        return;
+    }
+
+    wattron(winInfo_, A_BOLD);
+    mvwprintw(winInfo_, 1, 1, "%-50s  %s", "FILE", "SIZE");
+    wattroff(winInfo_, A_BOLD);
+    mvwhline(winInfo_, 2, 1, ACS_HLINE, infoCols - 2);
+
+    int listRows = infoRows - 3;
+    int total    = (int)sigintCaps_.size();
+    if (sigintCapSel_ < sigintCapScroll_) sigintCapScroll_ = sigintCapSel_;
+    if (sigintCapSel_ >= sigintCapScroll_ + listRows)
+        sigintCapScroll_ = sigintCapSel_ - listRows + 1;
+
+    for (int i = 0; i < listRows; i++) {
+        int idx = sigintCapScroll_ + i;
+        if (idx >= total) break;
+        const SigintCap &c = sigintCaps_[idx];
+        bool sel = (idx == sigintCapSel_);
+        if (sel) wattron(winInfo_, A_REVERSE | COLOR_PAIR(3));
+        char sizeStr[16];
+        if (c.sizeBytes >= 1024 * 1024)
+            snprintf(sizeStr, sizeof(sizeStr), "%.1f MB", c.sizeBytes / 1048576.0);
+        else if (c.sizeBytes >= 1024)
+            snprintf(sizeStr, sizeof(sizeStr), "%.1f KB", c.sizeBytes / 1024.0);
+        else
+            snprintf(sizeStr, sizeof(sizeStr), "%ld B", c.sizeBytes);
+        mvwprintw(winInfo_, 3 + i, 1, "%-50.50s  %s", c.name, sizeStr);
+        if (sel) wattroff(winInfo_, A_REVERSE | COLOR_PAIR(3));
+    }
+    if (total > listRows)
+        mvwprintw(winInfo_, infoRows - 1, infoCols - 12, "[%d/%d]",
+                  sigintCapSel_ + 1, total);
+
+    mvwprintw(winMenu_, 1, 1, "[A]=Refresh  [B]=Back");
+}
+
+void TerminalUI::sigintCapturesButton(const ButtonEvent &ev) {
+    int total = (int)sigintCaps_.size();
+    switch (ev.button) {
+        case GpiButton::UP:   if (sigintCapSel_ > 0) sigintCapSel_--; break;
+        case GpiButton::DOWN: if (sigintCapSel_ < total - 1) sigintCapSel_++; break;
+        case GpiButton::A:
+        case GpiButton::SELECT:
+            sigintLoadCapFiles();
+            sigintCapSel_ = sigintCapScroll_ = 0;
+            break;
+        case GpiButton::B:
+            screen_ = pentestMode_ ? Screen::BATTLE : Screen::MENU;
+            break;
+        default: break;
+    }
+}
+
+// ── End SIGINT tools ──────────────────────────────────────────────────────────
 
 // Choose the next WiFi target.  Returns true with pentestSsid_/pentestVuln_ set,
 // or false when a working scanner found NO vulnerable network in range (→ the

@@ -28,6 +28,10 @@ enum class Screen {
     HELP,           // help overlay
     CONFIRM_QUIT,   // A=quit, B=cancel
     CHALLENGE,      // incoming PvP challenge: accept/decline
+    SIGINT_SCANNER, // scrollable list of all nearby APs; A=start EAPOL capture
+    SIGINT_PROBES,  // nearby devices probing for SSIDs (tcpdump probe-req)
+    SIGINT_DEAUTHS, // deauth / disconnect event log
+    SIGINT_CAPTURES,// list of saved .pcap handshake files
 };
 
 // ── Menu layout (3 tabs) ──────────────────────────────────────────────────────
@@ -51,12 +55,17 @@ static constexpr const char *LOCAL_DESC[]  = {
 };
 static constexpr int LOCAL_COUNT = 3;
 
-static constexpr const char *SYSTEM_ITEMS[] = { "Help", "Quit" };
+static constexpr const char *SYSTEM_ITEMS[] = {
+    "Help", "AP Scanner", "Probe Sniffer", "Deauth Log", "Captures", "Quit" };
 static constexpr const char *SYSTEM_DESC[]  = {
     "Show button controls",
+    "All nearby APs - [A]=start EAPOL capture",
+    "Devices probing for SSIDs (5s scan)",
+    "Deauth / disconnect events from wpa_supplicant",
+    "Browse saved .pcap handshake files",
     "Return to RetroPie",
 };
-static constexpr int SYSTEM_COUNT = 2;
+static constexpr int SYSTEM_COUNT = 6;
 
 // ── TerminalUI ────────────────────────────────────────────────────────────────
 
@@ -385,6 +394,55 @@ private:
     // Start the Indigo Plateau gauntlet at Elite Four member `e4Idx` (0..4).
     void startE4Battle(uint8_t e4Idx);
     void loadLordSave();
+
+    // ── SIGINT Scanner / Probes / Deauths / Captures ─────────────────────────
+    struct SigintNet {
+        char bssid[18];
+        int  rssi;
+        char flags[64];
+        char ssid[40];
+        uint8_t tier;   // 0=secure 1=common 2=uncommon 3=rare (matches VulnTier)
+    };
+    struct SigintProbe {
+        char mac[18];   // source MAC of the probing device
+        char ssid[40];  // target SSID ("" = broadcast/any)
+        int  count;
+    };
+    struct SigintDeauth {
+        char line[120]; // raw wpa_supplicant log line (truncated)
+    };
+    struct SigintCap {
+        char name[80];
+        long sizeBytes;
+    };
+    std::vector<SigintNet>    sigintNets_;
+    std::vector<SigintProbe>  sigintProbes_;
+    std::vector<SigintDeauth> sigintDeauths_;
+    std::vector<SigintCap>    sigintCaps_;
+    int     sigintNetSel_     = 0;
+    int     sigintProbeSel_   = 0;
+    int     sigintDeauthSel_  = 0;
+    int     sigintCapSel_     = 0;
+    int     sigintNetScroll_  = 0;
+    int     sigintProbeScroll_= 0;
+    int     sigintDeauthScroll_=0;
+    int     sigintCapScroll_  = 0;
+    bool    sigintCapActive_  = false;   // tcpdump running in background?
+    char    sigintCapSSID_[40]= {};      // SSID being captured right now
+    static const char *sigintCaptureDir();
+    void sigintLoadAllNets();
+    void sigintLoadProbes();
+    void sigintLoadDeauths();
+    void sigintLoadCapFiles();
+    void sigintStartCapture(const SigintNet &net);
+    void renderSigintScanner();
+    void renderSigintProbes();
+    void renderSigintDeauths();
+    void renderSigintCaptures();
+    void sigintScannerButton(const ButtonEvent &ev);
+    void sigintProbesButton(const ButtonEvent &ev);
+    void sigintDeauthsButton(const ButtonEvent &ev);
+    void sigintCapturesButton(const ButtonEvent &ev);
 
     // ── IPC ──────────────────────────────────────────────────────────────────
     void onIpcMessage(const std::string &msg);
