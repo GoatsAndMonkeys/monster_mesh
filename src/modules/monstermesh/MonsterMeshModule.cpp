@@ -4886,7 +4886,6 @@ void MonsterMeshModule::buildLvBattleScreen()
     // moves (cells 4-5 blank); WAIT_SWITCH shows party of up to 6.
     // Hidden when not needed so the log panel can expand to fill the space.
     lv_obj_t *footer = mkPanel(scr, 2, 196, 316, 42);
-    lv_obj_add_flag(footer, LV_OBJ_FLAG_HIDDEN);
     lvFooterPanel_ = footer;
     for (int i = 0; i < 6; ++i) {
         int col = i % 2;
@@ -5097,7 +5096,7 @@ void MonsterMeshModule::updateLvBattleScreen()
     bool footerNeeded = (curPhase == MonsterMeshTextBattle::Phase::WAIT_ACTION ||
                          curPhase == MonsterMeshTextBattle::Phase::WAIT_SWITCH);
     char logBuf[512];
-    textBattle_.getRecentLog(logBuf, sizeof(logBuf), footerNeeded ? 3 : 5);
+    textBattle_.getRecentLog(logBuf, sizeof(logBuf), 3);
     if (logBuf[0] == '\0') setLabel(lvLogLabel_, "Battle begins!");
     else {
         // Prepend ">" to each line so it matches the Gen-1 mockup.
@@ -5125,20 +5124,6 @@ void MonsterMeshModule::updateLvBattleScreen()
         setLabel(lvLogLabel_, framed);
     }
 
-    // ── Dynamic log expansion: show more text when footer not needed ────
-    // Footer only needed when player must choose a move or switch. All other
-    // phases (animations, waiting, result) expand the log to fill that space.
-    if (lvFooterPanel_) {
-        if (footerNeeded) {
-            lv_obj_clear_flag((lv_obj_t *)lvFooterPanel_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_size((lv_obj_t *)lvLogPanel_,  316, 44);
-            lv_obj_set_size((lv_obj_t *)lvLogLabel_,  308, 38);
-        } else {
-            lv_obj_add_flag((lv_obj_t *)lvFooterPanel_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_size((lv_obj_t *)lvLogPanel_,  316, 90);
-            lv_obj_set_size((lv_obj_t *)lvLogLabel_,  308, 84);
-        }
-    }
 
     // ── Menu footer dispatch: moves (WAIT_ACTION) or party (WAIT_SWITCH).
     auto highlightRow = [&](int i, bool on) {
