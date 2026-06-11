@@ -3987,6 +3987,11 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
     if (monsterMeshModule && monsterMeshModule->needsBattleScreen_) {
         monsterMeshModule->needsBattleScreen_ = false;
         monsterMeshModule->showLvBattleScreen();
+        // P2.39e: populate immediately on the LVGL thread rather than
+        // waiting 250ms for the refreshCb timer first fire.
+        // updateLvBattleScreen() reads party data from textBattle_ directly;
+        // dirty_ is already true from startLocal(), so this is safe.
+        monsterMeshModule->updateLvBattleScreen();
         monsterMeshModule->battleScreenPending_ = false;
     }
 
@@ -4919,7 +4924,13 @@ void MonsterMeshModule::buildLvBattleScreen()
             Serial.printf("[MMB] refreshCb: DeviceUI stole screen — re-asserting battle screen\n");
             lv_screen_load((lv_obj_t *)self->lvBattleScreen_);
         }
+        if (self->lvBattleActive_) {
+            Serial.printf("[MMB] refreshCb: dirty=%d isActive=%d\n",
+                          (int)self->textBattle_.dirty(),
+                          (int)self->textBattle_.isActive());
+        }
         if (self->textBattle_.dirty() && self->lvBattleActive_) {
+            Serial.printf("[MMB] refreshCb: calling updateLvBattleScreen\n");
             self->updateLvBattleScreen();
             self->textBattle_.clearDirty();
         }
@@ -5005,7 +5016,10 @@ static void renderGen1BackSprite(lv_obj_t *canvas, uint8_t species)
 
 void MonsterMeshModule::updateLvBattleScreen()
 {
+    Serial.printf("[MMB] updateLvBattleScreen: screen=%p active=%d\n",
+                  lvBattleScreen_, (int)textBattle_.isActive());
     if (!lvBattleScreen_ || !textBattle_.isActive()) return;
+    Serial.printf("[MMB] updateLvBattleScreen: proceeding with render\n");
     // P2.31 fix: spiLock here starved the LVGL render task during the
     // 20+ widget mutations and froze input. Caller is responsible for
     // calling us from a safe context (we now only call from
