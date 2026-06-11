@@ -357,7 +357,8 @@ private:
     uint64_t pentestScanMs_        = 0;      // last standby rescan (throttle)
     int      pentestNetsSeen_      = 0;      // total APs in the last scan (status)
     static constexpr uint64_t PENTEST_STANDBY_SCAN_MS = 6000;  // rescan cadence
-    void pentestScanNetworks();           // refresh pentestNets_ via wpa_cli
+    void pentestScanNetworks();           // refresh pentestNets_ via wpa_cli + BLE
+    void pentestBleScan();                // BLE supplement: flood + Apple MFR data
     bool pentestPickTarget();             // choose SSID/vuln; false => none in range
     void pentestEnterStandby();           // drop to the waiting/status screen
     void pentestLoadProgress();       // read level/xp/dex from disk (default L5)

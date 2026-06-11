@@ -2083,16 +2083,20 @@ static void pikaMovesForLevel(uint8_t level, uint8_t out[4]) {
 }
 }  // namespace
 
-// Map a wpa_cli "flags" field to a real-world WiFi weakness.  Only WPS, WEP and
-// open networks are considered exploitable enough to "fight" — a plain WPA2/WPA3
-// network with no WPS is treated as secure (no battle).  Returns false (secure)
-// or true with `out` set to a flavour description of the weakness.
+// Map a wpa_cli "flags" field to a real-world WiFi weakness.  Returns false
+// (secure) or true with `out` set to a flavour description of the weakness.
+// Priority order matches the firmware's BeaconClassifier tier table:
+//   WEP  = RARE (barely seen in the wild anymore)
+//   WPS  = UNCOMMON (still shipped on many home routers)
+//   TKIP = COMMON  (WPA1/WPA2-TKIP, RC4-based)
+//   Open = COMMON  (no encryption at all — HaleHound addition)
 static bool pentestVulnForFlags(const char *flags, std::string &out) {
     std::string f = flags ? flags : "";
     auto has = [&](const char *s) { return f.find(s) != std::string::npos; };
-    if (has("WPS")) { out = "WPS PIN attack (Pixie Dust)";   return true; }
-    if (has("WEP")) { out = "WEP IV collision / key reuse";  return true; }
-    if (!has("WPA") && !has("RSN")) {           // no WPA/WPA2/WPA3 => open
+    if (has("WEP"))  { out = "WEP IV collision / key reuse";     return true; }
+    if (has("WPS"))  { out = "WPS PIN attack (Pixie Dust)";      return true; }
+    if (has("TKIP")) { out = "WPA-TKIP (BEAST/RC4 brute)";       return true; }
+    if (!has("WPA") && !has("RSN")) {           // no WPA/WPA2/WPA3 => open AP
         out = "Open network - cleartext sniffing";
         return true;
     }
@@ -2103,6 +2107,8 @@ static bool pentestVulnForFlags(const char *flags, std::string &out) {
 // networks currently in range that haven't been cracked yet this session.
 // Sets pentestScanAvailable_ false when no scanner is reachable (off-device or
 // no WiFi) so the caller can fall back to the fictional demo list.
+// HaleHound additions vs original: TKIP networks, hidden SSIDs (SSID IE len=0
+// with encryption present), and BLE advertisements via pentestBleScan().
 void TerminalUI::pentestScanNetworks() {
     pentestNets_.clear();
     pentestNetsSeen_      = 0;
@@ -2114,28 +2120,75 @@ void TerminalUI::pentestScanNetworks() {
     // SSH).  wpa_supplicant scans on its own (frequently when unassociated), so
     // cached results stay fresh enough for the game without disrupting WiFi.
     FILE *f = popen("sudo -n wpa_cli -i wlan0 scan_results 2>/dev/null", "r");
-    if (!f) return;
+    if (!f) { pentestBleScan(); return; }
     char buf[256];
     bool header = true;
     while (fgets(buf, sizeof(buf), f)) {
         if (header) { header = false; pentestScanAvailable_ = true; continue; }
         char *save  = nullptr;
-        (void)strtok_r(buf,     "\t", &save);            // bssid
-        (void)strtok_r(nullptr, "\t", &save);            // frequency
-        (void)strtok_r(nullptr, "\t", &save);            // signal
-        char *flags = strtok_r(nullptr, "\t", &save);    // flags
-        char *ssid  = strtok_r(nullptr, "\t\r\n", &save);// ssid (may be empty/hidden)
-        if (!ssid || !*ssid) continue;
+        char *bssid = strtok_r(buf,     "\t", &save);            // bssid (kept for hidden SSIDs)
+        (void)strtok_r(nullptr, "\t", &save);                    // frequency
+        (void)strtok_r(nullptr, "\t", &save);                    // signal
+        char *flags = strtok_r(nullptr, "\t", &save);            // flags
+        char *ssid  = strtok_r(nullptr, "\t\r\n", &save);        // ssid (may be empty/hidden)
         pentestNetsSeen_++;
         std::string vuln;
         if (!pentestVulnForFlags(flags ? flags : "", vuln)) continue;  // secure — skip
+        // Build display name: real SSID or "(hidden-XX:XX:XX)" from the BSSID
+        // tail (last 8 chars) so hidden APs are distinguishable in the log.
+        // Skip open hidden APs — no SSID + no encryption is just noise.
+        char displaySsid[40];
+        if (!ssid || !*ssid) {
+            if (vuln.find("Open") != std::string::npos) continue;
+            const char *b = bssid ? bssid : "";
+            int blen = (int)strlen(b);
+            snprintf(displaySsid, sizeof(displaySsid), "(hidden-%s)",
+                     blen >= 8 ? b + blen - 8 : "??:??:??");
+        } else {
+            snprintf(displaySsid, sizeof(displaySsid), "%.39s", ssid);
+        }
         bool skip = false;
-        for (auto &d : pentestDoneSsids_) if (d == ssid) { skip = true; break; }
-        for (auto &n : pentestNets_)      if (n.ssid == ssid) { skip = true; break; }
+        for (auto &d : pentestDoneSsids_) if (d == displaySsid) { skip = true; break; }
+        for (auto &n : pentestNets_)      if (n.ssid == displaySsid) { skip = true; break; }
         if (skip) continue;
-        pentestNets_.push_back({ ssid, vuln });
+        pentestNets_.push_back({ displaySsid, vuln });
     }
     pclose(f);
+    // Supplement WiFi results with BLE advertisement detections.  Non-fatal
+    // if Bluetooth is absent or the sudoers entry for hcitool isn't set up.
+    pentestBleScan();
+#endif
+}
+
+// BLE advertisement scan using hcidump (BlueZ).  Detects:
+//   - Flood: >100 raw HCI adv-report lines in 3 seconds (Flipper/spammer)
+//   - Apple: manufacturer-specific data with company ID 0x004C (little-endian
+//     bytes "4c 00" in the hcidump hex dump)
+// Appends any detections directly to pentestNets_.  Requires a sudoers
+// NOPASSWD entry for hcidump (same pattern as the wpa_cli entries).
+void TerminalUI::pentestBleScan() {
+#ifndef __APPLE__
+    static constexpr int BLE_FLOOD_THRESH  = 100; // adv-report lines in 3s
+    static constexpr int APPLE_PROX_THRESH =   5; // hits to flag UNCOMMON-equiv
+    FILE *f = popen("sudo -n timeout 3 hcidump -i hci0 -X 2>/dev/null", "r");
+    if (!f) return;
+    int advLines = 0, appleHits = 0;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '>') advLines++;            // each HCI event starts with ">"
+        // Apple company ID 0x004C in little-endian MFR data = "4c 00"
+        if (strstr(line, "4c 00") || strstr(line, "4C 00")) appleHits++;
+    }
+    pclose(f);
+    if (advLines >= BLE_FLOOD_THRESH)
+        pentestNets_.push_back({ "BLE_Flood",
+            "BLE advertisement flood (Flipper/spammer)" });
+    if (appleHits >= APPLE_PROX_THRESH)
+        pentestNets_.push_back({ "BLE_AppleProx",
+            "Apple BLE proximity spam (AirDrop/Handoff)" });
+    else if (appleHits >= 1)
+        pentestNets_.push_back({ "BLE_AppleiBeacon",
+            "Apple BLE adv detected (iBeacon/device nearby)" });
 #endif
 }
 
@@ -2157,10 +2210,12 @@ bool TerminalUI::pentestPickTarget() {
     }
 
     // ── No scanner: fictional demo list (no-repeat via a bitmask) ──
+    // Keep to ≤16 entries so pentestUsedSsid_ (uint16_t bitmask) doesn't overflow.
     static const char *SSIDS[] = {
-        "linksys",   "NETGEAR47",  "xfinitywifi",  "ATT-WiFi-2G",
-        "TP-Link_5G","HOME-A1B2",  "dlink-guest",  "CenturyLink",
-        "Pixel_5599","FBI_Van_3",  "Starbucks",    "iPhone",
+        "linksys",       "NETGEAR47",      "xfinitywifi",    "ATT-WiFi-2G",
+        "TP-Link_5G",    "HOME-A1B2",      "dlink-guest",    "CenturyLink",
+        "Pixel_5599",    "FBI_Van_3",      "Starbucks",      "iPhone",
+        "(hidden-ac:3f)","BLE_Flood_01",   "BLE_AppleProx",
     };
     static const char *VULNS[] = {
         "WPS PIN brute (CVE-2011-5053)",
@@ -2169,6 +2224,11 @@ bool TerminalUI::pentestPickTarget() {
         "Default admin creds (admin:admin)",
         "WPA2 PMKID hashcat -m 16800",
         "Evil-twin deauth (802.11w off)",
+        "WPA-TKIP (BEAST/RC4 brute)",
+        "Hidden SSID (probe-request sniff)",
+        "Deauth flood - 802.11 mgmt attack",
+        "BLE advertisement flood (Flipper/spammer)",
+        "Apple BLE proximity spam (SourApple/Handoff)",
     };
     const int NUM_SSID = (int)(sizeof(SSIDS)/sizeof(SSIDS[0]));
     if (pentestUsedSsid_ == (uint16_t)((1u << NUM_SSID) - 1))
