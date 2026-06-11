@@ -866,14 +866,14 @@ void MonsterMeshTerminal::executeLine(const char *line)
         while (*args == ' ') ++args;
         if (*args) {
             // fight <shortname> → local CPU fight (name is ignored, use mmb for network)
-            if (!partyLoaded_) { println("no party loaded — load a SAV first"); return; }
+            if (!partyLoaded_ || party_.count < 6) { println("need a full party of 6 to fight — load a SAV first"); return; }
             if (!fightFn_) { println("fight not wired"); return; }
             println("starting local battle vs CPU rival...");
             fightFn_(fightCtx_);
             return;
         }
-        if (!partyLoaded_) {
-            println("no party loaded — load a SAV first");
+        if (!partyLoaded_ || party_.count < 6) {
+            println("need a full party of 6 to fight — load a SAV first");
             return;
         }
         if (!fightFn_) {

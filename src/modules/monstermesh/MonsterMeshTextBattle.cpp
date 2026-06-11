@@ -1016,6 +1016,10 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
         }
         if (mode_ == Mode::NETWORKED) {
             sendForfeit(); engine_.forfeit(0, engineLogCb, this); phase_ = Phase::FINISHED;
+        } else if (role_ == Role::LEGACY) {
+            // Local CPU fight: flee always succeeds. No RNG formula needed.
+            appendLog("Got away safely!");
+            phase_ = Phase::FINISHED;
         } else {
             ++fleeAttempts_;
             const auto &player = engine_.party(0).mons[engine_.party(0).active];
@@ -1032,6 +1036,7 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
         // F is right next to WASD, easy to hit by accident — bounce into a
         // confirm phase instead of fleeing immediately. K confirms, L/F
         // cancels back to the previous menu.
+        appendLog("Flee? K=yes  any=no");
         phase_ = Phase::WAIT_FLEE;
         dirty_ = true;
         return;

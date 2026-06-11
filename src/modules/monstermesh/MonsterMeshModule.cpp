@@ -3241,9 +3241,9 @@ int32_t MonsterMeshModule::runOnce()
                                 textBattle_.clientNeedsFullState());
             bool staleNetworked = (textBattle_.role() != MonsterMeshTextBattle::Role::LEGACY &&
                                    (millis() - textBattle_.lastRecvMs()) > 90000u);
-            // User explicitly typed `fight`: always evict any active battle
-            // (networked OR CPU) so a fresh local fight can start immediately.
-            if (staleServer || staleClient || staleNetworked || true) {
+            // Evict stale NETWORKED battles so a fresh local CPU fight can start.
+            // Do NOT evict LEGACY (CPU) battles — exit() on an active engine crashes.
+            if (staleServer || staleClient || staleNetworked) {
                 Serial.printf("[MMB] fight: force-exiting stale battle "
                               "(staleServer=%d staleClient=%d staleNetworked=%d)\n",
                               (int)staleServer, (int)staleClient, (int)staleNetworked);
@@ -3257,9 +3257,10 @@ int32_t MonsterMeshModule::runOnce()
     // LVGL flush the same way the emulator path does, clear the screen, and
     // hand the staged party + a CPU mirror-match to startLocal().
     if (textBattleStartReq_ && !textBattleActive_ && setupDone_ &&
-        !emulatorActive_ && !browserActive_ && terminal_.hasParty()) {
+        !emulatorActive_ && !browserActive_ && terminal_.getParty().count == 6) {
         textBattleStartReq_ = false;
         pendingBattleEndCleanup_ = false;  // cancel any stale cleanup so it doesn't hide this new fight
+        hideLvBattleScreen();              // reset lvBattleActive_ so takeover fires next tick
         // P2.28.5: vestigial flush_cb park + lgfx fillScreen REMOVED.
         // The LVGL-native battle screen (loaded by showLvBattleScreen
         // from the main takeover block) is what draws now — leaving
@@ -3375,11 +3376,10 @@ int32_t MonsterMeshModule::runOnce()
             snprintf(rivalTag, sizeof(rivalTag), "%.4s", n.shortName);
             LOG_INFO("[MonsterMesh] text battle: rival = %s (%u pokemon)\n",
                      rivalTag, (unsigned)party);
-        } else if (e4MemberIdx_ >= 5 && exploreRouteIdx_ >= 8 && gymBattleIdx_ >= 8) {
-            // No neighbors AND no gym requested — fall back to a "wild
-            // trainer" picked at random from the LoC roster. Better than a
-            // mirror match: gives a real opponent with their own party so
-            // the user can practice solo.
+        }
+        // Fallback: no usable neighbor (none present, or picked one had empty
+        // party). Pick a random gym trainer so the user always gets a real foe.
+        if (e4MemberIdx_ >= 5 && exploreRouteIdx_ >= 8 && gymBattleIdx_ >= 8 && cpuParty.count == 0) {
             uint8_t gIdx = (uint8_t)(esp_random() % 8);
             uint8_t tIdx = (uint8_t)(esp_random() % 5);
             const LordGym *g = lordGym(gIdx);
@@ -4884,7 +4884,10 @@ void MonsterMeshModule::buildLvBattleScreen()
 
     // ── Menu footer (6 cells, 2 cols × 3 rows). WAIT_ACTION shows 4
     // moves (cells 4-5 blank); WAIT_SWITCH shows party of up to 6.
+    // Hidden when not needed so the log panel can expand to fill the space.
     lv_obj_t *footer = mkPanel(scr, 2, 196, 316, 42);
+    lv_obj_add_flag(footer, LV_OBJ_FLAG_HIDDEN);
+    lvFooterPanel_ = footer;
     for (int i = 0; i < 6; ++i) {
         int col = i % 2;
         int row = i / 2;
@@ -5090,12 +5093,15 @@ void MonsterMeshModule::updateLvBattleScreen()
 
     // ── Log OR move menu (mode switches based on phase) ────
     // For now always show log; move-menu mode comes when we wire input.
-    char logBuf[256];
-    textBattle_.getRecentLog(logBuf, sizeof(logBuf), 3);
+    auto curPhase = textBattle_.currentPhase();
+    bool footerNeeded = (curPhase == MonsterMeshTextBattle::Phase::WAIT_ACTION ||
+                         curPhase == MonsterMeshTextBattle::Phase::WAIT_SWITCH);
+    char logBuf[512];
+    textBattle_.getRecentLog(logBuf, sizeof(logBuf), footerNeeded ? 3 : 5);
     if (logBuf[0] == '\0') setLabel(lvLogLabel_, "Battle begins!");
     else {
         // Prepend ">" to each line so it matches the Gen-1 mockup.
-        char framed[300] = {};
+        char framed[560] = {};
         size_t pos = 0;
         framed[pos++] = '>'; framed[pos++] = ' ';
         for (size_t i = 0; logBuf[i] && pos < sizeof(framed) - 3; ++i) {
@@ -5108,16 +5114,30 @@ void MonsterMeshModule::updateLvBattleScreen()
         // Append "Waiting…" hint when phase says we already submitted and
         // are blocked on the peer — without this the user can't tell that
         // their K-press registered.
-        auto p = textBattle_.currentPhase();
-        if (p == MonsterMeshTextBattle::Phase::WAIT_REMOTE ||
-            p == MonsterMeshTextBattle::Phase::ANIMATING ||
-            p == MonsterMeshTextBattle::Phase::WAIT_PEER_READY) {
+        if (curPhase == MonsterMeshTextBattle::Phase::WAIT_REMOTE ||
+            curPhase == MonsterMeshTextBattle::Phase::ANIMATING ||
+            curPhase == MonsterMeshTextBattle::Phase::WAIT_PEER_READY) {
             const char *hint = "\n> Waiting for opponent...";
             for (const char *s = hint; *s && pos < sizeof(framed) - 1; ++s) {
                 framed[pos++] = *s;
             }
         }
         setLabel(lvLogLabel_, framed);
+    }
+
+    // ── Dynamic log expansion: show more text when footer not needed ────
+    // Footer only needed when player must choose a move or switch. All other
+    // phases (animations, waiting, result) expand the log to fill that space.
+    if (lvFooterPanel_) {
+        if (footerNeeded) {
+            lv_obj_clear_flag((lv_obj_t *)lvFooterPanel_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_size((lv_obj_t *)lvLogPanel_,  316, 44);
+            lv_obj_set_size((lv_obj_t *)lvLogLabel_,  308, 38);
+        } else {
+            lv_obj_add_flag((lv_obj_t *)lvFooterPanel_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_size((lv_obj_t *)lvLogPanel_,  316, 90);
+            lv_obj_set_size((lv_obj_t *)lvLogLabel_,  308, 84);
+        }
     }
 
     // ── Menu footer dispatch: moves (WAIT_ACTION) or party (WAIT_SWITCH).
@@ -5128,8 +5148,7 @@ void MonsterMeshModule::updateLvBattleScreen()
         lv_obj_set_style_bg_color((lv_obj_t *)lvPartyRow_[i],
             lv_color_make(0xFF, 0xF0, 0x80), LV_PART_MAIN);
     };
-    auto phase = textBattle_.currentPhase();
-    bool switchMode = (phase == MonsterMeshTextBattle::Phase::WAIT_SWITCH);
+    bool switchMode = (curPhase == MonsterMeshTextBattle::Phase::WAIT_SWITCH);
     if (switchMode) {
         // Party of up to 6 — pick with K, cancel back with L (handled in
         // handleKey). Each row: "> NICKNAME L99  hp/max" (or "FAINTED").
@@ -5137,12 +5156,11 @@ void MonsterMeshModule::updateLvBattleScreen()
         for (int i = 0; i < 6; ++i) {
             if (i < me.count) {
                 const auto &m = me.mons[i];
-                char nick[12] = {};
-                gen1NameToAscii((const uint8_t *)m.nickname,
-                                sizeof(m.nickname), nick, sizeof(nick));
+                // m.nickname is already ASCII — initBattlePokeFromSave converts
+                // Gen1 charset bytes at engine load time. No second conversion.
                 snprintf(buf, sizeof(buf), "%c %.10s",
                          (cursor == i) ? '>' : ' ',
-                         nick[0] ? nick : "?");
+                         m.nickname[0] ? m.nickname : "?");
                 setLabel(lvPartyName_[i], buf);
                 if (m.hp == 0) {
                     snprintf(buf, sizeof(buf), "FNT");
@@ -5175,11 +5193,13 @@ void MonsterMeshModule::updateLvBattleScreen()
             setLabel(lvPartyLevel_[i], buf);
             highlightRow(i, cursor == i);
         }
-        for (int i = 4; i < 6; ++i) {
-            setLabel(lvPartyName_[i],  "");
-            setLabel(lvPartyLevel_[i], "");
-            highlightRow(i, false);
-        }
+        // Row 4: flee hint. Row 5: blank.
+        setLabel(lvPartyName_[4],  "F=flee");
+        setLabel(lvPartyLevel_[4], "");
+        highlightRow(4, false);
+        setLabel(lvPartyName_[5],  "");
+        setLabel(lvPartyLevel_[5], "");
+        highlightRow(5, false);
     } else {
         for (int i = 0; i < 6; ++i) {
             setLabel(lvPartyName_[i],  "");

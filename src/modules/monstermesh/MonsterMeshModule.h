@@ -616,6 +616,7 @@ public:
     void *lvPlayerHpText_     = nullptr;
     void *lvLogPanel_         = nullptr;
     void *lvLogLabel_         = nullptr;
+    void *lvFooterPanel_      = nullptr;
     void *lvPartyRow_[6]      = {};
     void *lvPartyName_[6]     = {};
     void *lvPartyLevel_[6]    = {};
