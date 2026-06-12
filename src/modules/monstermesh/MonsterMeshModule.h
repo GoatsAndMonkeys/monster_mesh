@@ -350,7 +350,7 @@ public:
     // directly — those callbacks lv_label_create() into the terminal output,
     // which is not safe from the LoRa thread. tryConsumeStagedParty drains
     // it on the LVGL thread.
-    enum class StagedEndKind : uint8_t { NONE, GYM, EXPLORE, E4 };
+    enum class StagedEndKind : uint8_t { NONE, GYM, EXPLORE, E4, FIGHT };
     StagedEndKind stagedEndKind_ = StagedEndKind::NONE;
     uint8_t       stagedEndA_     = 0;   // gymIdx / routeIdx / memberIdx
     uint8_t       stagedEndB_     = 0;   // trainerIdx / encounter level

@@ -406,7 +406,7 @@ bool lordBuildGymParty(uint8_t gymIdx, uint8_t trainerIdx, Gen1Party &out)
 
     // Write the trainer's defined Pokemon.
     for (uint8_t i = 0; i < n; ++i)
-        writeMonToParty(out, i, tr.party[i], "FOE");
+        writeMonToParty(out, i, tr.party[i], tr.name);
 
     // Pad remaining slots to 6 with type-appropriate fillers.
     const GymFiller *fill = GYM_FILL[gymIdx];
@@ -416,7 +416,7 @@ bool lordBuildGymParty(uint8_t gymIdx, uint8_t trainerIdx, Gen1Party &out)
         filler.species = f.species;
         filler.level   = avgLevel;
         memcpy(filler.moves, f.moves, 4);
-        writeMonToParty(out, i, filler, "FOE");
+        writeMonToParty(out, i, filler, tr.name);
     }
     out.count = 6;
     return true;

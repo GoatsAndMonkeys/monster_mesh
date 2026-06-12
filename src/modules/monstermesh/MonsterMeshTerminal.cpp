@@ -540,7 +540,7 @@ void MonsterMeshTerminal::executeLine(const char *line)
         println("  party        - your party");
         println("  hb           - ping nearby peers");
         println("  daycare (dc) - daycare status");
-        println("  gym          - LoC gym list");
+        println("  gym          - local gym list");
         println("  mmg          - mesh gym list");
         println("  mmb          - peers online");
         println("  fight        - local battle");

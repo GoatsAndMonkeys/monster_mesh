@@ -778,7 +778,10 @@ void MonsterMeshTextBattle::resolveTurn()
 
     if (engine_.result() != Gen1BattleEngine::Result::ONGOING) {
         switch (engine_.result()) {
-            case Gen1BattleEngine::Result::P1_WIN: appendLog("You won!");      break;
+            case Gen1BattleEngine::Result::P1_WIN:
+                appendLog("You won!");
+                playerWon_ = true;
+                break;
             case Gen1BattleEngine::Result::P2_WIN: appendLog("You blacked out…"); break;
             case Gen1BattleEngine::Result::DRAW:   appendLog("It's a draw.");  break;
             default: break;
@@ -2382,7 +2385,10 @@ void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len
         if (result != TB_RESULT_ONGOING) {
             finished = true;
             switch (result) {
-                case TB_RESULT_YOU_WIN:  appendLog("You won!"); break;
+                case TB_RESULT_YOU_WIN:
+                    appendLog("You won!");
+                    playerWon_ = true;
+                    break;
                 case TB_RESULT_YOU_LOSE: appendLog("You blacked out…"); break;
                 case TB_RESULT_DRAW:     appendLog("It's a draw."); break;
                 case TB_RESULT_FLED:     appendLog("Got away safely!"); break;

@@ -2972,8 +2972,7 @@ int32_t MonsterMeshModule::runOnce()
     // takeover every runOnce tick while the LVGL thread hasn't yet consumed
     // needsBattleScreen_ (which may take up to ~33ms at 30fps).
     if (shouldOwnScreen && !lvBattleActive_ && !battleScreenPending_ && setupDone_) {
-        Serial.printf("[MMB] takeover: shouldOwn=1 lvBattleActive=0 setupDone=1\n");
-        Serial.flush();
+        LOG_INFO("[MMB] takeover: shouldOwn=1 lvBattleActive=0 setupDone=1\n");
         textBattleActive_ = true;
         // P2.39e: do NOT call showLvBattleScreen() here. It calls
         // buildLvBattleScreen() (creates LVGL widgets) and lv_screen_load()
@@ -2984,8 +2983,6 @@ int32_t MonsterMeshModule::runOnce()
         // updateLvBattleScreen() immediately after setup.
         battleScreenPending_ = true;
         needsBattleScreen_   = true;
-        Serial.printf("[MMB] takeover: deferred showLvBattleScreen to LVGL thread\n");
-        Serial.flush();
         LOG_INFO("[MonsterMesh] textBattle owning screen (role=%d) — deferring LVGL setup\n",
                  (int)textBattle_.role());
     }
@@ -3495,6 +3492,14 @@ int32_t MonsterMeshModule::runOnce()
                         textBattle_.setHeader(hdr);
                         activeGymTrainer_ = nextIdx;
                         gauntletContinue = true;
+                        // Cancel the end-cleanup that was staged when this
+                        // trainer's battle ended — we're continuing the
+                        // gauntlet, not returning to the terminal. Without
+                        // this, pendingBattleEndCleanup_ fires on the LVGL
+                        // thread and hides the battle screen before Misty
+                        // (or any leader) ever appears.
+                        pendingBattleEndCleanup_ = false;
+                        textBattleActive_ = true;
                         LOG_INFO("[MonsterMesh] gym %u: chain to trainer %u (%s)\n",
                                  (unsigned)activeGymBattle_, (unsigned)nextIdx, tn);
                     }
@@ -3691,6 +3696,12 @@ int32_t MonsterMeshModule::runOnce()
                 // flag so the next render shows the new opponent.
             } else {
                 textBattleActive_ = false;
+                if (!pendingBattleEndedCb_) {
+                    // Pure PvP (MMB) battle — stage party/XP display for the LVGL thread.
+                    stagedEndKind_ = StagedEndKind::FIGHT;
+                    stagedEndWon_  = textBattle_.playerWon();
+                    pendingBattleEndedCb_ = true;
+                }
                 // Clear ALL PvP-handshake state so a leftover chunk
                 // retransmit from the peer (their mmbPartyTxTarget_ keeps
                 // firing for the full 90s retry window) can't auto-arm a
@@ -4711,6 +4722,10 @@ void MonsterMeshModule::tryConsumeStagedParty()
                 break;
             case StagedEndKind::E4:
                 terminal_.onE4BattleEnded(stagedEndA_, stagedEndWon_);
+                break;
+            case StagedEndKind::FIGHT:
+                terminal_.printLine(stagedEndWon_ ? "You won!" : "You blacked out.");
+                terminal_.refreshParty();
                 break;
             default: break;
         }

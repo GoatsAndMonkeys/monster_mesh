@@ -161,6 +161,8 @@ public:
     Mode mode()     const { return mode_; }
     Phase phase()   const { return phase_; }
     Gen1BattleEngine::Result engineResult() const { return engine_.result(); }
+    // True if the local player won the last battle.
+    bool playerWon() const { return playerWon_; }
 
     // ── Input ───────────────────────────────────────────────────────────────
     void handleKey(uint8_t c);
@@ -293,6 +295,7 @@ private:
     // battle station made the receiver miss the START race and the engines
     // desynced from turn 0.
     bool     peerReady_          = false;
+    bool     playerWon_          = false;
     uint32_t peerReadyTimeoutMs_ = 0;   // fallback: unblock WAIT_PEER_READY after 10s
     static constexpr uint32_t REMOTE_TIMEOUT_MS    = 60000;  // 60s w/o packet → forfeit
     static constexpr uint32_t SCROLL_INTERVAL_MS   = 600;    // text reveal cadence
