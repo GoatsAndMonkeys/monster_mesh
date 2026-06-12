@@ -1971,7 +1971,8 @@ int32_t MonsterMeshModule::runOnce()
         terminal_.setFightFn(
             [](void *ctx) {
                 auto *self = static_cast<MonsterMeshModule *>(ctx);
-                self->fightTargetShortName_[0] = '\0';  // clear any stale target → random
+                self->fightTargetShortName_[0] = '\0';
+                self->fightSkipPeers_ = true;  // fight 0 = random trainer, skip peer pick
                 self->requestLocalTextBattle();
             }, this);
         terminal_.setFightByNameFn(
@@ -1980,6 +1981,7 @@ int32_t MonsterMeshModule::runOnce()
                 strncpy(self->fightTargetShortName_, shortName,
                         sizeof(self->fightTargetShortName_) - 1);
                 self->fightTargetShortName_[sizeof(self->fightTargetShortName_) - 1] = '\0';
+                self->fightSkipPeers_ = false;
                 self->requestLocalTextBattle();
             }, this);
         terminal_.setGymFightFn(
@@ -3369,7 +3371,8 @@ int32_t MonsterMeshModule::runOnce()
 
         const auto *peers = daycare_.getNeighbors();
         uint8_t peerCount = daycare_.getNeighborCount();
-        if (e4MemberIdx_ >= 5 && exploreRouteIdx_ >= 8 && gymBattleIdx_ >= 8 && peerCount > 0 && peers) {
+        if (e4MemberIdx_ >= 5 && exploreRouteIdx_ >= 8 && gymBattleIdx_ >= 8 &&
+            peerCount > 0 && peers && !fightSkipPeers_) {
             // `fight N` sets fightTargetShortName_ to a specific peer short name.
             // Find that peer; fall back to random if not found.
             uint8_t pick = (uint8_t)(esp_random() % peerCount);
@@ -3434,6 +3437,7 @@ int32_t MonsterMeshModule::runOnce()
         gymBattleIdx_ = 0xFF;
         exploreRouteIdx_ = 0xFF;
         e4MemberIdx_ = 0xFF;
+        fightSkipPeers_ = false;
         const char *ourTag = (owner.short_name[0] != '\0') ? owner.short_name : "ME";
         LOG_INFO("[MMB] fight: pre-startLocal myCount=%u cpuCount=%u\n",
                  (unsigned)terminal_.getParty().count,

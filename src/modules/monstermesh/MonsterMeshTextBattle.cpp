@@ -191,6 +191,7 @@ void MonsterMeshTextBattle::startLocal(const Gen1Party &myParty,
 {
     headerOverride_[0] = '\0';
     endPromptOverride_[0] = '\0';
+    playerWon_ = false;
 
     mode_         = Mode::LOCAL_ROGUELIKE;
     phase_        = Phase::WAIT_ACTION;
@@ -334,6 +335,7 @@ void MonsterMeshTextBattle::startServerAuthAsInitiator(uint32_t remoteId,
                                                        const Gen1Party &myParty,
                                                        const char *myName)
 {
+    playerWon_ = false;
     mode_     = Mode::NETWORKED;
     phase_    = Phase::WAIT_REMOTE;   // "waiting for opponent to accept"
     role_     = Role::SERVER;
@@ -2168,6 +2170,7 @@ void MonsterMeshTextBattle::clientAuthOnChallengePkt(uint32_t fromId,
         return;
     }
 
+    playerWon_ = false;
     mode_     = Mode::NETWORKED;
     role_     = Role::CLIENT;
     phase_    = Phase::WAIT_CHALLENGE_OVERLAY;

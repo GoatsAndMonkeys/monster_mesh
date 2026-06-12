@@ -125,6 +125,7 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     bool textBattleActive_   = false;
     bool textBattleStartReq_ = false;  // LVGL→runOnce flag to start a local fight
     char fightTargetShortName_[5] = {};  // 4-char short name for `fight N` by-peer; empty = random pick
+    bool fightSkipPeers_ = false;        // set by fight 0: use random trainer, skip neighbor pick
     // 0xFF = mirror match / neighbor pick. 0..7 = LoC gym battle.
     uint8_t gymBattleIdx_    = 0xFF;
     uint8_t gymTrainerIdx_   = 0;

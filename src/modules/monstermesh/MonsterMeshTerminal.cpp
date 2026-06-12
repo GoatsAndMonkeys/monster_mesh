@@ -532,24 +532,22 @@ void MonsterMeshTerminal::executeLine(const char *line)
             println("  gym/mmg/mmb/fight show a numbered");
             println("  menu — type N to select, e.g. gym");
             println("  then 3 fights gym 3.");
-            println("  gym fight N  - fight gym N directly");
-            println("  mmg fight N  - fight mesh gym N");
+            println("  gym N        - fight gym N directly");
+            println("  mmg N        - fight mesh gym N");
             println("  mmb <name>   - PvP by short name");
             println("  mmb N        - PvP by list index");
             println("  fight N      - local CPU battle N");
-            println("  gym dev all8 - debug: grant all badges");
-            println("  gym dev clear- debug: wipe LoC save");
             return;
         }
         println("commands:");
         println("  party        - your party");
         println("  hb           - ping nearby peers");
+        println("  beacon (bc)  - broadcast presence");
         println("  daycare (dc) - daycare status");
         println("  gym          - local gym list");
         println("  mmg          - mesh gym list");
         println("  mmb          - peers online");
         println("  fight        - local battle");
-        println("  explore      - wild encounters");
         println("  achievements - achievements");
         println("  help sys     - system commands");
         println("  help adv     - advanced usage");
@@ -948,7 +946,7 @@ void MonsterMeshTerminal::executeLine(const char *line)
                 const char *r = args;
                 while (*r >= '0' && *r <= '9') { n = n * 10 + (*r - '0'); ++r; }
                 if (n == 0) {
-                    println("starting random CPU battle...");
+                    println("starting random trainer battle...");
                     if (fightFn_) fightFn_(fightCtx_);
                     return;
                 }
@@ -993,6 +991,7 @@ void MonsterMeshTerminal::executeLine(const char *line)
             mmtListFn_(mmtListCtx_, buf, sizeof(buf), false);
             int peerIdx = 0;
             const char *p = buf;
+            bool headerPrinted = false;
             while (*p) {
                 const char *nl = p;
                 while (*nl && *nl != '\n') ++nl;
@@ -1002,6 +1001,11 @@ void MonsterMeshTerminal::executeLine(const char *line)
                 memcpy(tmp, p, len);
                 tmp[len] = '\0';
                 if (len > 2 && tmp[0] == ' ' && tmp[1] == ' ') {
+                    // Print "0. Random CPU" before the first peer entry.
+                    if (!headerPrinted) {
+                        println("0. Random Trainer");
+                        headerPrinted = true;
+                    }
                     char numbered[88];
                     snprintf(numbered, sizeof(numbered), "%d.%s", ++peerIdx, tmp + 1);
                     println(numbered);
@@ -1010,7 +1014,8 @@ void MonsterMeshTerminal::executeLine(const char *line)
                 }
                 p = (*nl) ? nl + 1 : nl;
             }
-            println("  0 = random CPU  N = fight peer N");
+            // No peers at all — still show the random option.
+            if (!headerPrinted) println("0. Random Trainer");
             pendingMenuCmd_ = MenuCmd::FIGHT;
             return;
         }
