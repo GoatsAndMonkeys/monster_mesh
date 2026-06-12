@@ -2232,8 +2232,7 @@ int32_t MonsterMeshModule::runOnce()
             case ESP_RST_SDIO:     rrStr = "SDIO"; break;
             default: break;
         }
-        Serial.printf("[MMB] boot complete — reset_reason=%s(%d)\n", rrStr, (int)rr);
-        Serial.flush();
+        LOG_INFO("[MMB] boot complete — reset_reason=%s(%d)\n", rrStr, (int)rr);
         LOG_INFO("[MonsterMesh] boot complete — emu=%d browser=%d\n",
                  (int)emulatorActive_, (int)browserActive_);
         // One-shot channel provision now that channels.* is fully ready.
@@ -2928,10 +2927,24 @@ int32_t MonsterMeshModule::runOnce()
     // textBattleActive_=false themselves at line 3634, so this block only fires
     // for NETWORKED (PvP) sessions. hideLvBattleScreen() no-ops if !lvBattleActive_.
     if (textBattleActive_ && !textBattle_.isActive() && setupDone_) {
-        textBattleActive_ = false;
-        pendingBattleEndCleanup_ = true;
-        LOG_INFO("[MonsterMesh] textBattle exited — scheduling LVGL restore\n");
-        Serial.printf("[MMB] cleanup: textBattleActive=false pendingCleanup=true\n");
+        // Don't schedule cleanup if a gauntlet chain is about to fire on this
+        // same runOnce() tick — the chain block lower in this function will set
+        // textBattleActive_=true and pendingBattleEndCleanup_=false itself.
+        // Without this guard, the LVGL thread can race in and hide the battle
+        // screen between this block and the chain block, so Misty never appears.
+        bool willChain = false;
+        if (activeGymBattle_ < 8) {
+            bool won = (textBattle_.engineResult() == Gen1BattleEngine::Result::P1_WIN);
+            willChain = won && (activeGymTrainer_ < 4);
+        } else if (activeE4Member_ < 5) {
+            bool won = (textBattle_.engineResult() == Gen1BattleEngine::Result::P1_WIN);
+            willChain = won && (activeE4Member_ < 4);
+        }
+        if (!willChain) {
+            textBattleActive_ = false;
+            pendingBattleEndCleanup_ = true;
+            LOG_INFO("[MonsterMesh] textBattle exited — scheduling LVGL restore\n");
+        }
     }
 
     // ── Take over the screen as soon as textBattle is active.
@@ -3079,6 +3092,10 @@ int32_t MonsterMeshModule::runOnce()
                                                    oppParty,
                                                    mmtBattleSeed_,
                                                    mmtBattleSession_);
+            textBattle_.setOppTag(mmtPeerShort_[0] ? mmtPeerShort_ : "Peer");
+            // CLIENT already sent ACCEPT — peer is proven alive.
+            // Skip WAIT_PEER_READY so the server's first move isn't dropped.
+            textBattle_.markPeerReady();
             char hdr[40];
             snprintf(hdr, sizeof(hdr), "MMB vs %.4s",
                      mmtPeerShort_[0] ? mmtPeerShort_ : "Peer");
@@ -3096,6 +3113,7 @@ int32_t MonsterMeshModule::runOnce()
                                                   mmtBattleSeed_,
                                                   oppParty,
                                                   mmtBattleSession_);
+            textBattle_.setOppTag(mmtPeerShort_[0] ? mmtPeerShort_ : "Peer");
             char hdr[40];
             snprintf(hdr, sizeof(hdr), "MMB incoming");
             textBattle_.setHeader(hdr);
@@ -3375,18 +3393,14 @@ int32_t MonsterMeshModule::runOnce()
         exploreRouteIdx_ = 0xFF;
         e4MemberIdx_ = 0xFF;
         const char *ourTag = (owner.short_name[0] != '\0') ? owner.short_name : "ME";
-        Serial.printf("[MMB] fight: pre-startLocal myCount=%u cpuCount=%u\n",
-                      (unsigned)terminal_.getParty().count,
-                      (unsigned)cpuParty.count);
-        Serial.flush();
+        LOG_INFO("[MMB] fight: pre-startLocal myCount=%u cpuCount=%u\n",
+                 (unsigned)terminal_.getParty().count,
+                 (unsigned)cpuParty.count);
         textBattle_.startLocal(terminal_.getParty(), cpuParty, ourTag, rivalTag);
-        Serial.printf("[MMB] fight: post-startLocal active=%d mode=%d\n",
-                      (int)textBattle_.isActive(), 0);
-        Serial.flush();
+        LOG_INFO("[MMB] fight: post-startLocal active=%d\n",
+                 (int)textBattle_.isActive());
         if (hdrText[0]) textBattle_.setHeader(hdrText);
         textBattleActive_ = true;
-        Serial.printf("[MMB] fight: textBattleActive_=true\n");
-        Serial.flush();
     }
 
     // Drive textBattle_.tick() any time the state machine is alive —
@@ -4856,8 +4870,8 @@ void MonsterMeshModule::buildLvBattleScreen()
 
     // ── Foe panel (top-left) ──────────────────────────────────────────
     lv_obj_t *foe = mkPanel(scr, 2, 2, 178, 56);
-    mkLabel(foe, 2, 0, 40, 12, lv_color_black());
-    lv_label_set_text(lv_obj_get_child(foe, 0), "FOE");
+    lvFoeHeader_ = mkLabel(foe, 2, 0, 60, 12, lv_color_black());
+    lv_label_set_text((lv_obj_t *)lvFoeHeader_, textBattle_.oppTag());
     lvFoeName_  = mkLabel(foe, 4,  12, 100, 14, lv_color_black());
     lvFoeLevel_ = mkLabel(foe, 110, 12, 50,  14, lv_color_black());
     lvFoeHpBar_ = mkBar  (foe, 4,  30, 166, 8,
@@ -5092,6 +5106,7 @@ void MonsterMeshModule::updateLvBattleScreen()
     };
 
     // ── Foe panel ────
+    setLabel(lvFoeHeader_, textBattle_.oppTag());
     char buf[64];
     if (opp.count > 0 && opp.active < opp.count) {
         const auto &m = opp.mons[opp.active];

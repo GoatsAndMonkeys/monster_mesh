@@ -221,6 +221,8 @@ void MonsterMeshTextBattle::startLocal(const Gen1Party &myParty,
     // and the user already knows it's their team. ourTag is unused here but
     // kept in the API for future networked-PvP work.
     (void)ourTag;
+    strncpy(oppTag_, theirTag && theirTag[0] ? theirTag : "", sizeof(oppTag_) - 1);
+    oppTag_[sizeof(oppTag_) - 1] = '\0';
     if (theirTag && theirTag[0]) {
         auto &p = engine_.party(1);
         for (uint8_t i = 0; i < p.count && i < 6; ++i) {
@@ -272,6 +274,8 @@ void MonsterMeshTextBattle::nextOpponent(const Gen1Party &cpu, const char *their
     // so the engine and tick loop both consider us in-battle again.
     mode_ = Mode::LOCAL_ROGUELIKE;
     engine_.replaceOpponent(cpu);
+    strncpy(oppTag_, theirTag && theirTag[0] ? theirTag : "", sizeof(oppTag_) - 1);
+    oppTag_[sizeof(oppTag_) - 1] = '\0';
     // Re-tag opponent's nicknames with the new trainer prefix.
     if (theirTag && theirTag[0]) {
         auto &p = engine_.party(1);
@@ -1118,15 +1122,12 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
     }
 
     if (keyAccept) {
-        Serial.printf("[MMB] K-accept: phase=%d mode=%d role=%d cursor=%u\n",
-                      (int)phase_, (int)mode_, (int)role_, (unsigned)cursor_);
         // Networked initiator only: block move submission until the peer
         // has proven their battle station is up by sending us anything in
         // this session. Without this, an initiator who presses a move
         // before the receiver's screen finished rendering produced a
         // turn-0 ACTION the receiver missed → engines desynced from turn 0.
         if (mode_ == Mode::NETWORKED && !peerReady_) {
-            Serial.printf("[MMB] K-accept: peerReady=false → waiting\n");
             appendLog("Waiting for opponent...");
             dirty_ = true;
             return;

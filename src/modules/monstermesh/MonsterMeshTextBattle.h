@@ -163,6 +163,20 @@ public:
     Gen1BattleEngine::Result engineResult() const { return engine_.result(); }
     // True if the local player won the last battle.
     bool playerWon() const { return playerWon_; }
+    // Short tag used for the opponent panel header (trainer name or "FOE").
+    const char *oppTag() const { return oppTag_[0] ? oppTag_ : "FOE"; }
+    void setOppTag(const char *tag) {
+        strncpy(oppTag_, tag ? tag : "", sizeof(oppTag_) - 1);
+        oppTag_[sizeof(oppTag_) - 1] = '\0';
+    }
+    // Call after startNetworkedAsInitiator when the peer has already proved
+    // liveness (e.g. server-auth: CLIENT sent ACCEPT before engine started).
+    // Clears WAIT_PEER_READY so the first move is not silently dropped.
+    void markPeerReady() {
+        peerReady_ = true;
+        if (phase_ == Phase::WAIT_PEER_READY)
+            phase_ = Phase::WAIT_ACTION;
+    }
 
     // ── Input ───────────────────────────────────────────────────────────────
     void handleKey(uint8_t c);
@@ -296,6 +310,7 @@ private:
     // desynced from turn 0.
     bool     peerReady_          = false;
     bool     playerWon_          = false;
+    char     oppTag_[8]          = {};    // trainer name shown in foe header
     uint32_t peerReadyTimeoutMs_ = 0;   // fallback: unblock WAIT_PEER_READY after 10s
     static constexpr uint32_t REMOTE_TIMEOUT_MS    = 60000;  // 60s w/o packet → forfeit
     static constexpr uint32_t SCROLL_INTERVAL_MS   = 600;    // text reveal cadence

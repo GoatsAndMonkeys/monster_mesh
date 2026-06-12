@@ -594,6 +594,7 @@ public:
     //   log panel  (bordered, 3 lines, `>` prefix per line)
     //   party list (6 mons, 2 cols, active highlighted)
     void *lvFoePanel_         = nullptr;
+    void *lvFoeHeader_        = nullptr;  // static "FOE"/"trainer" label
     void *lvFoeName_          = nullptr;
     void *lvFoeLevel_         = nullptr;
     void *lvFoeHpBar_         = nullptr;
