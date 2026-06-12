@@ -405,6 +405,7 @@ public:
     // a reply from, and handleReceived parses any DM from that peer for
     // Y/N. Drains stage outbound TX from runOnce per
     // feedback_mm_defer_tx_from_router.md.
+    volatile bool pendingForgetMmb_       = false;  // defer nodeDB removes to runOnce
     volatile bool pendingMmtOnTx_         = false;  // queued challenge DM (legacy)
     volatile bool pendingOpenTerminal_    = false;  // open terminal panel on next runOnce
     uint32_t      pendingMmbOnAckTarget_  = 0;      // send "challenge received" DM reply to this node

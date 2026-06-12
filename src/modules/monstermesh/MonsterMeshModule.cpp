@@ -1884,15 +1884,7 @@ int32_t MonsterMeshModule::runOnce()
         terminal_.setForgetMmbFn(
             [](void *ctx) {
                 auto *self = static_cast<MonsterMeshModule *>(ctx);
-                for (uint8_t i = 0; i < self->mmbCapableCount_; ++i) {
-                    nodeDB->removeNodeByNum(self->mmbCapableNodes_[i]);
-                    LOG_INFO("[MonsterMesh] forget mmb: removed node 0x%08x\n",
-                             (unsigned)self->mmbCapableNodes_[i]);
-                }
-                self->mmbCapableCount_ = 0;
-                // Re-beacon so peers re-announce themselves to us.
-                self->nextBeaconRequestsResponse_ = true;
-                self->daycare_.forceBeacon();
+                self->pendingForgetMmb_ = true;
             }, this);
         terminal_.setMmtListFn(
             [](void *ctx, char *buf, size_t n, bool mmbOnly) {
@@ -2287,6 +2279,18 @@ int32_t MonsterMeshModule::runOnce()
     // (shared SPI bus) and we want it complete + spiLock released cleanly
     // before startReceive starts driving the SX1262. Trying to re-arm the
     // radio while a 32KB SD write is mid-flight was freezing the device.
+    if (pendingForgetMmb_) {
+        pendingForgetMmb_ = false;
+        for (uint8_t i = 0; i < mmbCapableCount_; ++i) {
+            LOG_INFO("[MonsterMesh] forget mmb: removing node 0x%08x\n",
+                     (unsigned)mmbCapableNodes_[i]);
+            nodeDB->removeNodeByNum(mmbCapableNodes_[i]);
+        }
+        mmbCapableCount_ = 0;
+        nextBeaconRequestsResponse_ = true;
+        daycare_.forceBeacon();
+    }
+
     if (pendingSave_) {
         pendingSave_ = false;
         uint32_t saveStart = millis();
