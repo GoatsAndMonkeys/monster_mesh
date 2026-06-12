@@ -395,11 +395,16 @@ void MonsterMeshTerminal::onGymBattleEnded(uint8_t gymIdx,
     if (gymIdx >= 8) return;
     if (!playerWon) {
         char buf[64];
-        snprintf(buf, sizeof(buf), "Gym %u: defeated by %s.", (unsigned)(gymIdx + 1),
+        snprintf(buf, sizeof(buf), "Gym %u: defeated by %s.",
+                 (unsigned)(gymIdx + 1),
                  lordGym(gymIdx) ? lordGym(gymIdx)->trainers[trainerIdx].name
                                  : "trainer");
         println(buf);
-        // Don't advance progress on loss — the user has to retry the same trainer.
+        // Save resume point so the player picks up from this trainer next session.
+        if (trainerIdx > 0 && lord_.gymProgress[gymIdx] < trainerIdx) {
+            lord_.gymProgress[gymIdx] = trainerIdx;
+            lordSave(lord_);
+        }
         return;
     }
     // Win: advance progress. trainerIdx 0..3 = grunt; 4 = leader.
@@ -932,24 +937,60 @@ void MonsterMeshTerminal::executeLine(const char *line)
             println("fight not wired");
             return;
         }
-        // `fight N` — pick peer N from the list and start a local CPU battle.
-        // (The CPU will use a rival team regardless of the chosen peer; peer
-        // party mirroring is planned for a future build.)
-        if (*args >= '1' && *args <= '9') {
+        // `fight N` — 0 = random CPU, 1..N = fight peer N's actual party.
+        {
             const char *q = args;
+            bool isNum = (*q >= '0' && *q <= '9');
             while (*q >= '0' && *q <= '9') ++q;
-            if (*q == '\0' || *q == '\r' || *q == '\n') {
-                // Valid number — start local fight (peer routing TODO).
-                println("starting local battle vs CPU rival...");
-                fightFn_(fightCtx_);
+            bool onlyNum = isNum && (*q == '\0' || *q == '\r' || *q == '\n');
+            if (onlyNum) {
+                int n = 0;
+                const char *r = args;
+                while (*r >= '0' && *r <= '9') { n = n * 10 + (*r - '0'); ++r; }
+                if (n == 0) {
+                    println("starting random CPU battle...");
+                    if (fightFn_) fightFn_(fightCtx_);
+                    return;
+                }
+                // Find the Nth peer in the full list and fight them by name.
+                if (!mmtListFn_) { println("fight: list not wired"); return; }
+                char listbuf[512] = {};
+                mmtListFn_(mmtListCtx_, listbuf, sizeof(listbuf), false);
+                int idx = 0;
+                const char *lp = listbuf;
+                while (*lp) {
+                    const char *nl = lp;
+                    while (*nl && *nl != '\n') ++nl;
+                    size_t len = (size_t)(nl - lp);
+                    if (len > 2 && lp[0] == ' ' && lp[1] == ' ') {
+                        ++idx;
+                        if (idx == n) {
+                            const char *start = lp + 2;
+                            const char *end = start;
+                            while (*end && *end != '/' && *end != ' ') ++end;
+                            char nameStr[32];
+                            size_t namelen = (size_t)(end - start);
+                            if (namelen >= sizeof(nameStr)) namelen = sizeof(nameStr) - 1;
+                            memcpy(nameStr, start, namelen);
+                            nameStr[namelen] = '\0';
+                            char msgbuf[64];
+                            snprintf(msgbuf, sizeof(msgbuf), "Fight vs %s (CPU)...", nameStr);
+                            println(msgbuf);
+                            if (fightByNameFn_) fightByNameFn_(fightByNameCtx_, nameStr);
+                            else if (fightFn_) fightFn_(fightCtx_);
+                            return;
+                        }
+                    }
+                    lp = (*nl) ? nl + 1 : nl;
+                }
+                println("peer not found — type fight to see list");
                 return;
             }
         }
-        // Bare `fight` or `fight <anything non-number>` → show numbered peer
-        // menu from the daycare neighbor list so the user can pick who to fight.
+        // Bare `fight` → show numbered peer menu (0 = random, 1..N = specific).
         if (mmtListFn_) {
             char buf[512] = {};
-            mmtListFn_(mmtListCtx_, buf, sizeof(buf));
+            mmtListFn_(mmtListCtx_, buf, sizeof(buf), false);
             int peerIdx = 0;
             const char *p = buf;
             while (*p) {
@@ -969,14 +1010,12 @@ void MonsterMeshTerminal::executeLine(const char *line)
                 }
                 p = (*nl) ? nl + 1 : nl;
             }
-            if (peerIdx > 0) {
-                println("  type fight N for local CPU battle");
-                pendingMenuCmd_ = MenuCmd::FIGHT;
-                return;
-            }
+            println("  0 = random CPU  N = fight peer N");
+            pendingMenuCmd_ = MenuCmd::FIGHT;
+            return;
         }
-        println("starting local battle vs CPU rival...");
-        fightFn_(fightCtx_);
+        println("starting random CPU battle...");
+        if (fightFn_) fightFn_(fightCtx_);
         return;
     }
     // ── MMG gym discovery + fight (Phase C) ─────────────────────────────────
@@ -1074,7 +1113,7 @@ void MonsterMeshTerminal::executeLine(const char *line)
         // streaming responses will be.
         if (mmtListFn_) {
             char buf[512] = {};
-            mmtListFn_(mmtListCtx_, buf, sizeof(buf));
+            mmtListFn_(mmtListCtx_, buf, sizeof(buf), false);  // false = all peers for hb
             // The mmtListFn output starts with a header line; skip past it
             // and reformat each entry as "HB SN/? Lv0 Kanto" so it visually
             // matches incoming responses.
@@ -1121,7 +1160,7 @@ void MonsterMeshTerminal::executeLine(const char *line)
                 while (*p >= '0' && *p <= '9') { n = n * 10 + (*p - '0'); ++p; }
                 if (!mmtListFn_) { println("mmb: list not wired"); return; }
                 char listbuf[512] = {};
-                mmtListFn_(mmtListCtx_, listbuf, sizeof(listbuf));
+                mmtListFn_(mmtListCtx_, listbuf, sizeof(listbuf), true);  // true = recent only for mmb
                 // Walk indented peer lines to find the Nth entry.
                 int idx = 0;
                 const char *lp = listbuf;
@@ -1176,7 +1215,7 @@ void MonsterMeshTerminal::executeLine(const char *line)
             return;
         }
         char buf[512] = {};
-        mmtListFn_(mmtListCtx_, buf, sizeof(buf));
+        mmtListFn_(mmtListCtx_, buf, sizeof(buf), true);  // true = recent only for live PvP
         int peerIdx = 0;
         const char *p = buf;
         while (*p) {
@@ -1198,7 +1237,7 @@ void MonsterMeshTerminal::executeLine(const char *line)
             p = (*nl) ? nl + 1 : nl;
         }
         if (peerIdx > 0) {
-            println("  type mmb N to fight");
+            println("  mmb N = live PvP battle");
             pendingMenuCmd_ = MenuCmd::MMB;
         }
         return;

@@ -124,6 +124,7 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
 
     bool textBattleActive_   = false;
     bool textBattleStartReq_ = false;  // LVGL→runOnce flag to start a local fight
+    char fightTargetShortName_[5] = {};  // 4-char short name for `fight N` by-peer; empty = random pick
     // 0xFF = mirror match / neighbor pick. 0..7 = LoC gym battle.
     uint8_t gymBattleIdx_    = 0xFF;
     uint8_t gymTrainerIdx_   = 0;
@@ -154,6 +155,26 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     uint8_t   bbsPartyChunkMask_  = 0;       // bitmask of received chunks
     uint8_t   bbsPartyTotal_      = 0;       // expected chunk count from sender
     Gen1Party bbsGymParty_        = {};      // reassembled gym party
+
+    // ── MMB PVP-capable node tracking ─────────────────────────────────────
+    // Nodes that have sent a LOBBY_BEACON or TEXT_BATTLE_* packet are
+    // confirmed MonsterMesh PVP peers. mmb uses this to exclude daycare-only
+    // neighbors (Pocket Pikachu etc.) that can't fight live PVP.
+    static constexpr uint8_t MAX_MMB_CAPABLE = 16;
+    uint32_t mmbCapableNodes_[MAX_MMB_CAPABLE] = {};
+    uint8_t  mmbCapableCount_ = 0;
+
+    void addMmbCapableNode(uint32_t nodeId) {
+        for (uint8_t i = 0; i < mmbCapableCount_; ++i)
+            if (mmbCapableNodes_[i] == nodeId) return;
+        if (mmbCapableCount_ < MAX_MMB_CAPABLE)
+            mmbCapableNodes_[mmbCapableCount_++] = nodeId;
+    }
+    bool isMmbCapable(uint32_t nodeId) const {
+        for (uint8_t i = 0; i < mmbCapableCount_; ++i)
+            if (mmbCapableNodes_[i] == nodeId) return true;
+        return false;
+    }
 
     // ── MMG gym ladder ─────────────────────────────────────────────────────
     // Bulk-dump path (preferred): challenger sends BBS_LADDER_REQUEST once;

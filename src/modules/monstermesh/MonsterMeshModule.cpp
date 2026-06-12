@@ -537,6 +537,7 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             if ((PktType)bp->type == PktType::TEXT_BATTLE_START &&
                 mp.decoded.payload.size == BATTLELINK_HDR_SIZE + 14 &&
                 mp.from != nodeDB->getNodeNum()) {
+                addMmbCapableNode(mp.from);  // confirmed MonsterMesh PVP peer
                 LOG_INFO("[MonsterMesh] PvP: TEXT_BATTLE_START RX from 0x%08X "
                          "(tb=%d recv=%d init=%d) — gate check\n",
                          (unsigned)mp.from, (int)textBattleActive_,
@@ -1080,6 +1081,10 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                          (unsigned)beacon->nodeId, beacon->shortName,
                          beacon->gameName, (unsigned)beacon->partyCount,
                          (unsigned)beacon->ngPlusTier);
+                // A beacon with a real game name + party means this node is
+                // running MonsterMesh with an active save — mark PVP capable.
+                if (beacon->partyCount > 0 && beacon->gameName[0] != '\0')
+                    addMmbCapableNode(beacon->nodeId);
                 uint8_t prevCount = daycare_.getNeighborCount();
                 daycare_.handleBeacon(*beacon);
                 // New trainer arrived — fire an arrival event. The event is
@@ -1877,7 +1882,7 @@ int32_t MonsterMeshModule::runOnce()
                 }
             }, this);
         terminal_.setMmtListFn(
-            [](void *ctx, char *buf, size_t n) {
+            [](void *ctx, char *buf, size_t n, bool mmbOnly) {
                 auto *self = static_cast<MonsterMeshModule *>(ctx);
                 if (!buf || n == 0) return;
                 size_t off = 0;
@@ -1888,19 +1893,34 @@ int32_t MonsterMeshModule::runOnce()
                         if (off >= n) off = n - 1; \
                     } \
                 } while (0)
+                // Helper: format elapsed milliseconds as "Xs ago", "Xm ago", "Xh ago"
+                auto fmtAgo = [](uint32_t nowMs, uint32_t seenMs, char *out, size_t outLen) {
+                    if (seenMs == 0) { snprintf(out, outLen, "never"); return; }
+                    uint32_t elapsedSec = (nowMs >= seenMs) ? (nowMs - seenMs) / 1000 : 0;
+                    if (elapsedSec < 60) snprintf(out, outLen, "%us ago", (unsigned)elapsedSec);
+                    else if (elapsedSec < 3600) snprintf(out, outLen, "%um ago", (unsigned)(elapsedSec / 60));
+                    else snprintf(out, outLen, "%uh ago", (unsigned)(elapsedSec / 3600));
+                };
+                uint32_t nowMs = millis();
                 uint8_t nc = self->daycare_.getNeighborCount();
+                const auto *neigh = self->daycare_.getNeighbors();
+                const uint32_t *lastSeen = self->daycare_.getNeighborLastSeen();
+                static const uint32_t LIVE_WINDOW_MS = 3600000UL;  // 1 hour
+                uint8_t shown = 0;
                 if (nc == 0) {
                     MMT_APPEND("No peers in range. Have them open MM and beacon.\n");
                 } else {
-                    MMT_APPEND("Online peers (last beacon):\n");
-                    const auto *neigh = self->daycare_.getNeighbors();
-                    uint8_t shown = 0;
-                    // Two passes so peers with full info (SN + game name)
-                    // print first — user wanted to see the actionable
-                    // daycare residents at the top, not buried under
-                    // "SN/?" entries we haven't fully ID'd yet.
+                    MMT_APPEND(mmbOnly ? "Live peers (last hour):\n" : "Known peers:\n");
+                    // Two passes: pass 0 = battle-ready (full info + party),
+                    // pass 1 = partial info.
                     for (uint8_t pass = 0; pass < 2; ++pass) {
-                        for (uint8_t i = 0; i < nc && i < 6; ++i) {
+                        for (uint8_t i = 0; i < nc && i < 16; ++i) {
+                            // For MMB: skip peers not seen within 1 hour, OR
+                            // not confirmed MonsterMesh PVP capable.
+                            if (mmbOnly && (nowMs - lastSeen[i]) > LIVE_WINDOW_MS)
+                                continue;
+                            if (mmbOnly && !self->isMmbCapable(neigh[i].nodeId))
+                                continue;
                             const char *sn = neigh[i].shortName[0]
                                                ? neigh[i].shortName : nullptr;
                             if (!sn && nodeDB) {
@@ -1912,49 +1932,55 @@ int32_t MonsterMeshModule::runOnce()
                             }
                             bool gnKnown = neigh[i].gameName[0] != '\0';
                             const char *gn = gnKnown ? neigh[i].gameName : "?";
-                            // Pass 0 = peers we can battle with (full info,
-                            // party loaded). Pass 1 = peers we've heard from
-                            // but don't yet have enough to challenge.
                             if (pass == 0) {
                                 if (!sn || !gnKnown || neigh[i].partyCount == 0)
                                     continue;
                             } else {
                                 if (sn && gnKnown && neigh[i].partyCount > 0)
-                                    continue;  // already shown in pass 0
+                                    continue;
                                 if (!sn) {
-                                    // Render the unknown peer by nodeId so
-                                    // the user at least sees they're out
-                                    // there.
+                                    char agoStr[12];
+                                    fmtAgo(nowMs, lastSeen[i], agoStr, sizeof(agoStr));
                                     char nodeStr[12];
-                                    snprintf(nodeStr, sizeof(nodeStr),
-                                             "0x%08X",
+                                    snprintf(nodeStr, sizeof(nodeStr), "0x%08X",
                                              (unsigned)neigh[i].nodeId);
-                                    MMT_APPEND("  %s/?\n", nodeStr);
+                                    MMT_APPEND("  %s/? %s\n", nodeStr, agoStr);
                                     shown++;
                                     continue;
                                 }
                             }
+                            char agoStr[12];
+                            fmtAgo(nowMs, lastSeen[i], agoStr, sizeof(agoStr));
                             if (neigh[i].ngPlusTier > 0) {
-                                MMT_APPEND("  %s/%s NG+%u\n",
-                                           sn, gn,
-                                           (unsigned)neigh[i].ngPlusTier);
+                                MMT_APPEND("  %s/%s NG+%u %s\n",
+                                           sn, gn, (unsigned)neigh[i].ngPlusTier, agoStr);
                             } else {
-                                MMT_APPEND("  %s/%s\n", sn, gn);
+                                MMT_APPEND("  %s/%s %s\n", sn, gn, agoStr);
                             }
                             shown++;
                         }
                     }
                     if (shown == 0) {
-                        MMT_APPEND("(waiting for peer nodeinfo...)\n");
+                        MMT_APPEND(mmbOnly ? "(no peers beaconed in last hour)\n"
+                                           : "(waiting for peer nodeinfo...)\n");
                     }
-                    MMT_APPEND("\nUsage: mmb <short_name>\n");
                 }
                 buf[off] = '\0';
                 #undef MMT_APPEND
             }, this);
         terminal_.setFightFn(
             [](void *ctx) {
-                static_cast<MonsterMeshModule *>(ctx)->requestLocalTextBattle();
+                auto *self = static_cast<MonsterMeshModule *>(ctx);
+                self->fightTargetShortName_[0] = '\0';  // clear any stale target → random
+                self->requestLocalTextBattle();
+            }, this);
+        terminal_.setFightByNameFn(
+            [](void *ctx, const char *shortName) {
+                auto *self = static_cast<MonsterMeshModule *>(ctx);
+                strncpy(self->fightTargetShortName_, shortName,
+                        sizeof(self->fightTargetShortName_) - 1);
+                self->fightTargetShortName_[sizeof(self->fightTargetShortName_) - 1] = '\0';
+                self->requestLocalTextBattle();
             }, this);
         terminal_.setGymFightFn(
             [](void *ctx, uint8_t gymIdx, uint8_t trainerIdx) {
@@ -2941,7 +2967,12 @@ int32_t MonsterMeshModule::runOnce()
             willChain = won && (activeE4Member_ < 4);
         }
         if (!willChain) {
-            textBattleActive_ = false;
+            // Schedule screen restore. textBattleActive_ is cleared by the
+            // end-of-fight block lower in this function (the ELSE at the
+            // gauntletContinue check). Do NOT clear it here — that block is
+            // inside if(textBattleActive_) and must run to set
+            // pendingBattleEndedCb_, award badges, and clear activeGymBattle_.
+            // Clearing textBattleActive_ here skips all of that.
             pendingBattleEndCleanup_ = true;
             LOG_INFO("[MonsterMesh] textBattle exited — scheduling LVGL restore\n");
         }
@@ -3339,7 +3370,18 @@ int32_t MonsterMeshModule::runOnce()
         const auto *peers = daycare_.getNeighbors();
         uint8_t peerCount = daycare_.getNeighborCount();
         if (e4MemberIdx_ >= 5 && exploreRouteIdx_ >= 8 && gymBattleIdx_ >= 8 && peerCount > 0 && peers) {
+            // `fight N` sets fightTargetShortName_ to a specific peer short name.
+            // Find that peer; fall back to random if not found.
             uint8_t pick = (uint8_t)(esp_random() % peerCount);
+            if (fightTargetShortName_[0] != '\0') {
+                for (uint8_t pi = 0; pi < peerCount; ++pi) {
+                    if (strncasecmp(peers[pi].shortName, fightTargetShortName_, 4) == 0) {
+                        pick = pi;
+                        break;
+                    }
+                }
+            }
+            fightTargetShortName_[0] = '\0';  // consume
             const auto &n = peers[pick];
             uint8_t party = n.partyCount > 6 ? 6 : n.partyCount;
             cpuParty.count = party;
@@ -3481,16 +3523,17 @@ int32_t MonsterMeshModule::runOnce()
             for (uint8_t i = 0; i < 6; ++i) stagedXp_[i] += xp[i];
             pendingXpAwardCb_ = true;
         }
-        // Battle ended — gym gauntlets chain straight into the next
-        // trainer without healing the player. End cleanup only fires when
-        // we either (a) lost, or (b) cleared the leader.
+        // Battle ended — gym gauntlet chains to the next trainer with a full
+        // heal between fights (matches RPi behavior). End callback only fires
+        // when the player loses or clears the leader.
         if (!textBattle_.isActive()) {
             bool gauntletContinue = false;
             if (activeGymBattle_ < 8) {
                 bool won = (textBattle_.engineResult() ==
                             Gen1BattleEngine::Result::P1_WIN);
                 if (won && activeGymTrainer_ < 4) {
-                    // Build the next trainer's party and stay in-battle.
+                    // Mid-gauntlet win: heal the player fully, then chain
+                    // straight into the next trainer.
                     Gen1Party nextParty = {};
                     uint8_t nextIdx = activeGymTrainer_ + 1;
                     if (lordBuildGymParty(activeGymBattle_, nextIdx, nextParty)) {
@@ -3498,6 +3541,7 @@ int32_t MonsterMeshModule::runOnce()
                         const char *tn = g ? g->trainers[nextIdx].name : "NEXT";
                         char tag[6];
                         snprintf(tag, sizeof(tag), "%.4s", tn);
+                        textBattle_.healPlayer();  // full HP/PP/status restore between trainers
                         textBattle_.nextOpponent(nextParty, tag);
                         char hdr[40];
                         snprintf(hdr, sizeof(hdr), "%s - %s %u/5",
@@ -3506,23 +3550,13 @@ int32_t MonsterMeshModule::runOnce()
                         textBattle_.setHeader(hdr);
                         activeGymTrainer_ = nextIdx;
                         gauntletContinue = true;
-                        // Cancel the end-cleanup that was staged when this
-                        // trainer's battle ended — we're continuing the
-                        // gauntlet, not returning to the terminal. Without
-                        // this, pendingBattleEndCleanup_ fires on the LVGL
-                        // thread and hides the battle screen before Misty
-                        // (or any leader) ever appears.
                         pendingBattleEndCleanup_ = false;
                         textBattleActive_ = true;
-                        LOG_INFO("[MonsterMesh] gym %u: chain to trainer %u (%s)\n",
+                        LOG_INFO("[MonsterMesh] gym %u: healed + chain to trainer %u (%s)\n",
                                  (unsigned)activeGymBattle_, (unsigned)nextIdx, tn);
                     }
                 }
                 if (!gauntletContinue) {
-                    // Either lost, or cleared the leader. Stage the
-                    // callback for the LVGL thread to deliver — the
-                    // terminal callbacks lv_label_create into the output
-                    // which isn't safe from the LoRa thread.
                     stagedEndKind_ = StagedEndKind::GYM;
                     stagedEndA_    = activeGymBattle_;
                     stagedEndB_    = activeGymTrainer_;

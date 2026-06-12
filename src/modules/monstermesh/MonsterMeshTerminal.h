@@ -98,18 +98,28 @@ class MonsterMeshTerminal {
 
     // `mmt` (no args) lists peers we've recently heard a daycare beacon
     // from. Module fills the buffer with newline-separated lines.
-    typedef void (*MmtListFn)(void *ctx, char *buf, size_t bufLen);
+    // mmbOnly=true: only include peers seen within the last hour (for mmb).
+    // mmbOnly=false: all known peers (for fight / hb).
+    typedef void (*MmtListFn)(void *ctx, char *buf, size_t bufLen, bool mmbOnly);
     void setMmtListFn(MmtListFn fn, void *ctx) {
         mmtListFn_  = fn;
         mmtListCtx_ = ctx;
     }
 
 
-    // Hook for the `fight` command — kicks off a local CPU battle.
+    // Hook for the `fight` command — kicks off a local CPU battle (random peer).
     typedef void (*FightFn)(void *ctx);
     void setFightFn(FightFn fn, void *ctx) {
         fightFn_ = fn;
         fightCtx_ = ctx;
+    }
+
+    // Hook for `fight N` with a specific peer — shortName is 4-char null-term.
+    // Module looks up that neighbor in daycare and uses their party as the CPU.
+    typedef void (*FightByNameFn)(void *ctx, const char *shortName);
+    void setFightByNameFn(FightByNameFn fn, void *ctx) {
+        fightByNameFn_ = fn;
+        fightByNameCtx_ = ctx;
     }
 
     // Hook for `gym fight <N>` — gymIdx is 0..7, trainerIdx is the per-gym
@@ -260,6 +270,8 @@ class MonsterMeshTerminal {
     void               *beaconCtx_      = nullptr;
     FightFn             fightFn_       = nullptr;
     void               *fightCtx_      = nullptr;
+    FightByNameFn       fightByNameFn_ = nullptr;
+    void               *fightByNameCtx_ = nullptr;
     GymFightFn          gymFightFn_    = nullptr;
     void               *gymFightCtx_   = nullptr;
     ExploreFn           exploreFn_     = nullptr;
