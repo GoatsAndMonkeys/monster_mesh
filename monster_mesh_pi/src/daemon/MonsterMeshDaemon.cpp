@@ -384,21 +384,28 @@ void MonsterMeshDaemon::onMeshPacket(const MeshPacketIn &pkt) {
 
     } else if (pktType == static_cast<uint8_t>(PktType::TEXT_BATTLE_CHALLENGE)) {
         // BattlePacket layout: [0]=type [1]=sessionHi [2]=sessionLo [3]=seq [4..]=payload
-        // CHALLENGE payload:   [0]=gen  [1]=nameLen   [2..nameLen+1]=name  [nameLen+2..]=partyMin(109B)
-        if (pkt.payloadLen < 8) return;
+        // CHALLENGE payload (T-Deck serverAuthSendChallenge wire format):
+        //   BP.payload[0..3] = targetId (4B BE)
+        //   BP.payload[4]    = gen
+        //   BP.payload[5]    = nameLen
+        //   BP.payload[6..]  = name
+        //   BP.payload[6+n..] = partyMin (109B)
+        // pkt.payload offsets = BP.payload offsets + 4 (BattlePacket header: type,sessionHi,sessionLo,seq)
+        if (pkt.payloadLen < 10) return;
 
         uint16_t sessionId = ((uint16_t)pkt.payload[1] << 8) | pkt.payload[2];
-        // payload[3] = seq (not used by client)
-        uint8_t nameLen = pkt.payload[5];   // BattlePacket.payload[1]
+        // payload[4..7] = targetId (skip — we accept challenges addressed to us)
+        // payload[8]    = gen
+        uint8_t nameLen = pkt.payload[9];   // BP.payload[5]
         if (nameLen > TB_MAX_NAME_LEN) nameLen = TB_MAX_NAME_LEN;
-        if ((size_t)(6 + nameLen) > pkt.payloadLen) return;
+        if ((size_t)(10 + nameLen) > pkt.payloadLen) return;
 
         memset(challengerName_, 0, sizeof(challengerName_));
-        memcpy(challengerName_, pkt.payload + 6, nameLen);
+        memcpy(challengerName_, pkt.payload + 10, nameLen);
         challengerName_[nameLen] = '\0';
 
         // Grab partyMin if present
-        size_t partyOffset = 6 + nameLen;
+        size_t partyOffset = 10 + nameLen;
         hasChallengeParty_ = false;
         if (partyOffset + TB_PARTY_MIN_BYTES <= pkt.payloadLen) {
             memcpy(challengePartyMin_, pkt.payload + partyOffset, TB_PARTY_MIN_BYTES);
@@ -506,7 +513,7 @@ void MonsterMeshDaemon::onMeshPacket(const MeshPacketIn &pkt) {
         }
         snprintf(logJson + logPos, sizeof(logJson) - logPos, "]");
 
-        if (result != 0) pvpActive_ = false;  // battle ended
+        if (result != 0) { pvpActive_ = false; pvpServerMode_ = false; }  // battle ended
 
         char jsonBuf[768];
         snprintf(jsonBuf, sizeof(jsonBuf),
@@ -526,6 +533,75 @@ void MonsterMeshDaemon::onMeshPacket(const MeshPacketIn &pkt) {
         ipc_.push(jsonBuf);
         LOG_INFO("MonsterMeshDaemon: UPDATE turn=%u seq=%u myHp=%u enemyHp=%u result=%u",
                  (unsigned)turn, (unsigned)seq, (unsigned)myHp, (unsigned)enemyHp, (unsigned)result);
+
+    } else if (pktType == static_cast<uint8_t>(PktType::TEXT_BATTLE_ACCEPT)) {
+        // Server role: we sent the CHALLENGE, the remote node is sending ACCEPT
+        if (!pvpServerMode_ || !pvpAwaitingAccept_) return;
+        uint16_t sessionId = ((uint16_t)pkt.payload[1] << 8) | pkt.payload[2];
+        if (sessionId != pvpSessionId_) return;
+        // ACCEPT payload: BP.payload[0]=accepted [1]=nameLen [2..]=name [2+n..]=partyMin
+        // pkt.payload offsets: +4 for BattlePacket header
+        if (pkt.payloadLen < 6) return;
+        uint8_t accepted = pkt.payload[4];  // BP.payload[0]
+        if (!accepted) {
+            pvpServerMode_     = false;
+            pvpAwaitingAccept_ = false;
+            ipc_.push("{\"type\":\"PVP_ACCEPT_RECEIVED\",\"accepted\":0}");
+            return;
+        }
+        uint8_t nameLen = pkt.payload[5];   // BP.payload[1]
+        if (nameLen > TB_MAX_NAME_LEN) nameLen = TB_MAX_NAME_LEN;
+        if ((size_t)(6 + nameLen) > pkt.payloadLen) return;
+        char peerName[TB_MAX_NAME_LEN + 1] = {};
+        memcpy(peerName, pkt.payload + 6, nameLen);
+
+        pvpAwaitingAccept_ = false;
+        pvpActive_         = true;
+        pvpPeerNodeId_     = pkt.fromNode;
+        pvpUpdateSeq_      = 0;
+
+        // Collect partyMin
+        uint8_t partyMinBuf[TB_PARTY_MIN_BYTES] = {};
+        int hasParty = 0;
+        size_t partyOff = 6 + nameLen;
+        if (partyOff + TB_PARTY_MIN_BYTES <= pkt.payloadLen) {
+            memcpy(partyMinBuf, pkt.payload + partyOff, TB_PARTY_MIN_BYTES);
+            hasParty = 1;
+        }
+
+        // Forward to terminal as JSON with partyMin byte array
+        char jsonBuf[768];
+        int pos = snprintf(jsonBuf, sizeof(jsonBuf),
+            "{\"type\":\"PVP_ACCEPT_RECEIVED\",\"accepted\":1,"
+            "\"node_id\":%u,\"trainer\":\"%s\",\"has_party\":%d,\"party_min\":[",
+            (unsigned)pkt.fromNode, peerName, hasParty);
+        for (int i = 0; i < TB_PARTY_MIN_BYTES; i++) {
+            if (i > 0) pos += snprintf(jsonBuf + pos, sizeof(jsonBuf) - pos, ",");
+            pos += snprintf(jsonBuf + pos, sizeof(jsonBuf) - pos, "%u", (unsigned)partyMinBuf[i]);
+        }
+        snprintf(jsonBuf + pos, sizeof(jsonBuf) - pos, "]}");
+        ipc_.push(jsonBuf);
+        LOG_INFO("MonsterMeshDaemon: PvP ACCEPT from 0x%08X (%s) — server mode active",
+                 (unsigned)pkt.fromNode, peerName);
+
+    } else if (pktType == static_cast<uint8_t>(PktType::TEXT_BATTLE_ACTION_V2)) {
+        // Server role: client (T-Deck) is sending their move
+        if (!pvpServerMode_ || !pvpActive_) return;
+        uint16_t sessionId = ((uint16_t)pkt.payload[1] << 8) | pkt.payload[2];
+        if (sessionId != pvpSessionId_) return;
+        // ACTION_V2 payload starts at pkt.payload+4 (BP.payload[0..])
+        if (pkt.payloadLen < 4 + TB_ACTION_BYTES) return;
+        uint8_t turn, actionType, index, lastAckedSeq;
+        if (!tbUnpackAction(pkt.payload + 4, pkt.payloadLen - 4,
+                            turn, actionType, index, lastAckedSeq)) return;
+        char jsonBuf[128];
+        snprintf(jsonBuf, sizeof(jsonBuf),
+                 "{\"type\":\"PVP_ACTION_RECEIVED\","
+                 "\"turn\":%u,\"action\":%u,\"index\":%u}",
+                 (unsigned)turn, (unsigned)actionType, (unsigned)index);
+        ipc_.push(jsonBuf);
+        LOG_INFO("MonsterMeshDaemon: ACTION_V2 from client turn=%u action=%u index=%u",
+                 (unsigned)turn, (unsigned)actionType, (unsigned)index);
     }
     // Other packet types not handled
 }
@@ -631,6 +707,39 @@ void MonsterMeshDaemon::onIpcMessage(const std::string &msg) {
         LOG_INFO("MonsterMeshDaemon: ACTION_V2 turn=%u action=%u index=%u seq=%u",
                  (unsigned)turn, (unsigned)action, (unsigned)index,
                  (unsigned)pvpLastAppliedSeq_);
+    } else if (strcmp(cmd, "SEND_CHALLENGE") == 0) {
+        // {"cmd":"SEND_CHALLENGE","node_id":N}
+        const char *p = strstr(s, "\"node_id\":");
+        if (!p) return;
+        uint32_t targetId = (uint32_t)strtoul(p + 10, nullptr, 10);
+        sendBattleChallenge(targetId);
+
+    } else if (strcmp(cmd, "SEND_BATTLE_UPDATE") == 0) {
+        // {"cmd":"SEND_BATTLE_UPDATE","data":[N,N,...]}
+        // Terminal sends raw UPDATE body bytes; we wrap in BattlePacket and send.
+        if (!pvpServerMode_ || !pvpActive_ || !mesh_.isOpen()) return;
+        const char *dp = strstr(s, "\"data\":[");
+        if (!dp) return;
+        dp += 8;
+        uint8_t body[BATTLELINK_MAX_PAYLOAD] = {};
+        int bodyLen = 0;
+        while (*dp && *dp != ']' && bodyLen < (int)sizeof(body)) {
+            while (*dp == ' ' || *dp == ',') dp++;
+            if (*dp == ']' || !*dp) break;
+            body[bodyLen++] = (uint8_t)atoi(dp);
+            while (*dp && *dp != ',' && *dp != ']') dp++;
+        }
+        uint8_t buf[BATTLELINK_MAX_PKT] = {};
+        BattlePacket *pkt = (BattlePacket *)buf;
+        pkt->type = (uint8_t)PktType::TEXT_BATTLE_UPDATE;
+        pkt->setSessionId(pvpSessionId_);
+        pkt->seq = pvpUpdateSeq_++;
+        memcpy(pkt->payload, body, (size_t)bodyLen);
+        mesh_.sendPacket(pvpPeerNodeId_, MONSTERMESH_CHANNEL, buf,
+                         (uint16_t)(BATTLELINK_HDR_SIZE + bodyLen));
+        LOG_INFO("MonsterMeshDaemon: server UPDATE seq=%u bodyLen=%d to 0x%08X",
+                 (unsigned)(pvpUpdateSeq_ - 1), bodyLen, (unsigned)pvpPeerNodeId_);
+
     } else if (strcmp(cmd, "GET_NEIGHBOR_PARTY") == 0) {
         // {"cmd":"GET_NEIGHBOR_PARTY","node_id":N}
         const char *p = strstr(s, "\"node_id\":");
@@ -1064,6 +1173,68 @@ void MonsterMeshDaemon::sendBattleAccept(uint32_t peerNodeId, uint16_t sessionId
     mesh_.sendPacket(peerNodeId, MONSTERMESH_CHANNEL, buf, (uint16_t)totalLen);
     LOG_INFO("MonsterMeshDaemon: sent ACCEPT(%s) session=0x%04X to 0x%08X",
              accepted ? "yes" : "no", sessionId, peerNodeId);
+}
+
+void MonsterMeshDaemon::sendBattleChallenge(uint32_t targetNodeId) {
+    if (!mesh_.isOpen()) {
+        ipc_.push("{\"type\":\"PVP_CHALLENGE_SENT\",\"ok\":0,\"reason\":\"not connected\"}");
+        return;
+    }
+    uint8_t buf[BATTLELINK_MAX_PKT] = {};
+    BattlePacket *pkt = (BattlePacket *)buf;
+    pkt->type = (uint8_t)PktType::TEXT_BATTLE_CHALLENGE;
+
+    uint16_t session = (uint16_t)((millis() ^ (millis() >> 7)) & 0xFFFF);
+    pvpSessionId_      = session;
+    pvpPeerNodeId_     = targetNodeId;
+    pvpServerMode_     = true;
+    pvpAwaitingAccept_ = true;
+    pvpActive_         = false;
+    pvpUpdateSeq_      = 0;
+
+    pkt->setSessionId(session);
+    pkt->seq = 0;
+
+    // CHALLENGE payload: [0..3]=targetId(BE) [4]=gen [5]=nameLen [6..n-1]=name [6+n..]=partyMin
+    size_t w = 0;
+    pkt->payload[w++] = (targetNodeId >> 24) & 0xFF;
+    pkt->payload[w++] = (targetNodeId >> 16) & 0xFF;
+    pkt->payload[w++] = (targetNodeId >>  8) & 0xFF;
+    pkt->payload[w++] =  targetNodeId        & 0xFF;
+    pkt->payload[w++] = 1;  // gen 1
+
+    uint8_t nlen = (uint8_t)strnlen(shortName_, TB_MAX_NAME_LEN);
+    pkt->payload[w++] = nlen;
+    memcpy(pkt->payload + w, shortName_, nlen);
+    w += nlen;
+
+    Gen1Party ourParty;
+    if (watcher_.hasParty()) {
+        ourParty = watcher_.party();
+    } else {
+        memset(&ourParty, 0, sizeof(ourParty));
+        ourParty.count        = 1;
+        ourParty.species[0]   = 0x54;  // Pikachu
+        ourParty.mons[0].species  = 0x54;
+        ourParty.mons[0].level    = 30;
+        ourParty.mons[0].boxLevel = 30;
+        ourParty.mons[0].moves[0] = 84;  // ThunderShock
+        ourParty.mons[0].moves[1] = 39;  // TailWhip
+        ourParty.mons[0].moves[2] = 98;  // QuickAttack
+        ourParty.mons[0].moves[3] = 86;  // ThunderWave
+        ourParty.mons[0].dvs[0]   = 0xFF;
+        ourParty.mons[0].dvs[1]   = 0xFF;
+    }
+    packPartyMin(pkt->payload + w, ourParty);
+    w += TB_PARTY_MIN_BYTES;
+
+    size_t totalLen = BATTLELINK_HDR_SIZE + w;
+    mesh_.sendPacket(targetNodeId, MONSTERMESH_CHANNEL, buf, (uint16_t)totalLen);
+    LOG_INFO("MonsterMeshDaemon: sent CHALLENGE to 0x%08X session=0x%04X", targetNodeId, session);
+
+    char jsonBuf[64];
+    snprintf(jsonBuf, sizeof(jsonBuf), "{\"type\":\"PVP_CHALLENGE_SENT\",\"ok\":1}");
+    ipc_.push(jsonBuf);
 }
 
 void MonsterMeshDaemon::pushAchievement(const char *name, const char *desc) {

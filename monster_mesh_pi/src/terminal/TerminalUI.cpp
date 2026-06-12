@@ -4,6 +4,7 @@
 
 #include "TerminalUI.h"
 #include "SpriteRender.h"
+#include "../shared/BattlePacket.h"
 #include "../battle/showdown_gen1_moves.h"
 #include "../shared/DaycareSavPatcher.h"   // dexToInternal[] table
 #include "../shared/Gen1BaseExp.h"         // gen1XpYield()
@@ -382,7 +383,11 @@ void TerminalUI::pentestAutoTick() {
             }
         }
         screen_ = Screen::BATTLE;                       // suppress BATTLE_END
-        if (now - pentestEndMs_ >= PENTEST_END_MS) startPentestBattle();
+        if (now - pentestEndMs_ >= PENTEST_END_MS) {
+            if (battleResult_ == Gen1BattleEngine::Result::P2_WIN)
+                pentestRematch_ = true;  // lost: retry the same network
+            startPentestBattle();
+        }
         return;
     }
 
@@ -1183,6 +1188,21 @@ void TerminalUI::clearInfo() { if (winInfo_) werase(winInfo_); }
 void TerminalUI::handleButton(const ButtonEvent &ev) {
     if (!ev.pressed) return;
 
+    // START+SELECT = quit from anywhere (non-pentest modes)
+    if (!pentestMode_ &&
+        (ev.button == GpiButton::START || ev.button == GpiButton::SELECT)) {
+        static uint64_t firstMs = 0;
+        static bool     firstWasStart = false;
+        uint64_t now = millis();
+        if (firstMs == 0 || now - firstMs > 1000) {
+            firstMs       = now;
+            firstWasStart = (ev.button == GpiButton::START);
+        } else {
+            bool otherHeld = firstWasStart ? (ev.button == GpiButton::SELECT)
+                                           : (ev.button == GpiButton::START);
+            if (otherHeld) { requestQuit(); return; }
+        }
+    }
     // Select always toggles help (from any screen except battle)
     if (ev.button == GpiButton::SELECT && screen_ != Screen::BATTLE) {
         screen_ = (screen_ == Screen::HELP) ? Screen::MENU : Screen::HELP;
@@ -1234,6 +1254,9 @@ void TerminalUI::menuButton(const ButtonEvent &ev) {
         case GpiButton::A:
             activateItem(activeItem_);
             break;
+        case GpiButton::Y:
+            startLocalBattle();
+            break;
         default: break;
     }
 }
@@ -1280,6 +1303,25 @@ void TerminalUI::neighborsButton(const ButtonEvent &ev) {
                          (unsigned)n.nodeId);
                 ipc_.send(cmd);
                 pushActivity("> Challenging %s...", asyncFightTrainer_);
+            }
+            break;
+        }
+        case GpiButton::Y: {
+            // Y = send a real MMB CHALLENGE over the mesh (Pi as server)
+            if (neighborSel_ < neighborDisplayCount_) {
+                const NeighborEntry &n = neighbors_[neighborSel_];
+                if (n.nodeId == 0) {
+                    pushActivity("> Can't challenge: missing node ID");
+                    break;
+                }
+                pvpServerMode_         = true;
+                pvpPendingMyAction_    = 0xFF;
+                pvpPendingOppReceived_ = false;
+                char cmd[64];
+                snprintf(cmd, sizeof(cmd),
+                         "{\"cmd\":\"SEND_CHALLENGE\",\"node_id\":%u}", (unsigned)n.nodeId);
+                ipc_.send(cmd);
+                pushActivity("> Sent MMB challenge to %s...", n.shortName);
             }
             break;
         }
@@ -1358,11 +1400,52 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
     //   4: Captures    → SIGINT_CAPTURES
     //   5: Reset Pikachu → confirm step (nOpts shrinks to 2)
     if (pentestShowStatus_) {
-        // ── Status detail sub-page: only B navigates back ────────────────────
-        if (pentestStatusDetail_) {
+        // ── Status detail sub-page (subView 1): B returns to menu ────────────
+        if (pentestSubView_ == 1) {
             if (ev.button == GpiButton::B && ev.pressed) {
-                pentestStatusDetail_ = false;
-                pentestStatusSel_    = 1;   // leave cursor on Status
+                pentestSubView_   = 0;
+                pentestStatusSel_ = 1;   // leave cursor on Status
+            }
+            return;
+        }
+
+        // ── SIGINT sub-views (2=scanner 3=probes 4=deauths 5=captures) ────────
+        if (pentestSubView_ >= 2 && pentestSubView_ <= 5) {
+            if (!ev.pressed) return;
+            // Common: B = back to menu
+            if (ev.button == GpiButton::B) {
+                int prevView      = pentestSubView_;
+                pentestSubView_   = 0;
+                pentestStatusSel_ = prevView; // menu item N matches subView N
+                return;
+            }
+            // Scroll-enabled sub-views
+            int *sel = nullptr, *scroll = nullptr;
+            int  listSz = 0;
+            if (pentestSubView_ == 2) { sel = &sigintNetSel_;    scroll = &sigintNetScroll_;    listSz = (int)sigintNets_.size();    }
+            if (pentestSubView_ == 3) { sel = &sigintProbeSel_;  scroll = &sigintProbeScroll_;  listSz = (int)sigintProbes_.size();  }
+            if (pentestSubView_ == 4) { sel = &sigintDeauthSel_; scroll = &sigintDeauthScroll_; listSz = (int)sigintDeauths_.size(); }
+            if (pentestSubView_ == 5) { sel = &sigintCapSel_;    scroll = &sigintCapScroll_;    listSz = (int)sigintCaps_.size();    }
+            if (sel) {
+                constexpr int vis = 7;
+                switch (ev.button) {
+                    case GpiButton::UP:
+                        if (*sel > 0) { (*sel)--; if (*sel < *scroll) (*scroll)--; }
+                        return;
+                    case GpiButton::DOWN:
+                        if (*sel < listSz - 1) { (*sel)++; if (*sel >= *scroll + vis) (*scroll)++; }
+                        return;
+                    case GpiButton::A: case GpiButton::SELECT:
+                        // AP scanner: A = start/refresh capture; others = refresh data
+                        if (pentestSubView_ == 2 && (int)sigintNets_.size() > *sel)
+                            sigintStartCapture(sigintNets_[*sel]);
+                        else if (pentestSubView_ == 2) { sigintLoadAllNets(); *sel = *scroll = 0; }
+                        else if (pentestSubView_ == 3) { sigintLoadProbes();  *sel = *scroll = 0; }
+                        else if (pentestSubView_ == 4) { sigintLoadDeauths(); *sel = *scroll = 0; }
+                        else if (pentestSubView_ == 5) { sigintLoadCapFiles();*sel = *scroll = 0; }
+                        return;
+                    default: return;
+                }
             }
             return;
         }
@@ -1403,31 +1486,27 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
                         pentestStatusSel_  = 0;
                         break;
                     case 1:  // Status
-                        pentestStatusDetail_ = true;
+                        pentestSubView_ = 1;
                         break;
                     case 2:  // AP Scanner
-                        pentestShowStatus_ = false;
                         sigintLoadAllNets();
                         sigintNetSel_ = sigintNetScroll_ = 0;
-                        screen_ = Screen::SIGINT_SCANNER;
+                        pentestSubView_ = 2;
                         break;
                     case 3:  // Probe Sniffer
-                        pentestShowStatus_ = false;
                         sigintLoadProbes();
                         sigintProbeSel_ = sigintProbeScroll_ = 0;
-                        screen_ = Screen::SIGINT_PROBES;
+                        pentestSubView_ = 3;
                         break;
                     case 4:  // Deauth Log
-                        pentestShowStatus_ = false;
                         sigintLoadDeauths();
                         sigintDeauthSel_ = sigintDeauthScroll_ = 0;
-                        screen_ = Screen::SIGINT_DEAUTHS;
+                        pentestSubView_ = 4;
                         break;
                     case 5:  // Captures
-                        pentestShowStatus_ = false;
                         sigintLoadCapFiles();
                         sigintCapSel_ = sigintCapScroll_ = 0;
-                        screen_ = Screen::SIGINT_CAPTURES;
+                        pentestSubView_ = 5;
                         break;
                     case 6:  // Reset Pikachu
                         pentestConfirmReset_ = true;
@@ -1437,17 +1516,20 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
                 return;
             case GpiButton::B:
                 if (ev.pressed) {
-                    pentestShowStatus_   = false;
-                    pentestStatusSel_    = 0;
+                    pentestShowStatus_ = false;
+                    pentestStatusSel_  = 0;
+                    pentestSubView_    = 0;
                 }
                 return;
             default:
                 return;
         }
     } else if (ev.button == GpiButton::A) {
-        if (!pentestBossMode_) {
+        if (pentestBossMode_) {
+            battleHandleButton(ev);
+        } else {
             pentestShowStatus_   = true;
-            pentestStatusDetail_ = false;
+            pentestSubView_      = 0;
             pentestStatusSel_    = 0;
             pentestConfirmReset_ = false;
         }
@@ -1559,6 +1641,7 @@ void TerminalUI::pentestResetProgress() {
     pentestShowStatus_   = false;
     pentestConfirmReset_ = false;
     pentestStatusSel_    = 0;
+    pentestRematch_      = false;
     pentestDoneSsids_.clear();   // forget every network cracked so far...
     pentestNets_.clear();        // ...so they're all fair game again.
 #ifndef __APPLE__
@@ -1588,39 +1671,116 @@ void TerminalUI::pentestMarkBeaten(uint8_t dex) {
 // message box when the player presses A.  Uses menuMode so each line owns its
 // own ">" selector arrow — drawMessageLog skips the global "> " prefix.
 void TerminalUI::pentestBuildMenuLog(std::vector<std::string> &out) {
-    // ── Status detail sub-page: show stats, B returns to menu ────────────────
-    if (pentestStatusDetail_) {
+    char ln[64];
+
+    // ── Status detail (subView 1) ─────────────────────────────────────────────
+    if (pentestSubView_ == 1) {
         pentestBuildStatus(out);
-        out.push_back("");
-        out.push_back("  B: back to menu");
+        out.push_back("  B: back");
+        return;
+    }
+
+    // ── AP Scanner (subView 2) ────────────────────────────────────────────────
+    if (pentestSubView_ == 2) {
+        if (sigintNets_.empty()) {
+            out.push_back("  No vulnerable APs found.");
+        } else {
+            int vis = 7, scroll = sigintNetScroll_;
+            for (int i = scroll; i < (int)sigintNets_.size() && i < scroll + vis; i++) {
+                const auto &n = sigintNets_[i];
+                // "SEL RSSI :xx:yy:zz SSID"
+                static const char *tT[] = {"    ","OPEN","UNCO","RARE"};
+                snprintf(ln, sizeof(ln), "%s %-4s %3d %-8s %.18s",
+                         i == sigintNetSel_ ? ">" : " ",
+                         tT[n.tier < 4 ? n.tier : 0],
+                         n.rssi,
+                         n.bssid[0] ? (n.bssid + (int)strlen(n.bssid) - 8) : "?",
+                         n.ssid[0] ? n.ssid : "(hidden)");
+                out.push_back(ln);
+            }
+        }
+        if (sigintCapActive_)
+            snprintf(ln, sizeof(ln), "  [CAPTURING %.20s]", sigintCapSSID_);
+        else
+            snprintf(ln, sizeof(ln), "  A:capture  SEL:rescan  B:back");
+        out.push_back(ln);
+        return;
+    }
+
+    // ── Probe Sniffer (subView 3) ─────────────────────────────────────────────
+    if (pentestSubView_ == 3) {
+        if (sigintProbes_.empty()) {
+            out.push_back("  No probes captured.");
+        } else {
+            int vis = 7, scroll = sigintProbeScroll_;
+            for (int i = scroll; i < (int)sigintProbes_.size() && i < scroll + vis; i++) {
+                const auto &p = sigintProbes_[i];
+                snprintf(ln, sizeof(ln), "%s %2d %-8s %.22s",
+                         i == sigintProbeSel_ ? ">" : " ",
+                         p.count,
+                         p.mac[0] ? (p.mac + (int)strlen(p.mac) - 8) : "?",
+                         p.ssid[0] ? p.ssid : "(hidden)");
+                out.push_back(ln);
+            }
+        }
+        out.push_back("  A/SEL:rescan  B:back");
+        return;
+    }
+
+    // ── Deauth Log (subView 4) ────────────────────────────────────────────────
+    if (pentestSubView_ == 4) {
+        if (sigintDeauths_.empty()) {
+            out.push_back("  No deauth events.");
+        } else {
+            int vis = 7, scroll = sigintDeauthScroll_;
+            for (int i = scroll; i < (int)sigintDeauths_.size() && i < scroll + vis; i++) {
+                snprintf(ln, sizeof(ln), "%s %.46s",
+                         i == sigintDeauthSel_ ? ">" : " ",
+                         sigintDeauths_[i].line);
+                out.push_back(ln);
+            }
+        }
+        out.push_back("  A:refresh  B:back");
+        return;
+    }
+
+    // ── Captures (subView 5) ──────────────────────────────────────────────────
+    if (pentestSubView_ == 5) {
+        if (sigintCaps_.empty()) {
+            out.push_back("  No captures yet.");
+            out.push_back("  Use AP Scanner to start.");
+        } else {
+            int vis = 7, scroll = sigintCapScroll_;
+            for (int i = scroll; i < (int)sigintCaps_.size() && i < scroll + vis; i++) {
+                const auto &c = sigintCaps_[i];
+                long kb = c.sizeBytes / 1024;
+                snprintf(ln, sizeof(ln), "%s %-32s %ldK",
+                         i == sigintCapSel_ ? ">" : " ",
+                         c.name, kb);
+                out.push_back(ln);
+            }
+        }
+        out.push_back("  B:back");
         return;
     }
 
     // ── Confirm-reset sub-step ────────────────────────────────────────────────
     if (pentestConfirmReset_) {
-        out.push_back("  RESET ALL progress?");
-        out.push_back("");
+        out.push_back("  RESET all progress?");
         out.push_back(pentestStatusSel_ == 0 ? "> Yes, RESET ALL" : "  Yes, RESET ALL");
         out.push_back(pentestStatusSel_ == 1 ? "> Cancel"         : "  Cancel");
         return;
     }
 
-    // ── Main menu ─────────────────────────────────────────────────────────────
+    // ── Main menu (subView 0) ─────────────────────────────────────────────────
     static const char *items[] = {
-        "Back",
-        "Status",
-        "AP Scanner",
-        "Probe Sniffer",
-        "Deauth Log",
-        "Captures",
-        "Reset Pikachu",
+        "Back", "Status", "AP Scanner",
+        "Probe Sniffer", "Deauth Log", "Captures", "Reset Pikachu",
     };
-    static constexpr int N = 7;
-    for (int i = 0; i < N; i++) {
-        char line[48];
-        snprintf(line, sizeof(line), "%s %s",
+    for (int i = 0; i < 7; i++) {
+        snprintf(ln, sizeof(ln), "%s %s",
                  (i == pentestStatusSel_) ? ">" : " ", items[i]);
-        out.push_back(line);
+        out.push_back(ln);
     }
 }
 
@@ -1682,30 +1842,6 @@ void TerminalUI::pentestBuildStatus(std::vector<std::string> &out) {
         if (!row.empty()) out.push_back("  " + row);
     }
 
-    // ── Menu (scrollable; default selection = Back) ──
-    out.push_back("");
-    auto opt = [&](int idx, const char *label) {
-        out.push_back(std::string(pentestStatusSel_ == idx ? "> " : "  ") + label);
-    };
-    if (!pentestConfirmReset_) {
-        opt(0, "Back");
-        // Capture status inline with the Scanner option
-        if (sigintCapActive_) {
-            char capLine[64];
-            snprintf(capLine, sizeof(capLine), "AP Scanner  [capturing: %.20s]", sigintCapSSID_);
-            opt(1, capLine);
-        } else {
-            opt(1, "AP Scanner");
-        }
-        opt(2, "Probe Sniffer");
-        opt(3, "Deauth Log");
-        opt(4, "Captures");
-        opt(5, "Reset Pikachu");
-    } else {
-        out.push_back("Reset to Level 5? Progress lost!");
-        opt(0, "No, keep playing");
-        opt(1, "Yes, RESET");
-    }
 }
 
 void TerminalUI::battleEndButton(const ButtonEvent &ev) {
@@ -1860,11 +1996,12 @@ void TerminalUI::battleEndButton(const ButtonEvent &ev) {
         asyncFightActive_ = false;
     }
 
-    inGymBattle_ = false;
-    inE4Battle_  = false;
-    inBattle_    = false;
+    inGymBattle_   = false;
+    inE4Battle_    = false;
+    inBattle_      = false;
+    pvpServerMode_ = false;
     battleLog_.clear();
-    screen_      = Screen::MENU;
+    screen_        = Screen::MENU;
 }
 
 // Push every slot's accumulated sessionXp_ to the daemon as CREDIT_XP
@@ -1984,27 +2121,7 @@ void TerminalUI::activateLocalItem(int item) {
 void TerminalUI::activateSystemItem(int item) {
     switch (item) {
         case 0: screen_ = Screen::HELP; break;
-        case 1:
-            sigintLoadAllNets();
-            sigintNetSel_ = sigintNetScroll_ = 0;
-            screen_ = Screen::SIGINT_SCANNER;
-            break;
-        case 2:
-            sigintLoadProbes();
-            sigintProbeSel_ = sigintProbeScroll_ = 0;
-            screen_ = Screen::SIGINT_PROBES;
-            break;
-        case 3:
-            sigintLoadDeauths();
-            sigintDeauthSel_ = sigintDeauthScroll_ = 0;
-            screen_ = Screen::SIGINT_DEAUTHS;
-            break;
-        case 4:
-            sigintLoadCapFiles();
-            sigintCapSel_ = sigintCapScroll_ = 0;
-            screen_ = Screen::SIGINT_CAPTURES;
-            break;
-        case 5: screen_ = Screen::CONFIRM_QUIT; break;
+        case 1: screen_ = Screen::CONFIRM_QUIT; break;
     }
 }
 
@@ -3040,7 +3157,11 @@ void TerminalUI::startPentestBattle() {
     // Pikachu only fights networks with a real weakness.  Pick a vulnerable
     // WiFi target (real scan via wpa_cli, or the demo list off-device); if none
     // is in range, drop to standby and keep scanning.
-    if (!pentestPickTarget()) {
+    // On a rematch (lost last fight) reuse the same SSID/vuln without re-scanning.
+    if (pentestRematch_) {
+        pentestRematch_ = false;
+        // pentestSsid_ and pentestVuln_ are already set from the previous battle.
+    } else if (!pentestPickTarget()) {
         pentestEnterStandby();
         return;
     }
@@ -3410,23 +3531,51 @@ void TerminalUI::battleHandleButton(const ButtonEvent &ev) {
             break;
         case GpiButton::A:
             if (switchMode_) {
-                // Switch
                 if (switchSel_ != (int)pp.active && pp.mons[switchSel_].hp > 0) {
-                    engine_.submitAction(localSide_, 1, (uint8_t)switchSel_);
-                    uint8_t cpuA, cpuI;
-                    engine_.cpuPickAction(1 - localSide_, cpuA, cpuI);
-                    engine_.submitAction(1 - localSide_, cpuA, cpuI);
-                    runTurnWithXp();
+                    if (pvpServerMode_) {
+                        // Queue Pi's switch; wait for opponent's action
+                        if (pvpPendingOppReceived_) {
+                            engine_.submitAction(0, 1, (uint8_t)switchSel_);
+                            engine_.submitAction(1, pvpPendingOppAction_, pvpPendingOppIndex_);
+                            pvpPendingOppReceived_ = false;
+                            pvpPendingMyAction_    = 0xFF;
+                            runTurnWithXp();
+                            sendPvpUpdate(battleResult_ != Gen1BattleEngine::Result::ONGOING);
+                        } else {
+                            pvpPendingMyAction_ = 1;
+                            pvpPendingMyIndex_  = (uint8_t)switchSel_;
+                        }
+                    } else {
+                        engine_.submitAction(localSide_, 1, (uint8_t)switchSel_);
+                        uint8_t cpuA, cpuI;
+                        engine_.cpuPickAction(1 - localSide_, cpuA, cpuI);
+                        engine_.submitAction(1 - localSide_, cpuA, cpuI);
+                        runTurnWithXp();
+                    }
                     switchMode_ = false;
                 }
             } else {
-                // Use move
                 if (pp.mons[pp.active].moves[moveSel_] != 0) {
-                    engine_.submitAction(localSide_, 0, (uint8_t)moveSel_);
-                    uint8_t cpuA, cpuI;
-                    engine_.cpuPickAction(1 - localSide_, cpuA, cpuI);
-                    engine_.submitAction(1 - localSide_, cpuA, cpuI);
-                    runTurnWithXp();
+                    if (pvpServerMode_) {
+                        // Queue Pi's move; run turn immediately if opponent's already arrived
+                        if (pvpPendingOppReceived_) {
+                            engine_.submitAction(0, 0, (uint8_t)moveSel_);
+                            engine_.submitAction(1, pvpPendingOppAction_, pvpPendingOppIndex_);
+                            pvpPendingOppReceived_ = false;
+                            pvpPendingMyAction_    = 0xFF;
+                            runTurnWithXp();
+                            sendPvpUpdate(battleResult_ != Gen1BattleEngine::Result::ONGOING);
+                        } else {
+                            pvpPendingMyAction_ = 0;
+                            pvpPendingMyIndex_  = (uint8_t)moveSel_;
+                        }
+                    } else {
+                        engine_.submitAction(localSide_, 0, (uint8_t)moveSel_);
+                        uint8_t cpuA, cpuI;
+                        engine_.cpuPickAction(1 - localSide_, cpuA, cpuI);
+                        engine_.submitAction(1 - localSide_, cpuA, cpuI);
+                        runTurnWithXp();
+                    }
                 }
             }
             break;
@@ -3613,6 +3762,187 @@ void TerminalUI::parseBattleUpdate(const std::string &msg) {
     }
 }
 
+// ── PvP server-mode (Pi challenged a T-Deck, Pi runs the battle engine) ──────
+
+void TerminalUI::parsePvpAccept(const std::string &msg) {
+    int accepted = jsonGetInt(msg, "accepted", 0);
+    if (!accepted) {
+        pvpServerMode_ = false;
+        pushActivity("> MMB: challenge declined");
+        return;
+    }
+    std::string trainer = jsonGetStr(msg, "trainer");
+    strncpy(pvpEnemyName_, trainer.c_str(), sizeof(pvpEnemyName_) - 1);
+    pvpEnemyName_[sizeof(pvpEnemyName_) - 1] = '\0';
+
+    // Decode foe party from partyMin byte array in the JSON
+    Gen1Party foeParty = {};
+    size_t pos = msg.find("\"party_min\":[");
+    if (pos != std::string::npos) {
+        uint8_t partyMin[TB_PARTY_MIN_BYTES] = {};
+        pos += 13;
+        for (int i = 0; i < TB_PARTY_MIN_BYTES; i++) {
+            while (pos < msg.size() && (msg[pos] == ' ' || msg[pos] == ',')) pos++;
+            if (pos >= msg.size() || msg[pos] == ']') break;
+            partyMin[i] = (uint8_t)atoi(msg.c_str() + pos);
+            while (pos < msg.size() && msg[pos] != ',' && msg[pos] != ']') pos++;
+        }
+        uint8_t count = partyMin[0];
+        if (count > 6) count = 6;
+        foeParty.count = count;
+        size_t r = 1;
+        for (uint8_t i = 0; i < count; i++) {
+            if (r + 18 > TB_PARTY_MIN_BYTES) break;
+            foeParty.species[i]         = partyMin[r + 0];
+            foeParty.mons[i].species    = partyMin[r + 0];
+            foeParty.mons[i].level      = partyMin[r + 1];
+            foeParty.mons[i].boxLevel   = partyMin[r + 1];
+            foeParty.mons[i].dvs[0]     = partyMin[r + 2];
+            foeParty.mons[i].dvs[1]     = partyMin[r + 3];
+            foeParty.mons[i].hpExp[0]   = partyMin[r + 4];
+            foeParty.mons[i].hpExp[1]   = partyMin[r + 5];
+            foeParty.mons[i].atkExp[0]  = partyMin[r + 6];
+            foeParty.mons[i].atkExp[1]  = partyMin[r + 7];
+            foeParty.mons[i].defExp[0]  = partyMin[r + 8];
+            foeParty.mons[i].defExp[1]  = partyMin[r + 9];
+            foeParty.mons[i].spdExp[0]  = partyMin[r + 10];
+            foeParty.mons[i].spdExp[1]  = partyMin[r + 11];
+            foeParty.mons[i].spcExp[0]  = partyMin[r + 12];
+            foeParty.mons[i].spcExp[1]  = partyMin[r + 13];
+            foeParty.mons[i].moves[0]   = partyMin[r + 14];
+            foeParty.mons[i].moves[1]   = partyMin[r + 15];
+            foeParty.mons[i].moves[2]   = partyMin[r + 16];
+            foeParty.mons[i].moves[3]   = partyMin[r + 17];
+            for (int m = 0; m < 4; m++) {
+                const Gen1MoveData *md = gen1Move(foeParty.mons[i].moves[m]);
+                foeParty.mons[i].pp[m] = md ? md->pp : 0;
+            }
+            r += 18;
+        }
+    }
+
+    // Build Pi's own party (populates party_ and sets inBattle_=true, screen_=BATTLE)
+    buildPlayerPartyForBattle();
+
+    // Restart engine against the real foe instead of the random CPU
+    uint32_t seed = (uint32_t)(millis() ^ (uint32_t)(uintptr_t)this);
+    engine_.start(party_, foeParty, seed);
+
+    // Server-mode battle state
+    pvpServerMode_         = true;
+    pvpServerTurn_         = 0;
+    pvpPendingMyAction_    = 0xFF;
+    pvpPendingOppReceived_ = false;
+    roguelike_   = false;
+    inGymBattle_ = false;
+    inE4Battle_  = false;
+    moveSel_     = 0;
+    switchMode_  = false;
+    battleLog_.clear();
+    battleResult_ = Gen1BattleEngine::Result::ONGOING;
+
+    // Send initial UPDATE so T-Deck can show starting HP
+    sendPvpUpdate(false);
+    pushActivity("> MMB: %s accepted! Battle on!", pvpEnemyName_);
+}
+
+void TerminalUI::parsePvpAction(const std::string &msg) {
+    if (!pvpServerMode_ || !inBattle_) return;
+    uint8_t oppAction = (uint8_t)jsonGetInt(msg, "action", 0);
+    uint8_t oppIndex  = (uint8_t)jsonGetInt(msg, "index",  0);
+
+    if (pvpPendingMyAction_ != 0xFF) {
+        // Pi's action is already queued — submit both and run the turn
+        engine_.submitAction(0, pvpPendingMyAction_, pvpPendingMyIndex_);
+        engine_.submitAction(1, oppAction, oppIndex);
+        pvpPendingMyAction_    = 0xFF;
+        pvpPendingOppReceived_ = false;
+        runTurnWithXp();
+        sendPvpUpdate(battleResult_ != Gen1BattleEngine::Result::ONGOING);
+    } else {
+        // Pi hasn't picked yet — store opponent's action and wait
+        pvpPendingOppReceived_ = true;
+        pvpPendingOppAction_   = oppAction;
+        pvpPendingOppIndex_    = oppIndex;
+    }
+}
+
+void TerminalUI::sendPvpUpdate(bool includeResult) {
+    // Build UPDATE body in T-Deck wire format:
+    //   engine_.party(0) = Pi (server), engine_.party(1) = T-Deck (client)
+    //   HP sent as: client first, then server (T-Deck sees my_hp = client HP)
+    uint16_t flags = (uint16_t)(TB_UPD_HP | TB_UPD_PP | TB_UPD_SWITCH | TB_UPD_STATUS);
+    if (includeResult) flags |= (uint16_t)TB_UPD_RESULT;
+
+    // Collect the most recent log lines (cap at 4 to stay within packet budget)
+    int logStart = (int)battleLog_.size() - 4;
+    if (logStart < 0) logStart = 0;
+    int numLog = (int)battleLog_.size() - logStart;
+    if (numLog > 0) flags |= (uint16_t)TB_UPD_LOG;
+
+    const Gen1BattleEngine::BattleParty &cli = engine_.party(1);  // T-Deck
+    const Gen1BattleEngine::BattleParty &srv = engine_.party(0);  // Pi
+    const auto &cliMon = cli.mons[cli.active];
+    const auto &srvMon = srv.mons[srv.active];
+
+    pvpServerTurn_++;
+
+    // BATTLELINK_MAX_PAYLOAD = 196 bytes — the maximum BattlePacket.payload[] size
+    uint8_t body[BATTLELINK_MAX_PAYLOAD] = {};
+    int w = 0;
+    body[w++] = pvpServerTurn_;
+    body[w++] = (flags >> 8) & 0xFF;
+    body[w++] =  flags       & 0xFF;
+    body[w++] = 0; body[w++] = 0; body[w++] = 0;  // boardHash24 (unused)
+
+    // HP: client (T-Deck), then server (Pi)
+    body[w++] = (cliMon.hp >> 8) & 0xFF;
+    body[w++] =  cliMon.hp       & 0xFF;
+    body[w++] = (srvMon.hp >> 8) & 0xFF;
+    body[w++] =  srvMon.hp       & 0xFF;
+
+    // PP: client (T-Deck) active mon's PP
+    for (int i = 0; i < 4; i++) body[w++] = cliMon.pp[i];
+
+    // SWITCH: client active, server active
+    body[w++] = cli.active;
+    body[w++] = srv.active;
+
+    // STATUS: client, server
+    body[w++] = cliMon.status;
+    body[w++] = srvMon.status;
+
+    if (includeResult) {
+        body[w++] = (uint8_t)engine_.result();
+    }
+
+    if (numLog > 0) {
+        // Reserve space for the line count; fill after loop so count matches what fit
+        int countPos = w++;
+        int actualLines = 0;
+        for (int i = 0; i < numLog; i++) {
+            const std::string &line = battleLog_[logStart + i];
+            uint8_t ll = (uint8_t)(line.size() < 64 ? line.size() : 64);
+            if (w + 1 + ll >= BATTLELINK_MAX_PAYLOAD) break;
+            body[w++] = ll;
+            memcpy(body + w, line.c_str(), ll);
+            w += ll;
+            actualLines++;
+        }
+        body[countPos] = (uint8_t)actualLines;
+    }
+
+    // Encode as JSON byte array and ship via daemon
+    char jsonBuf[1024];
+    int pos = snprintf(jsonBuf, sizeof(jsonBuf), "{\"cmd\":\"SEND_BATTLE_UPDATE\",\"data\":[");
+    for (int i = 0; i < w; i++) {
+        if (i > 0) pos += snprintf(jsonBuf + pos, sizeof(jsonBuf) - pos, ",");
+        pos += snprintf(jsonBuf + pos, sizeof(jsonBuf) - pos, "%u", (unsigned)body[i]);
+    }
+    snprintf(jsonBuf + pos, sizeof(jsonBuf) - pos, "]}");
+    ipc_.send(jsonBuf);
+}
+
 // ── IPC message handling ──────────────────────────────────────────────────────
 
 void TerminalUI::onIpcMessage(const std::string &msg) {
@@ -3620,9 +3950,11 @@ void TerminalUI::onIpcMessage(const std::string &msg) {
     if      (type == "PARTY_UPDATE")       parsePartyUpdate(msg);
     else if (type == "STATUS")             parseStatus(msg);
     else if (type == "DAYCARE_EVENT")      parseDaycareEvent(msg);
-    else if (type == "CHALLENGE_RECEIVED") parseChallenge(msg);
-    else if (type == "ACHIEVEMENT")        parseAchievement(msg);
-    else if (type == "BATTLE_UPDATE")      parseBattleUpdate(msg);
+    else if (type == "CHALLENGE_RECEIVED")  parseChallenge(msg);
+    else if (type == "ACHIEVEMENT")         parseAchievement(msg);
+    else if (type == "BATTLE_UPDATE")       parseBattleUpdate(msg);
+    else if (type == "PVP_ACCEPT_RECEIVED") parsePvpAccept(msg);
+    else if (type == "PVP_ACTION_RECEIVED") parsePvpAction(msg);
     else if (type == "NEIGHBORS")          parseNeighbors(msg);
     else if (type == "NEIGHBOR_PARTY")     parseNeighborParty(msg);
     else if (type == "SAV_WRITEBACK") {

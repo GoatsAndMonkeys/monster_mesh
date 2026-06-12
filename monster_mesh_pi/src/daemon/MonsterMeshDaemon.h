@@ -68,11 +68,19 @@ private:
     uint8_t  pvpLastAppliedSeq_ = 0;
     uint8_t  pvpTurn_           = 0;
 
+    // PvP SERVER role — Pi initiated the challenge, runs the engine
+    bool     pvpServerMode_     = false;
+    bool     pvpAwaitingAccept_ = false;
+    uint8_t  pvpUpdateSeq_      = 0;
+
     // Pack a Gen1Party into 109-byte partyMin wire format
     static size_t packPartyMin(uint8_t out[TB_PARTY_MIN_BYTES], const Gen1Party &party);
 
     // Send a proper TEXT_BATTLE_ACCEPT or DECLINE to the peer
     void sendBattleAccept(uint32_t peerNodeId, uint16_t sessionId, bool accepted);
+
+    // Send a TEXT_BATTLE_CHALLENGE to a target node (server role)
+    void sendBattleChallenge(uint32_t targetNodeId);
 
     // Callbacks wired to daycare
     void onDaycareEvent(const DaycareEvent &evt);

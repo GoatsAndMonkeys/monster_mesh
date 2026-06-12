@@ -55,17 +55,12 @@ static constexpr const char *LOCAL_DESC[]  = {
 };
 static constexpr int LOCAL_COUNT = 3;
 
-static constexpr const char *SYSTEM_ITEMS[] = {
-    "Help", "AP Scanner", "Probe Sniffer", "Deauth Log", "Captures", "Quit" };
+static constexpr const char *SYSTEM_ITEMS[] = { "Help", "Quit" };
 static constexpr const char *SYSTEM_DESC[]  = {
     "Show button controls",
-    "All nearby APs - [A]=start EAPOL capture",
-    "Devices probing for SSIDs (5s scan)",
-    "Deauth / disconnect events from wpa_supplicant",
-    "Browse saved .pcap handshake files",
     "Return to RetroPie",
 };
-static constexpr int SYSTEM_COUNT = 6;
+static constexpr int SYSTEM_COUNT = 2;
 
 // ── TerminalUI ────────────────────────────────────────────────────────────────
 
@@ -205,7 +200,7 @@ private:
     char     challengerName_[13]  = {};
     int      challengeSel_        = 0;  // 0=Accept 1=Decline
 
-    // Active PvP battle state (daemon-driven UPDATEs)
+    // Active PvP battle state (daemon-driven UPDATEs, client role — T-Deck is server)
     uint16_t pvpMyHp_       = 0;
     uint16_t pvpMyMaxHp_    = 0;
     uint8_t  pvpMyPp_[4]    = {};
@@ -219,6 +214,15 @@ private:
     char     pvpEnemyName_[13] = {};
     std::vector<std::string> pvpLog_;
     int      pvpMoveSel_    = 0;
+
+    // PvP SERVER role — Pi challenged a T-Deck, Pi runs the engine, sends UPDATEs
+    bool    pvpServerMode_         = false;
+    uint8_t pvpServerTurn_         = 0;
+    uint8_t pvpPendingMyAction_    = 0xFF;  // 0xFF = not yet set
+    uint8_t pvpPendingMyIndex_     = 0;
+    bool    pvpPendingOppReceived_ = false;
+    uint8_t pvpPendingOppAction_   = 0;
+    uint8_t pvpPendingOppIndex_    = 0;
 
     // ── Battle state ──────────────────────────────────────────────────────────
     Gen1BattleEngine engine_;
@@ -298,6 +302,9 @@ private:
     void battleEndButton(const ButtonEvent &ev);
     void pvpBattleButton(const ButtonEvent &ev);
     void pvpBattleEndButton(const ButtonEvent &ev);
+    void parsePvpAccept(const std::string &msg);
+    void parsePvpAction(const std::string &msg);
+    void sendPvpUpdate(bool includeResult);
     void helpButton(const ButtonEvent &ev);
     void confirmQuitButton(const ButtonEvent &ev);
 
@@ -343,8 +350,9 @@ private:
     uint8_t  pentestLevel_      = 5;
     uint32_t pentestXp_         = 0;  // partial XP toward the next level
     bool     pentestLoaded_     = false;
-    bool     pentestShowStatus_   = false; // in-log menu open (A to open)
-    bool     pentestStatusDetail_ = false; // showing status detail sub-page
+    bool     pentestShowStatus_ = false; // in-log secondary view active (A to open)
+    // 0=main menu  1=status  2=scanner  3=probes  4=deauths  5=captures
+    int      pentestSubView_    = 0;
     uint8_t  pentestDex_[19]    = {};     // 151-bit "seen" Pokedex (bitset)
     uint8_t  pentestBeaten_[19] = {};     // 151-bit "beaten" Pokedex (bitset)
     uint16_t pentestUsedSsid_   = 0;      // bitmask of WiFi targets already hit
@@ -358,6 +366,7 @@ private:
     int      pentestStatusSel_   = 0;      // selected option in the status menu
     bool     pentestConfirmReset_= false; // status menu is in the reset-confirm step
     bool     pentestBossMode_    = false; // Y: interactive fight (looks like normal battle)
+    bool     pentestRematch_     = false; // true = lost last fight, retry same network
     bool     pentestScreenOff_   = false; // X: screen blank + backlight off
     uint64_t pentestExitPressMs_ = 0;     // timestamp of last START or SELECT press
     bool     pentestExitStartFirst_ = false; // true = START was pressed first
