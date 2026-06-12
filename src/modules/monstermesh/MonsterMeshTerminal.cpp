@@ -1104,6 +1104,15 @@ void MonsterMeshTerminal::executeLine(const char *line)
         println("Beacon broadcast — peers should pick you up shortly.");
         return;
     }
+
+    // `forget mmb` — wipe NodeDB entries for all MonsterMesh peers so they
+    // re-announce with fresh public keys on next beacon.
+    if (strcmp(line, "forget mmb") == 0) {
+        if (!forgetMmbFn_) { println("forget not wired"); return; }
+        forgetMmbFn_(forgetMmbCtx_);
+        println("Forgot all MMB peers — beacon to rediscover them.");
+        return;
+    }
     // `hb` (Hollaback) — initiating node broadcasts presence on mesh+MQTT
     // (single low-impact beacon, peers respond on MQTT only so we don't
     // pollute the LoRa airtime), then immediately dumps the currently-known

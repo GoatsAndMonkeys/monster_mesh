@@ -1881,6 +1881,19 @@ int32_t MonsterMeshModule::runOnce()
                              (unsigned)self->mmChannel_);
                 }
             }, this);
+        terminal_.setForgetMmbFn(
+            [](void *ctx) {
+                auto *self = static_cast<MonsterMeshModule *>(ctx);
+                for (uint8_t i = 0; i < self->mmbCapableCount_; ++i) {
+                    nodeDB->removeNodeByNum(self->mmbCapableNodes_[i]);
+                    LOG_INFO("[MonsterMesh] forget mmb: removed node 0x%08x\n",
+                             (unsigned)self->mmbCapableNodes_[i]);
+                }
+                self->mmbCapableCount_ = 0;
+                // Re-beacon so peers re-announce themselves to us.
+                self->nextBeaconRequestsResponse_ = true;
+                self->daycare_.forceBeacon();
+            }, this);
         terminal_.setMmtListFn(
             [](void *ctx, char *buf, size_t n, bool mmbOnly) {
                 auto *self = static_cast<MonsterMeshModule *>(ctx);

@@ -95,6 +95,14 @@ class MonsterMeshTerminal {
         beaconCtx_ = ctx;
     }
 
+    // `forget mmb` — removes all tracked MonsterMesh-capable nodes from
+    // NodeDB so they re-announce with fresh public keys on next beacon.
+    typedef void (*ForgetMmbFn)(void *ctx);
+    void setForgetMmbFn(ForgetMmbFn fn, void *ctx) {
+        forgetMmbFn_ = fn;
+        forgetMmbCtx_ = ctx;
+    }
+
 
     // `mmt` (no args) lists peers we've recently heard a daycare beacon
     // from. Module fills the buffer with newline-separated lines.
@@ -268,6 +276,8 @@ class MonsterMeshTerminal {
     void               *mmtListCtx_     = nullptr;
     BeaconFn            beaconFn_       = nullptr;
     void               *beaconCtx_      = nullptr;
+    ForgetMmbFn         forgetMmbFn_    = nullptr;
+    void               *forgetMmbCtx_   = nullptr;
     FightFn             fightFn_       = nullptr;
     void               *fightCtx_      = nullptr;
     FightByNameFn       fightByNameFn_ = nullptr;
