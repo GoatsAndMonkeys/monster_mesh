@@ -722,14 +722,21 @@ void TerminalUI::renderNeighbors() {
     } else {
         int infoRows = getmaxy(winInfo_);
         uint64_t now = millis();
+        // Helper: format elapsed seconds as "Xs", "Xm", or "Xh"
+        auto fmtAgo = [](uint32_t nowMs32, uint32_t seenMs, char *out, size_t len) {
+            if (seenMs == 0) { snprintf(out, len, "?"); return; }
+            uint32_t sec = nowMs32 >= seenMs ? (nowMs32 - seenMs) / 1000 : 0;
+            if (sec < 60)        snprintf(out, len, "%us", (unsigned)sec);
+            else if (sec < 3600) snprintf(out, len, "%um", (unsigned)(sec / 60));
+            else                 snprintf(out, len, "%uh", (unsigned)(sec / 3600));
+        };
+        uint32_t now32 = (uint32_t)(now & 0xFFFFFFFF);
         for (int i = 0; i < neighborDisplayCount_ && i * 2 < infoRows - 1; i++) {
             const NeighborEntry &n = neighbors_[i];
             bool sel = (i == neighborSel_);
             bool fresh = (n.firstSeenMs != 0 &&
                           now - n.firstSeenMs < NEW_NEIGHBOR_HIGHLIGHT_MS);
             if (sel) wattron(winInfo_, A_REVERSE | COLOR_PAIR(3));
-            // Leading "*" marker + cyan-bold short-name when this neighbor
-            // is still inside the new-arrival highlight window.
             const char *marker = fresh ? "*" : " ";
             mvwprintw(winInfo_, i * 2, 0, "%s", marker);
             if (fresh) wattron(winInfo_, COLOR_PAIR(4) | A_BOLD);
@@ -737,8 +744,10 @@ void TerminalUI::renderNeighbors() {
             mvwprintw(winInfo_, i * 2, 1, " %s", n.shortName);
             if (fresh) wattroff(winInfo_, COLOR_PAIR(4));
             wattroff(winInfo_, A_BOLD);
+            char ago[8];
+            fmtAgo(now32, n.lastSeenMs, ago, sizeof(ago));
             mvwprintw(winInfo_, i * 2, 2 + (int)strlen(n.shortName),
-                      " (%s)%s", n.gameName, sel ? " <" : "  ");
+                      " (%s) %s%s", n.gameName, ago, sel ? " <" : "  ");
             if (sel) wattroff(winInfo_, A_REVERSE | COLOR_PAIR(3));
             if (n.partyCount > 0)
                 mvwprintw(winInfo_, i * 2 + 1, 3, "%s Lv%d  (%d in party)",
@@ -4182,9 +4191,11 @@ void TerminalUI::parseNeighbors(const std::string &msg) {
         int pc           = jsonGetInt(slot, "party_count", 0);
         int lv           = jsonGetInt(slot, "lead_level", 0);
         uint32_t nid     = (uint32_t)jsonGetInt(slot, "node_id", 0);
+        uint32_t lsms    = (uint32_t)jsonGetInt(slot, "last_seen_ms", 0);
 
         NeighborEntry &n = neighbors_[i];
-        n.nodeId = nid;
+        n.nodeId     = nid;
+        n.lastSeenMs = lsms;
         strncpy(n.shortName, sn.c_str(),   sizeof(n.shortName) - 1);
         n.shortName[sizeof(n.shortName) - 1] = 0;
         strncpy(n.gameName,  gn.c_str(),   sizeof(n.gameName)  - 1);

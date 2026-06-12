@@ -1063,6 +1063,7 @@ void MonsterMeshDaemon::pushStatus() {
 // MESH > Neighbors screen can show them by short name + lead pokemon.
 void MonsterMeshDaemon::pushNeighbors() {
     const DaycareNeighborPokemon *n = daycare_.getNeighbors();
+    const uint32_t *lastSeen = daycare_.getNeighborLastSeen();
     uint8_t count = daycare_.getNeighborCount();
 
     char buf[1400];
@@ -1090,9 +1091,10 @@ void MonsterMeshDaemon::pushNeighbors() {
         pos += snprintf(buf + pos, sizeof(buf) - pos,
             "{\"node_id\":%u,\"short_name\":\"%s\",\"game_name\":\"%s\","
             "\"party_count\":%d,\"lead_nick\":\"%s\",\"lead_level\":%d,"
-            "\"lead_dex\":%d}",
+            "\"lead_dex\":%d,\"last_seen_ms\":%u}",
             (unsigned)nb.nodeId, shortBuf, gameBuf,
-            (int)nb.partyCount, nickBuf, (int)nb.level, (int)nb.speciesDex);
+            (int)nb.partyCount, nickBuf, (int)nb.level, (int)nb.speciesDex,
+            (unsigned)(lastSeen ? lastSeen[i] : 0));
     }
     pos += snprintf(buf + pos, sizeof(buf) - pos, "]}");
     ipc_.push(buf);

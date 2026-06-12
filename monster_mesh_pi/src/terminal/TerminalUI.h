@@ -166,7 +166,8 @@ private:
         int      partyCount;
         char     lead[11];   // lead pokemon nickname
         int      leadLevel;
-        uint64_t firstSeenMs;  // millis() when first appeared this session
+        uint64_t firstSeenMs;   // millis() when first appeared this session
+        uint32_t lastSeenMs;    // daemon's neighborLastSeen_ timestamp (millis)
     };
     // Highlight new neighbors for this long after first appearance.
     static constexpr uint64_t NEW_NEIGHBOR_HIGHLIGHT_MS = 30000;

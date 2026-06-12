@@ -41,6 +41,7 @@ public:
     bool isActive() const { return active_; }
     uint8_t getNeighborCount() const { return neighborCount_; }
     const DaycareNeighborPokemon *getNeighbors() const { return neighbors_; }
+    const uint32_t *getNeighborLastSeen() const { return neighborLastSeen_; }
 
     // Save/load state to POSIX file
     bool saveState();
