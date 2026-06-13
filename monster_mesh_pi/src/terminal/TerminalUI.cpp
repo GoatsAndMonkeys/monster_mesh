@@ -1562,8 +1562,17 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
         return;
     }
 
-    // L (shoulder) — toggle boss-key / normal-battle mode.
+    // Y — boss key: toggle boss mode in battle, OR start a random interactive
+    // battle from the standby screen (hides the pentest session in plain sight).
     if (ev.button == GpiButton::Y && ev.pressed) {
+        if (pentestStandby_) {
+            // From standby: force-start a random Kanto battle without waiting
+            // for a real network scan (pentestRematch_ bypasses pentestPickTarget).
+            pentestRematch_ = true;
+            startPentestBattle();
+            pentestBossMode_ = true;
+            return;
+        }
         if (inPentestBattle_ && inBattle_ &&
             battleResult_ == Gen1BattleEngine::Result::ONGOING) {
             pentestBossMode_ = !pentestBossMode_;
@@ -3367,6 +3376,17 @@ void TerminalUI::startPentestBattle() {
     battleResult_ = Gen1BattleEngine::Result::ONGOING;
     uint32_t seed = (uint32_t)(millis() ^ ((uint32_t)wildDex << 8) ^ wildLv);
     engine_.start(party_, wild, seed);
+
+    // Override the foe's nickname with the WiFi SSID so the status box shows
+    // the target network name ("SSID L14") instead of the Pokemon species name.
+    if (pentestSsid_[0]) {
+        Gen1BattleEngine::BattleParty &fp = engine_.party(1);
+        int n = 0;
+        for (int i = 0; pentestSsid_[i] && n < 10; i++, n++)
+            fp.mons[0].nickname[n] = pentestSsid_[i];
+        fp.mons[0].nickname[n] = '\0';
+    }
+
     screen_ = Screen::BATTLE;
 }
 
