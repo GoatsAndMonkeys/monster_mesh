@@ -4053,14 +4053,6 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
 {
     data->state = LV_INDEV_STATE_RELEASED;
 
-    // Keep device-ui backlight alive on EVERY keyboard read — used to gate
-    // on emu/browser/textbattle but that left the terminal blanking while
-    // the user was actively typing: typing keystrokes don't show up as LVGL
-    // input until LVGL routes them, so the inactivity monitor saw nothing.
-    // Poking activity here keeps both the terminal scrollback and the lgfx-
-    // direct text-battle screen lit while the user is at the keyboard.
-    lv_display_trigger_activity(NULL);
-
     // Pick up any SAV-loaded party that runOnce staged for us — this runs on
     // the LVGL thread, so it's safe to mutate widgets here.
     if (monsterMeshModule) monsterMeshModule->tryConsumeStagedParty();
@@ -4111,6 +4103,7 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
                 g_micLastToggleMs = now;
                 g_keyPeekAltWasPressed = true;
                 LOG_INFO("[MonsterMesh] ALT pressed (KEY-mode peek) → toggle\n");
+                lv_display_trigger_activity(NULL);
                 monsterMeshModule->handleKeyFromLVGL(0x05);
                 return;
             }
@@ -4124,6 +4117,7 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
             if (now - g_micLastToggleMs > 600) {
                 g_micLastToggleMs = now;
                 g_micWasPressed = true;
+                lv_display_trigger_activity(NULL);
                 monsterMeshModule->toggleSound();
                 return;
             }
@@ -4234,7 +4228,8 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
         if (monsterMeshModule) {
             monsterMeshModule->setJoypadDirect(rawBytesToJoypad(b));
         }
-        // LVGL gets nothing while emulator is active
+        // Keep screen alive while emulator is running
+        lv_display_trigger_activity(NULL);
         return;
     }
 
@@ -4243,6 +4238,8 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
     uint8_t key = Wire.available() ? Wire.read() : 0;
 
     if (key == 0) return;
+    // User pressed a key — reset screen inactivity timer
+    lv_display_trigger_activity(NULL);
 
     LOG_DEBUG("[MonsterMesh] key=0x%02X emu=%d\n", key, monsterMeshModule ? (int)monsterMeshModule->isEmulatorActive() : -1);
 
