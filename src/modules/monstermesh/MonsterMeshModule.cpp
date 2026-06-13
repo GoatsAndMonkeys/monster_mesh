@@ -249,13 +249,12 @@ int MonsterMeshModule::handleInputEvent(const InputEvent *event)
 {
     if (!event) return 0;
 
-    // b445: wake the screen on EVERY keyboard event MM sees, including the
-    // ones we don't intercept (which then fall through to LVGL → terminal
-    // textarea). b444's fix in handleKeyPress only fired for events MM
-    // actually consumed (ALT, emu/browser, text-battle); typing in the
-    // MonsterMesh terminal goes straight to LVGL, so handleKeyPress is
-    // never called and the screen blanked while the user was typing.
-    if (event->kbchar != 0 || event->inputEvent == INPUT_BROKER_ANYKEY) {
+    // Wake the screen on actual key character events only. The original
+    // INPUT_BROKER_ANYKEY condition was too broad — it matched trackball and
+    // touch events continuously, preventing the screen from ever sleeping.
+    // Actual terminal typing always has kbchar != 0 so this still keeps the
+    // screen on while the user is typing.
+    if (event->kbchar != 0) {
         powerFSM.trigger(EVENT_INPUT);
     }
 
