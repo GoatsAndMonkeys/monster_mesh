@@ -311,7 +311,8 @@ void MonsterMeshTextBattle::exit()
     phase_ = Phase::IDLE;
     role_  = Role::LEGACY;
     awaitingAccept_ = false;
-    awaitingFirstUpdate_ = false;
+    awaitingFirstUpdate_   = false;
+    awaitingUpdateSinceMs_ = 0;
     unackedUpdate_   = false;
     pendingKeyExit_  = false;
     finishedAtMs_    = 0;
@@ -1645,23 +1646,13 @@ size_t MonsterMeshTextBattle::packClientStateFromEngine(uint8_t out[])
     // hash mismatches every UPDATE after turn 0 and we fall into a
     // STATE_REQUEST → FULL_STATE loop on every move.
     uint16_t turn = roleClient ? (uint16_t)clientTurn_ : engine_.turn();
-    uint8_t result;
-    switch (engine_.result()) {
-        case Gen1BattleEngine::Result::ONGOING: result = TB_RESULT_ONGOING; break;
-        // From the client's POV: client is wire side 0. Engine result
-        // P1_WIN means "side 1 won" — which is the server's side on the
-        // CLIENT (engine P1 = server) and the client's side on the SERVER
-        // (engine P1 = client per server's swap). Map per role so both
-        // sides hash the same result byte.
-        case Gen1BattleEngine::Result::P1_WIN:
-            result = roleClient ? TB_RESULT_YOU_LOSE : TB_RESULT_YOU_WIN;
-            break;
-        case Gen1BattleEngine::Result::P2_WIN:
-            result = roleClient ? TB_RESULT_YOU_WIN : TB_RESULT_YOU_LOSE;
-            break;
-        case Gen1BattleEngine::Result::DRAW:    result = TB_RESULT_DRAW; break;
-        default:                                result = TB_RESULT_ONGOING; break;
-    }
+    // Result is always ONGOING in the board hash. The client never calls
+    // executeTurn so engine_.result() is permanently ONGOING on that side,
+    // which caused the board hash to mismatch on every final UPDATE and
+    // forced a STATE_REQUEST → FULL_STATE cycle that never showed the result.
+    // The actual outcome is conveyed via the TB_UPD_RESULT flag in the UPDATE
+    // packet (serverAuthSendUpdate), not via the board hash.
+    uint8_t result = TB_RESULT_ONGOING;
 
     size_t w = 0;
     out[w++] = (turn >> 8) & 0xFF;
@@ -2232,7 +2223,8 @@ void MonsterMeshTextBattle::clientAuthSendAccept(bool accepted)
     if (!accepted) {
         appendLog("Declined.");
         phase_ = Phase::FINISHED;
-        awaitingFirstUpdate_ = false;
+        awaitingFirstUpdate_   = false;
+        awaitingUpdateSinceMs_ = 0;
         return;
     }
 
@@ -2261,7 +2253,8 @@ void MonsterMeshTextBattle::clientAuthSendAccept(bool accepted)
     }
 
     phase_ = Phase::WAIT_REMOTE;   // await first UPDATE
-    awaitingFirstUpdate_ = true;
+    awaitingFirstUpdate_   = true;
+    awaitingUpdateSinceMs_ = millis();
     appendLog("Battle begins!");
     lastRecvMs_ = millis();
     dirty_ = true;
@@ -2303,7 +2296,8 @@ void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len
                   (unsigned)pkt->seq, (unsigned)len,
                   (unsigned)(((uint16_t)pkt->payload[1] << 8) | pkt->payload[2]));
     // First UPDATE proves the server got our ACCEPT — stop retransmitting it.
-    awaitingFirstUpdate_ = false;
+    awaitingFirstUpdate_   = false;
+    awaitingUpdateSinceMs_ = 0;
 
     // Snapshot server-side mons' HP BEFORE applying this UPDATE so we can
     // detect any server mon that faints (= our kill) and credit XP / level
@@ -2645,7 +2639,9 @@ void MonsterMeshTextBattle::clientAuthOnFullStatePkt(const uint8_t *buf, size_t 
         if (mp.count) for (uint8_t i = 0; i < 4; ++i) mp.mons[mp.active].pp[i] = pkt->payload[r + i];
     }
 
-    clientNeedsFullState_ = false;
+    clientNeedsFullState_  = false;
+    awaitingFirstUpdate_   = false;  // FULL_STATE is as good as the first UPDATE
+    awaitingUpdateSinceMs_ = 0;
     lastAppliedUpdateSeq_ = pkt->seq;
     lastRecvMs_ = millis();
     dirty_ = true;
@@ -2703,9 +2699,25 @@ void MonsterMeshTextBattle::clientAuthRetransmit(uint32_t nowMs)
     // saturate and both radios "busyRx"-throttled each other's actual
     // retransmits — neither side ever heard the other's packet.
     // Client retries at ~5 s + jitter so the schedules don't lock.
-    if (awaitingFirstUpdate_ &&
-        (nowMs - lastAcceptSendMs_) >= 5000u + (uint32_t)(esp_random() & 0x7FF)) {
-        clientAuthSendAccept(true);
+    //
+    // After 15 s the server has almost certainly received our ACCEPT
+    // (we'd have gotten a CHALLENGE re-tx otherwise). At that point
+    // the server is retransmitting the UPDATE every 15 s, but the
+    // re-transmitted ACCEPT is being dropped by the server (not_awaiting).
+    // Switch to STATE_REQUEST so the server sends a FULL_STATE, which
+    // the client can process to exit awaitingFirstUpdate_.
+    if (awaitingFirstUpdate_) {
+        uint32_t elapsedMs = nowMs - awaitingUpdateSinceMs_;
+        if (elapsedMs >= 15000u) {
+            // Server has our ACCEPT — pull state instead of re-sending ACCEPT.
+            if ((nowMs - lastAcceptSendMs_) >= 12000u) {
+                Serial.printf("[MMB] awaitingFirstUpdate >15s — sending STATE_REQUEST\n");
+                clientAuthSendStateRequest();
+                lastAcceptSendMs_ = nowMs;
+            }
+        } else if ((nowMs - lastAcceptSendMs_) >= 5000u + (uint32_t)(esp_random() & 0x7FF)) {
+            clientAuthSendAccept(true);
+        }
     }
     // ACTION_V2 retransmit while waiting for next UPDATE.
     // Blocked while clientNeedsFullState_ — retransmitting with an advanced

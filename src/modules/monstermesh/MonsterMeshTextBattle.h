@@ -374,6 +374,7 @@ private:
     // CHALLENGE retransmit lost contact with our ACCEPT.
     bool     awaitingFirstUpdate_    = false;
     uint32_t lastAcceptSendMs_       = 0;
+    uint32_t awaitingUpdateSinceMs_  = 0; // when awaitingFirstUpdate_ was set
     // UPDATE buffered while still in WAIT_CHALLENGE_OVERLAY (before Y).
     // Applied immediately after engine_.start() in clientAuthSendAccept.
     uint8_t  preAcceptUpdateBuf_[BATTLELINK_MAX_PKT] = {};
