@@ -4306,6 +4306,7 @@ static void monsterMeshKeyboardRead(lv_indev_t *indev, lv_indev_data_t *data)
         bool ownsScreen = monsterMeshModule->isEmulatorActive() ||
                           monsterMeshModule->isBrowserActive()  ||
                           monsterMeshModule->isTextBattleActive() ||
+                          monsterMeshModule->isLvBattleActive() ||
                           monsterMeshModule->isDungeonActive() ||
                           (monsterMeshModule->isTerminalActive() &&
                            monsterMeshModule->isTerminalForeground());
@@ -4422,6 +4423,7 @@ static bool patchSavOnSdWithDaycareXp(const char *romPath, PokemonDaycare &dc)
 // until the task watchdog fires again on the next boot.
 static bool sdBeginSafe(uint32_t freqHz)
 {
+    // Deassert all chip-selects before touching the bus
     pinMode(SDCARD_CS, OUTPUT); digitalWrite(SDCARD_CS, HIGH);
 #ifdef LORA_CS
     pinMode(LORA_CS, OUTPUT); digitalWrite(LORA_CS, HIGH);
@@ -4429,10 +4431,24 @@ static bool sdBeginSafe(uint32_t freqHz)
 #ifdef TFT_CS
     pinMode(TFT_CS, OUTPUT); digitalWrite(TFT_CS, HIGH);
 #endif
-    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-    SPI.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
-    for (int i = 0; i < 10; i++) SPI.transfer(0xFF);
-    SPI.endTransaction();
+    // Bit-bang ≥80 clock pulses with CS deasserted to flush the SD card's
+    // internal state machine after a crash-interrupted SPI transaction.
+    // Must NOT use SPI.begin()/SPI.transfer() here: the SPI bus is owned
+    // by LovyanGFX via ESP-IDF (spi_bus_initialize), so SPI.begin() either
+    // silently fails or claims a different peripheral, and SPI.transfer()
+    // never reaches GPIO SPI_SCK. Raw gpio_set_level() bypasses bus ownership
+    // and guarantees the clocks actually reach the SD card's SCK pin.
+    gpio_set_direction((gpio_num_t)SPI_SCK,  GPIO_MODE_OUTPUT);
+    gpio_set_direction((gpio_num_t)SPI_MOSI, GPIO_MODE_OUTPUT);
+    gpio_set_level((gpio_num_t)SPI_MOSI, 1);  // MOSI=1 during flush (SD idle byte)
+    for (int i = 0; i < 80; i++) {
+        gpio_set_level((gpio_num_t)SPI_SCK, 1);
+        esp_rom_delay_us(2);
+        gpio_set_level((gpio_num_t)SPI_SCK, 0);
+        esp_rom_delay_us(2);
+    }
+    // SD.begin() re-initialises the SPI peripheral (calling SPI.begin()
+    // internally) and configures the Arduino SPI bus for SD access.
     return SD.begin(SDCARD_CS, SPI, freqHz);
 }
 
@@ -5606,8 +5622,8 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
         // While the server is waiting for ACCEPT (challenge sent, battle screen
         // not shown yet), keep the terminal responsive so the user can see status.
         if (textBattle_.awaitingAccept() && terminalActive_ &&
-            !emulatorActive_ && !browserActive_ && ascii != 0x05 &&
-            terminal_.hasInputFocus()) {
+            !emulatorActive_ && !browserActive_ && !lvBattleActive_ &&
+            ascii != 0x05 && terminal_.hasInputFocus()) {
             terminal_.onKey(ascii);
             return;
         }
@@ -5619,6 +5635,10 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
         if (lvBattleActive_) updateLvBattleScreen();
         return;
     }
+
+    // Battle screen is visible but text battle just ended — drop all keys
+    // until tryConsumeStagedParty() hides the screen and restores focus.
+    if (lvBattleActive_) return;
 
     // Drop keys (except ALT, which is the universal escape into the ROM
     // browser) while the LVGL battle-end cleanup is still pending. The

@@ -90,6 +90,7 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
         return terminalActive_ && terminal_.hasInputFocus();
     }
     bool isDungeonActive()   const { return dungeonActive_; }
+    bool isLvBattleActive()  const { return lvBattleActive_; }
 
   protected:
     // ── SinglePortModule overrides ──────────────────────────────────────────
