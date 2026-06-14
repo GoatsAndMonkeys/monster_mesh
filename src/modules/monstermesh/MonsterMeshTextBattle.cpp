@@ -1120,7 +1120,7 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
 
     if (slot >= 0) {
         cursor_ = (uint8_t)slot;
-        return;
+        keyAccept = true;  // number key directly submits — no separate K press needed
     }
 
     if (keyAccept) {
