@@ -66,6 +66,9 @@ static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out,
 // Forward decl — direct emu resume in runOnce switches kb back to RAW mode.
 static void kbSetMode(bool raw);
 
+// Forward decl — defined near SD helpers below; called from setup retry in runOnce.
+static bool sdBeginSafe(uint32_t freqHz = 25000000U);
+
 // Build a full Gen1Party from a daycare neighbor's beacon-broadcast summary.
 // The beacon carries only (dex, level, nickname, moves[4]) per mon; this
 // helper inflates that to a Gen1Pokemon with deterministic stats so a peer
@@ -1777,8 +1780,7 @@ int32_t MonsterMeshModule::runOnce()
         bool sdOk = false;
         {
             concurrency::LockGuard g(spiLock);
-            SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-            sdOk = SD.begin(SDCARD_CS, SPI, 4000000U);
+            sdOk = sdBeginSafe(4000000U);
         }
         if (!sdOk) {
             setupRetries_++;
@@ -4415,12 +4417,30 @@ static bool patchSavOnSdWithDaycareXp(const char *romPath, PokemonDaycare &dc)
     return patchSdSavPathWithDaycareXp(sdRel, dc);
 }
 
+// Drive 80 SPI clock cycles with SDCARD_CS deasserted to reset any SD card
+// left mid-transaction by a prior crash. Without this, SD.begin() hangs
+// until the task watchdog fires again on the next boot.
+static bool sdBeginSafe(uint32_t freqHz)
+{
+    pinMode(SDCARD_CS, OUTPUT); digitalWrite(SDCARD_CS, HIGH);
+#ifdef LORA_CS
+    pinMode(LORA_CS, OUTPUT); digitalWrite(LORA_CS, HIGH);
+#endif
+#ifdef TFT_CS
+    pinMode(TFT_CS, OUTPUT); digitalWrite(TFT_CS, HIGH);
+#endif
+    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+    SPI.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
+    for (int i = 0; i < 10; i++) SPI.transfer(0xFF);
+    SPI.endTransaction();
+    return SD.begin(SDCARD_CS, SPI, freqHz);
+}
+
 static bool patchSdSavPathWithDaycareXp(const char *sdRel, PokemonDaycare &dc)
 {
     if (!sdRel || !sdRel[0]) return false;
     SD.end();
-    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-    if (!SD.begin(SDCARD_CS, SPI)) {
+    if (!sdBeginSafe()) {
         LOG_WARN("[MonsterMesh] D6 SAV write: SD.begin failed\n");
         return false;
     }
@@ -4480,8 +4500,7 @@ static bool patchSdSavPathWithDaycareXp(const char *sdRel, PokemonDaycare &dc)
 static bool findFirstSavOnSd(char *out, size_t outLen)
 {
     SD.end();
-    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-    if (!SD.begin(SDCARD_CS, SPI)) {
+    if (!sdBeginSafe()) {
         LOG_WARN("[MonsterMesh] sav scan: SD.begin failed\n");
         return false;
     }
@@ -4542,8 +4561,7 @@ static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out,
     // every SD operation in this codebase, so SD.open silently returns null
     // unless we re-begin first.
     SD.end();
-    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-    if (!SD.begin(SDCARD_CS, SPI)) {
+    if (!sdBeginSafe()) {
         LOG_WARN("[MonsterMesh] terminal SAV load: SD.begin failed\n");
         return false;
     }
@@ -4643,8 +4661,7 @@ static bool writePartyToSavOnSd(const char *savPath, const Gen1Party &party)
     if (!savPath || !savPath[0]) return false;
 
     SD.end();
-    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-    if (!SD.begin(SDCARD_CS, SPI)) return false;
+    if (!sdBeginSafe()) return false;
 
     // SAV mirror block layout (gen 1, party half):
     static constexpr uint16_t SAV_PARTY_COUNT  = 0x2F2C;
