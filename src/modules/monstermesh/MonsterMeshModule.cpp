@@ -2,6 +2,8 @@
 #include "../pentest/Gen1MiniIcons.h"   // legacy 14×14 silhouettes (kept for fallback)
 #include "../pentest/Gen1ColorIcons.h"  // 56×56 4-color GBC-palette sprites (P2.31)
 #include "../pentest/Gen2BackIcons.h"   // 48×48 4-color GBC-palette back sprites (P2.32)
+#include "Gen3Front565.h"               // full-color Gen-3 front sprites (RGB565) — battle screen
+#include "Gen3Back565.h"                // full-color Gen-3 back sprites (RGB565)
 
 #if defined(T_DECK) && !MESHTASTIC_EXCLUDE_MONSTERMESH
 
@@ -5253,6 +5255,39 @@ static void renderGen1BackSprite(lv_obj_t *canvas, uint8_t species)
     lv_obj_invalidate(canvas);
 }
 
+// Full-color Gen-3 sprite → RGB565 LVGL canvas. Decodes the deflated LE-RGB565
+// stream (0xF81F = transparent sentinel, remapped to white so the sprite sits
+// on the light battle background). `isBack` picks the 48×48 back set vs 56×56
+// front. Replaces renderGen1Sprite/renderGen1BackSprite for the battle screen.
+static void renderGen3Sprite565(lv_obj_t *canvas, uint8_t species, bool isBack)
+{
+    if (!canvas) return;
+    uint8_t *canvasBuf = (uint8_t *)lv_canvas_get_buf(canvas);
+    if (!canvasBuf) return;
+    int w = isBack ? GEN3_BACK_565_W : GEN3_FRONT_565_W;
+    int h = isBack ? GEN3_BACK_565_H : GEN3_FRONT_565_H;
+    if (species == 0 || species > 151) {
+        lv_canvas_fill_bg(canvas, lv_color_white(), LV_OPA_COVER);
+        return;
+    }
+    const uint32_t *offs = isBack ? kGen3Back565Offsets : kGen3Front565Offsets;
+    const uint8_t  *blob = isBack ? kGen3Back565Deflate  : kGen3Front565Deflate;
+    uint32_t start = offs[species], end = offs[species + 1];
+    if (end <= start) { lv_canvas_fill_bg(canvas, lv_color_white(), LV_OPA_COVER); return; }
+    // The deflate stream is already LE-RGB565 == the canvas pixel format.
+    static uint8_t s_px[GEN3_FRONT_565_W * GEN3_FRONT_565_H * 2];  // 6272 B covers both
+    unsigned long destlen = (unsigned long)(w * h * 2);
+    unsigned long srclen  = end - start;
+    if (puff(s_px, &destlen, blob + start, &srclen) != 0) return;
+    for (int i = 0; i < w * h; ++i) {
+        uint8_t lo = s_px[i * 2], hi = s_px[i * 2 + 1];
+        if (lo == 0x1F && hi == 0xF8) { lo = 0xFF; hi = 0xFF; }  // 0xF81F → white
+        canvasBuf[i * 2]     = lo;
+        canvasBuf[i * 2 + 1] = hi;
+    }
+    lv_obj_invalidate(canvas);
+}
+
 void MonsterMeshModule::updateLvBattleScreen()
 {
     Serial.printf("[MMB] updateLvBattleScreen: screen=%p active=%d\n",
@@ -5273,14 +5308,14 @@ void MonsterMeshModule::updateLvBattleScreen()
     if (opp.count > 0 && opp.active < opp.count) {
         uint8_t sp = opp.mons[opp.active].species;
         if (sp != lvLastFoeSpecies_) {
-            renderGen1Sprite((lv_obj_t *)lvFoeCanvas_, sp, 0xC03050);
+            renderGen3Sprite565((lv_obj_t *)lvFoeCanvas_, sp, false);
             lvLastFoeSpecies_ = sp;
         }
     }
     if (me.count > 0 && me.active < me.count) {
         uint8_t sp = me.mons[me.active].species;
         if (sp != lvLastPlayerSpecies_) {
-            renderGen1BackSprite((lv_obj_t *)lvPlayerCanvas_, sp);
+            renderGen3Sprite565((lv_obj_t *)lvPlayerCanvas_, sp, true);
             lvLastPlayerSpecies_ = sp;
         }
     }
