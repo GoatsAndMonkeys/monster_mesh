@@ -5,8 +5,17 @@
 #include "Gen1BattleEngine.h"
 #include "../shared/Gen1Species.h"          // gen1CharToAscii — nicknames in Gen 1 charset
 #include "../shared/DaycareSavPatcher.h"    // internalToDex[] — SAV uses internal hex
+#include "showdown_gen3_basestats.h"        // GEN3_BASE_STATS (Special split + modern types)
+#include "showdown_gen3_typechart.h"        // GEN3_TYPECHART / GEN3_TYPE_IS_SPECIAL
+#include "showdown_gen3_moves.h"            // GEN3_MOVES / gen3Move()
 #include <string.h>
 #include <stdio.h>
+
+// Move data for the active mechanics generation. gen3Move re-types/re-powers
+// the same 165 ids with identical effects+PP, so callers don't care which gen.
+const Gen1MoveData *Gen1BattleEngine::mdata(uint8_t id) const {
+    return isGen3() ? gen3Move(id) : gen1Move(id);
+}
 
 // ── xoshiro128+ deterministic RNG ───────────────────────────────────────────
 
@@ -65,7 +74,7 @@ static inline void initSentinelFields(Gen1BattleEngine::BattlePoke &p)
 
 void Gen1BattleEngine::initBattlePokeFromSave(BattlePoke &dst,
                                               const Gen1Pokemon &src,
-                                              const uint8_t nick[11])
+                                              const uint8_t nick[11], uint8_t gen)
 {
     memset(&dst, 0, sizeof(dst));
     initSentinelFields(dst);
@@ -112,7 +121,6 @@ void Gen1BattleEngine::initBattlePokeFromSave(BattlePoke &dst,
     // 0x83) was being read as Lapras (dex 131), giving HP 301 instead of
     // ~265. Use dst.species (already converted to dex on line above).
     const Gen1BaseStats &b = GEN1_BASE_STATS[dst.species < 152 ? dst.species : 0];
-    dst.type1 = b.type1; dst.type2 = b.type2;
 
     uint16_t hpExp  = be16(src.hpExp);
     uint16_t atkExp = be16(src.atkExp);
@@ -120,11 +128,27 @@ void Gen1BattleEngine::initBattlePokeFromSave(BattlePoke &dst,
     uint16_t spdExp = be16(src.spdExp);
     uint16_t spcExp = be16(src.spcExp);
 
-    dst.maxHp = calcStat(b.hp,  hpDV,  hpExp,  dst.level, true);
-    dst.atk   = calcStat(b.atk, atkDV, atkExp, dst.level, false);
-    dst.def   = calcStat(b.def, defDV, defExp, dst.level, false);
-    dst.spd   = calcStat(b.spd, spdDV, spdExp, dst.level, false);
-    dst.spc   = calcStat(b.spc, spcDV, spcExp, dst.level, false);
+    if (gen >= 3) {
+        // Gen 2/3: modern types + full stat block, with Special SPLIT. Both
+        // Sp.Atk and Sp.Def are derived from the save's single Special DV/exp
+        // (Gen-1 saves only store one), so they differ purely by base stat.
+        const Gen3BaseStats &g = GEN3_BASE_STATS[dst.species < 152 ? dst.species : 0];
+        dst.type1 = g.type1; dst.type2 = g.type2;
+        dst.maxHp = calcStat(g.hp,  hpDV,  hpExp,  dst.level, true);
+        dst.atk   = calcStat(g.atk, atkDV, atkExp, dst.level, false);
+        dst.def   = calcStat(g.def, defDV, defExp, dst.level, false);
+        dst.spd   = calcStat(g.spe, spdDV, spdExp, dst.level, false);  // g.spe = Speed
+        dst.spaG3 = calcStat(g.spa, spcDV, spcExp, dst.level, false);
+        dst.spdG3 = calcStat(g.spd, spcDV, spcExp, dst.level, false);  // g.spd = Sp.Def
+        dst.spc   = dst.spaG3;  // legacy stat displays still read .spc
+    } else {
+        dst.type1 = b.type1; dst.type2 = b.type2;
+        dst.maxHp = calcStat(b.hp,  hpDV,  hpExp,  dst.level, true);
+        dst.atk   = calcStat(b.atk, atkDV, atkExp, dst.level, false);
+        dst.def   = calcStat(b.def, defDV, defExp, dst.level, false);
+        dst.spd   = calcStat(b.spd, spdDV, spdExp, dst.level, false);
+        dst.spc   = calcStat(b.spc, spcDV, spcExp, dst.level, false);
+    }
     dst.hp    = be16(src.hp);
     if (dst.hp == 0 || dst.hp > dst.maxHp) dst.hp = dst.maxHp;
 
@@ -135,24 +159,36 @@ void Gen1BattleEngine::initBattlePokeFromSave(BattlePoke &dst,
 
 void Gen1BattleEngine::initBattlePokeFromBase(BattlePoke &dst,
                                               uint8_t species, uint8_t level,
-                                              const uint8_t moves[4])
+                                              const uint8_t moves[4], uint8_t gen)
 {
     memset(&dst, 0, sizeof(dst));
     initSentinelFields(dst);
     dst.species = species;
     dst.level   = level;
-    const Gen1BaseStats &b = GEN1_BASE_STATS[species < 152 ? species : 0];
-    dst.type1 = b.type1; dst.type2 = b.type2;
     // Wild encounters: average DVs = 8, no stat exp.
-    dst.maxHp = calcStat(b.hp,  8, 0, level, true);
-    dst.atk   = calcStat(b.atk, 8, 0, level, false);
-    dst.def   = calcStat(b.def, 8, 0, level, false);
-    dst.spd   = calcStat(b.spd, 8, 0, level, false);
-    dst.spc   = calcStat(b.spc, 8, 0, level, false);
+    if (gen >= 3) {
+        const Gen3BaseStats &g = GEN3_BASE_STATS[species < 152 ? species : 0];
+        dst.type1 = g.type1; dst.type2 = g.type2;
+        dst.maxHp = calcStat(g.hp,  8, 0, level, true);
+        dst.atk   = calcStat(g.atk, 8, 0, level, false);
+        dst.def   = calcStat(g.def, 8, 0, level, false);
+        dst.spd   = calcStat(g.spe, 8, 0, level, false);
+        dst.spaG3 = calcStat(g.spa, 8, 0, level, false);
+        dst.spdG3 = calcStat(g.spd, 8, 0, level, false);
+        dst.spc   = dst.spaG3;
+    } else {
+        const Gen1BaseStats &b = GEN1_BASE_STATS[species < 152 ? species : 0];
+        dst.type1 = b.type1; dst.type2 = b.type2;
+        dst.maxHp = calcStat(b.hp,  8, 0, level, true);
+        dst.atk   = calcStat(b.atk, 8, 0, level, false);
+        dst.def   = calcStat(b.def, 8, 0, level, false);
+        dst.spd   = calcStat(b.spd, 8, 0, level, false);
+        dst.spc   = calcStat(b.spc, 8, 0, level, false);
+    }
     dst.hp    = dst.maxHp;
     memcpy(dst.moves, moves, 4);
     for (int i = 0; i < 4; ++i) {
-        const Gen1MoveData *m = gen1Move(moves[i]);
+        const Gen1MoveData *m = (gen >= 3 ? gen3Move(moves[i]) : gen1Move(moves[i]));
         dst.pp[i] = m ? m->pp : 0;
     }
     snprintf(dst.nickname, sizeof(dst.nickname), "%s",
@@ -178,7 +214,7 @@ void Gen1BattleEngine::start(const Gen1Party &p1, const Gen1Party &p2,
         memset(&bp, 0, sizeof(bp));
         bp.count = pty.count > MAX_PARTY ? MAX_PARTY : pty.count;
         for (uint8_t i = 0; i < bp.count; ++i) {
-            initBattlePokeFromSave(bp.mons[i], pty.mons[i], pty.nicknames[i]);
+            initBattlePokeFromSave(bp.mons[i], pty.mons[i], pty.nicknames[i], gen_);
         }
         bp.active = 0;
     };
@@ -192,7 +228,7 @@ void Gen1BattleEngine::replaceOpponent(const Gen1Party &p)
     memset(&bp, 0, sizeof(bp));
     bp.count = p.count > MAX_PARTY ? MAX_PARTY : p.count;
     for (uint8_t i = 0; i < bp.count; ++i) {
-        initBattlePokeFromSave(bp.mons[i], p.mons[i], p.nicknames[i]);
+        initBattlePokeFromSave(bp.mons[i], p.mons[i], p.nicknames[i], gen_);
     }
     bp.active = 0;
     // Battle is alive again — clear result & pending actions so the next
@@ -228,6 +264,10 @@ int16_t Gen1BattleEngine::boostMult(int8_t stage)
 
 uint8_t Gen1BattleEngine::effectiveness(uint8_t atkType, uint8_t defType) const
 {
+    if (isGen3()) {
+        if (atkType >= GEN3_TYPE_COUNT || defType >= GEN3_TYPE_COUNT) return 2;
+        return GEN3_TYPECHART[atkType][defType];
+    }
     if (atkType >= GEN1_TYPE_COUNT || defType >= GEN1_TYPE_COUNT) return 2;
     return GEN1_TYPECHART[atkType][defType];
 }
@@ -257,13 +297,19 @@ uint16_t Gen1BattleEngine::calcDamage(uint8_t side, uint8_t targetSide,
     outCrit = false;
     if (mv.power == 0) return 0;
 
-    // Gen 1 physical/special split: by attack TYPE.
-    bool isSpecial = (mv.type == 9 || mv.type == 10 || mv.type == 11 ||
-                      mv.type == 12 || mv.type == 13 || mv.type == 14 ||
-                      mv.type == 15);
+    // Physical/special is by attack TYPE in both gens. Gen 1: a fixed 9..15
+    // range is special. Gen 2/3: table lookup (adds Dark = special, Steel =
+    // physical), and Special uses the SPLIT Sp.Atk / Sp.Def stats.
+    const bool g3 = isGen3();
+    bool isSpecial = g3 ? (mv.type < GEN3_TYPE_COUNT && GEN3_TYPE_IS_SPECIAL[mv.type])
+                        : (mv.type >= 9 && mv.type <= 15);
 
-    int32_t A = isSpecial ? atk.spc : atk.atk;
-    int32_t D = isSpecial ? def.spc : def.def;
+    // Special attack/defence stat: gen3 splits them; gen1 uses the single spc.
+    auto spAtk = [&](const BattlePoke &m) -> int32_t { return g3 ? m.spaG3 : m.spc; };
+    auto spDef = [&](const BattlePoke &m) -> int32_t { return g3 ? m.spdG3 : m.spc; };
+
+    int32_t A = isSpecial ? spAtk(atk) : atk.atk;
+    int32_t D = isSpecial ? spDef(def) : def.def;
     A = (A * boostMult(isSpecial ? atk.spcBoost : atk.atkBoost)) / 100;
     D = (D * boostMult(isSpecial ? def.spcBoost : def.defBoost)) / 100;
     if (atk.status & ST_BRN) A = A / 2;
@@ -272,21 +318,30 @@ uint16_t Gen1BattleEngine::calcDamage(uint8_t side, uint8_t targetSide,
     if (isSpecial && p_[targetSide].lightScreen) D *= 2;
     if (!isSpecial && p_[targetSide].reflect)    D *= 2;
 
-    // Crit: Gen 1 uses base Speed / 2 (focus energy quartered it — bug). Cap 255/256.
-    const Gen1BaseStats &bs = GEN1_BASE_STATS[atk.species < 152 ? atk.species : 0];
-    uint16_t critRate = bs.spd / 2;
-    if (p_[side].focused) critRate /= 4;  // Gen 1 bug
-    if (critRate > 255) critRate = 255;
-    outCrit = (rand32() & 0xFF) < critRate;
+    if (g3) {
+        // Gen 2/3: fixed base crit ~1/16, NOT tied to Speed (Focus Energy raises
+        // the crit stage to ~1/4). One rand32() consumed, matching Gen 1.
+        uint8_t r = rand32() & 0xFF;
+        outCrit = p_[side].focused ? ((r & 0x3) == 0) : ((r & 0xF) == 0);
+    } else {
+        // Gen 1: base Speed / 2 (Focus Energy *quartered* it — the classic bug).
+        const Gen1BaseStats &bs = GEN1_BASE_STATS[atk.species < 152 ? atk.species : 0];
+        uint16_t critRate = bs.spd / 2;
+        if (p_[side].focused) critRate /= 4;
+        if (critRate > 255) critRate = 255;
+        outCrit = (rand32() & 0xFF) < critRate;
+    }
     if (outCrit) {
-        // Gen 1 crits use unboosted Atk/Def AND double level.
-        A = isSpecial ? atk.spc : atk.atk;
-        D = isSpecial ? def.spc : def.def;
+        // Crits ignore stat stages (use unboosted Atk/Def).
+        A = isSpecial ? spAtk(atk) : atk.atk;
+        D = isSpecial ? spDef(def) : def.def;
         if (atk.status & ST_BRN) A = A / 2;
     }
 
-    int32_t L = outCrit ? atk.level * 2 : atk.level;
+    // Gen 1 crit = double the level; Gen 2/3 crit = x2 the final damage.
+    int32_t L = (outCrit && !g3) ? atk.level * 2 : atk.level;
     int32_t dmg = (((2 * L / 5 + 2) * mv.power * A) / D) / 50 + 2;
+    if (outCrit && g3) dmg *= 2;
 
     // STAB
     if (mv.type == atk.type1 || mv.type == atk.type2) dmg = dmg * 3 / 2;
@@ -317,7 +372,7 @@ bool Gen1BattleEngine::pokeActsFirst(uint8_t side, uint8_t action, uint8_t targe
     if (action == 0) {
         const BattlePoke &m = p_[side].mons[p_[side].active];
         if (pendIndex_[side] < 4) {
-            const Gen1MoveData *mv = gen1Move(m.moves[pendIndex_[side]]);
+            const Gen1MoveData *mv = mdata(m.moves[pendIndex_[side]]);
             if (mv) p1pri = mv->priority;
         }
     }
@@ -325,7 +380,7 @@ bool Gen1BattleEngine::pokeActsFirst(uint8_t side, uint8_t action, uint8_t targe
     if (targetAction == 0) {
         const BattlePoke &m = p_[other].mons[p_[other].active];
         if (pendIndex_[other] < 4) {
-            const Gen1MoveData *mv = gen1Move(m.moves[pendIndex_[other]]);
+            const Gen1MoveData *mv = mdata(m.moves[pendIndex_[other]]);
             if (mv) p2pri = mv->priority;
         }
     }
@@ -409,12 +464,12 @@ void Gen1BattleEngine::useMove(uint8_t side, uint8_t moveSlot, LogSink log, void
     const Gen1MoveData *mv;
     if (isStruggle) {
         mvId = 165;  // Struggle
-        mv = gen1Move(mvId);
+        mv = mdata(mvId);
         if (!mv) return;
     } else {
         if (moveSlot >= 4) return;
         mvId = user.moves[moveSlot];
-        mv = gen1Move(mvId);
+        mv = mdata(mvId);
         if (!mv || user.pp[moveSlot] == 0) return;
     }
 
@@ -474,7 +529,7 @@ void Gen1BattleEngine::useMove(uint8_t side, uint8_t moveSlot, LogSink log, void
             moveSlot = user.chargingSlot;
             user.chargingSlot = 0xFF;
             mvId = user.moves[moveSlot];
-            mv   = gen1Move(mvId);
+            mv   = mdata(mvId);
             if (!mv) return;
         }
 
@@ -483,7 +538,7 @@ void Gen1BattleEngine::useMove(uint8_t side, uint8_t moveSlot, LogSink log, void
         if (user.thrashSlot != 0xFF) {
             moveSlot = user.thrashSlot;
             mvId = user.moves[moveSlot];
-            mv   = gen1Move(mvId);
+            mv   = mdata(mvId);
             if (!mv) return;
         }
     }
@@ -604,7 +659,7 @@ void Gen1BattleEngine::useMove(uint8_t side, uint8_t moveSlot, LogSink log, void
     // on Metronome itself, mostly to avoid log spam.
     if (mv->effect == EFF_METRONOME) {
         uint8_t pickId = 1 + (rand32() % 165);
-        const Gen1MoveData *picked = gen1Move(pickId);
+        const Gen1MoveData *picked = mdata(pickId);
         if (picked && picked->effect != EFF_METRONOME) {
             emit(log, ctx, "Metronome rolled [MOVE]!", nullptr, picked->name);
             applyMove(side, side ^ 1, *picked, log, ctx);
@@ -621,7 +676,7 @@ void Gen1BattleEngine::useMove(uint8_t side, uint8_t moveSlot, LogSink log, void
             user.mimicOrigPp   = user.pp[moveSlot];
             user.moves[moveSlot] = t.moves[t.lastMoveIdx];
             user.pp[moveSlot]    = 5;
-            const Gen1MoveData *copied = gen1Move(user.moves[moveSlot]);
+            const Gen1MoveData *copied = mdata(user.moves[moveSlot]);
             emit(log, ctx, "[POKEMON] copied [MOVE]!",
                  user.nickname, copied ? copied->name : "?");
         }
@@ -1172,7 +1227,7 @@ void Gen1BattleEngine::cpuPickAction(uint8_t side, uint8_t &outAction, uint8_t &
     BattlePoke &foe = p_[side ^ 1].mons[p_[side ^ 1].active];
     for (uint8_t i = 0; i < 4; ++i) {
         if (m.moves[i] == 0 || m.pp[i] == 0) continue;
-        const Gen1MoveData *mv = gen1Move(m.moves[i]);
+        const Gen1MoveData *mv = mdata(m.moves[i]);
         if (!mv) continue;
         int score = mv->power;
         if (mv->type == m.type1 || mv->type == m.type2) score = score * 3 / 2;

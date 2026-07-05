@@ -657,7 +657,14 @@ void TerminalUI::renderMenu() {
     if (maxRows < 0) maxRows = 0;
     for (int i = 0; i < count && i < maxRows; i++) {
         if (i == activeItem_) wattron(winMenu_, A_REVERSE | COLOR_PAIR(3));
-        mvwprintw(winMenu_, 3 + i, 2, "%-*s", cols_ - 4, items[i]);
+        // The SYSTEM "Battle rules" row shows the current mechanics gen.
+        char dyn[32];
+        const char *label = items[i];
+        if (activeTab_ == 2 && i == SYSTEM_BATTLE_RULES_ITEM) {
+            snprintf(dyn, sizeof(dyn), "Battle rules: GEN %u", (unsigned)battleGen_);
+            label = dyn;
+        }
+        mvwprintw(winMenu_, 3 + i, 2, "%-*s", cols_ - 4, label);
         if (i == activeItem_) wattroff(winMenu_, A_REVERSE | COLOR_PAIR(3));
     }
 
@@ -2257,7 +2264,13 @@ void TerminalUI::activateLocalItem(int item) {
 void TerminalUI::activateSystemItem(int item) {
     switch (item) {
         case 0: screen_ = Screen::HELP; break;
-        case 1: screen_ = Screen::CONFIRM_QUIT; break;
+        case 1:  // Battle rules: toggle Gen-1 <-> Gen-3 mechanics
+            battleGen_ = (battleGen_ >= 3) ? 1 : 3;
+            pushActivity(battleGen_ >= 3
+                ? "> Battle rules: GEN 3 (split Sp.Atk/Sp.Def, 1/16 crits, Dark/Steel)"
+                : "> Battle rules: GEN 1 (classic)");
+            break;
+        case 2: screen_ = Screen::CONFIRM_QUIT; break;
     }
 }
 
@@ -2426,7 +2439,7 @@ void TerminalUI::buildPlayerPartyForBattle() {
     }
 
     uint32_t seed = (uint32_t)(millis() ^ (uint32_t)(uintptr_t)this);
-    engine_.start(party_, cpu, seed);
+    engine_.start(party_, cpu, seed, battleGen_);
     resetBattleParticipants();
     screen_  = Screen::BATTLE;
 }
@@ -2471,7 +2484,7 @@ void TerminalUI::startRoguelike() {
     memcpy(wild.mons[0].moves, wildMoves, 4);
 
     uint32_t seed = (uint32_t)(millis() ^ (uint32_t)wildDex ^ (uint32_t)wildLv);
-    engine_.start(party_, wild, seed);
+    engine_.start(party_, wild, seed, battleGen_);
     resetBattleParticipants();
     screen_ = Screen::BATTLE;
 }
@@ -3495,7 +3508,7 @@ void TerminalUI::startPentestBattle() {
 
     battleResult_ = Gen1BattleEngine::Result::ONGOING;
     uint32_t seed = (uint32_t)(millis() ^ ((uint32_t)wildDex << 8) ^ wildLv);
-    engine_.start(party_, wild, seed);
+    engine_.start(party_, wild, seed, battleGen_);
     resetBattleParticipants();
     screen_ = Screen::BATTLE;
 }
@@ -3987,7 +4000,7 @@ void TerminalUI::parsePvpAccept(const std::string &msg) {
 
     // Restart engine against the real foe instead of the random CPU
     uint32_t seed = (uint32_t)(millis() ^ (uint32_t)(uintptr_t)this);
-    engine_.start(party_, foeParty, seed);
+    engine_.start(party_, foeParty, seed, battleGen_);
     resetBattleParticipants();
 
     // Server-mode battle state
@@ -4523,7 +4536,7 @@ void TerminalUI::parseNeighborParty(const std::string &msg) {
     localSide_    = 0;
     battleResult_ = Gen1BattleEngine::Result::ONGOING;
     uint32_t seed = (uint32_t)(millis() ^ asyncFightNodeId_);
-    engine_.start(party_, foe, seed);
+    engine_.start(party_, foe, seed, battleGen_);
     resetBattleParticipants();
     screen_       = Screen::BATTLE;
 }
@@ -4694,7 +4707,7 @@ void TerminalUI::startGymBattle(uint8_t gymIdx, uint8_t trainerIdx)
     inE4Battle_        = false;
 
     uint32_t seed = (uint32_t)(millis() ^ ((uint32_t)gymIdx << 8) ^ trainerIdx);
-    engine_.start(party_, gymParty, seed);
+    engine_.start(party_, gymParty, seed, battleGen_);
     resetBattleParticipants();
     screen_ = Screen::BATTLE;
 }
@@ -4729,7 +4742,7 @@ void TerminalUI::startE4Battle(uint8_t e4Idx)
     pendingE4Idx_ = e4Idx;
 
     uint32_t seed = (uint32_t)(millis() ^ ((uint32_t)0xE4 << 8) ^ e4Idx);
-    engine_.start(party_, e4Party, seed);
+    engine_.start(party_, e4Party, seed, battleGen_);
     resetBattleParticipants();
     screen_ = Screen::BATTLE;
 }
