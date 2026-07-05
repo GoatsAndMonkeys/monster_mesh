@@ -625,12 +625,12 @@ public:
     void *lvPlayerSprite_     = nullptr;
     // Sprite canvases. 28×28 = 14×14 native @ 2× scale, RGB565.
     // 28*28*2 = 1568 bytes each. Total +3 KB BSS.
-    // 56×56 = native Gen1ColorIcons size (P2.31, GBC palette sprites).
-    static constexpr int LV_SPRITE_W = 56;
-    static constexpr int LV_SPRITE_H = 56;
-    // P2.32: player back sprite at native 48×48 (Gen-2 Crystal source).
-    static constexpr int LV_PLAYER_W = 48;
-    static constexpr int LV_PLAYER_H = 48;
+    // Full-color Gen-3 sprites, upscaled to fill the battle slots (must match
+    // GEN3_FRONT_565_W/H and GEN3_BACK_565_W/H in the Gen3*565.h headers).
+    static constexpr int LV_SPRITE_W = 88;   // foe (top-right)
+    static constexpr int LV_SPRITE_H = 88;
+    static constexpr int LV_PLAYER_W = 80;   // player back (bottom-left)
+    static constexpr int LV_PLAYER_H = 80;
     void *lvFoeCanvas_        = nullptr;
     void *lvPlayerCanvas_     = nullptr;
     uint8_t lvFoeCanvasBuf_[LV_SPRITE_W * LV_SPRITE_H * 2] = {};

@@ -5078,7 +5078,7 @@ void MonsterMeshModule::buildLvBattleScreen()
     // ── Foe sprite canvas (top-right, 56×56) ──────────────────────────
     lv_obj_t *fSpr = lv_canvas_create(scr);
     lv_obj_set_size(fSpr, LV_SPRITE_W, LV_SPRITE_H);
-    lv_obj_align(fSpr, LV_ALIGN_TOP_LEFT, 260, 4);
+    lv_obj_align(fSpr, LV_ALIGN_TOP_LEFT, 320 - LV_SPRITE_W - 4, 4);  // right-aligned
     lv_canvas_set_buffer(fSpr, lvFoeCanvasBuf_, LV_SPRITE_W, LV_SPRITE_H,
                          LV_COLOR_FORMAT_RGB565);
     lv_canvas_fill_bg(fSpr, lv_color_white(), LV_OPA_COVER);
@@ -5093,7 +5093,7 @@ void MonsterMeshModule::buildLvBattleScreen()
    
     lv_obj_t *pSpr = lv_canvas_create(scr);
     lv_obj_set_size(pSpr, LV_PLAYER_W, LV_PLAYER_H);
-    lv_obj_align(pSpr, LV_ALIGN_TOP_LEFT, 4, 94);
+    lv_obj_align(pSpr, LV_ALIGN_TOP_LEFT, 4, 146 - LV_PLAYER_H);  // sits on the log box top
     lv_canvas_set_buffer(pSpr, lvPlayerCanvasBuf_, LV_PLAYER_W, LV_PLAYER_H,
                          LV_COLOR_FORMAT_RGB565);
     lv_canvas_fill_bg(pSpr, lv_color_white(), LV_OPA_COVER);
