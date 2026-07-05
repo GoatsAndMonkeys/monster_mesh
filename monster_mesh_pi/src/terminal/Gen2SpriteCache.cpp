@@ -32,7 +32,7 @@ void dims(bool isBack, int *outW, int *outH) {
     if (outH) *outH = isBack ? GEN3_BACK_H : GEN3_COLOR_H;
 }
 
-// Decode the deflate blob for one species into a 2bpp buffer.
+// Decode the deflate blob for one species into a full-color RGBA (w*h*4) buffer.
 static bool decodeSprite(int dex, bool isBack, uint8_t *out, size_t outCap) {
     if (dex < 1 || dex > 151) return false;
     const uint32_t *offsets = isBack ? kGen3BackDeflateOffsets
@@ -48,26 +48,6 @@ static bool decodeSprite(int dex, bool isBack, uint8_t *out, size_t outCap) {
     return rc == 0;
 }
 
-// 2-bit pixel access at (row, col) inside a packed 2bpp buffer of width w.
-static inline uint8_t pixel2bpp(const uint8_t *buf, int w, int row, int col) {
-    int idx   = row * w + col;
-    int byte  = idx >> 2;
-    int shift = 6 - ((idx & 3) * 2);
-    return (buf[byte] >> shift) & 0x03;
-}
-
-// RGB565 -> RGBA8888 (alpha = 0xFF).
-static inline uint32_t rgb565to8888(uint16_t v) {
-    uint8_t r5 = (v >> 11) & 0x1F;
-    uint8_t g6 = (v >> 5)  & 0x3F;
-    uint8_t b5 = (v)       & 0x1F;
-    uint8_t r = (uint8_t)((r5 * 255 + 15) / 31);
-    uint8_t g = (uint8_t)((g6 * 255 + 31) / 63);
-    uint8_t b = (uint8_t)((b5 * 255 + 15) / 31);
-    // SDL_PIXELFORMAT_RGBA32 is byte-order R,G,B,A regardless of endian.
-    return ((uint32_t)r) | ((uint32_t)g << 8) | ((uint32_t)b << 16) | ((uint32_t)0xFF << 24);
-}
-
 static SDL_Texture *buildTexture(SDL_Renderer *renderer, int dex, bool isBack) {
     if (!renderer) return nullptr;
     if (dex < 1 || dex > 151) return nullptr;
@@ -75,41 +55,20 @@ static SDL_Texture *buildTexture(SDL_Renderer *renderer, int dex, bool isBack) {
     int w = isBack ? GEN3_BACK_W  : GEN3_COLOR_W;
     int h = isBack ? GEN3_BACK_H  : GEN3_COLOR_H;
 
-    // Decode 2bpp packed buffer.
-    uint8_t buf[GEN3_COLOR_W * GEN3_COLOR_H / 4];  // 784 B — covers both sizes
-    size_t  need = (size_t)(w * h + 3) / 4;
+    // Decode the full-color RGBA32 pixel buffer (w*h*4 bytes, R,G,B,A per pixel;
+    // A=0 = transparent background). The decoded bytes are already in
+    // SDL_PIXELFORMAT_RGBA32 order, so we hand them straight to the texture.
+    static uint8_t buf[GEN3_COLOR_W * GEN3_COLOR_H * 4];  // 12544 B — covers both sizes
+    size_t  need = (size_t)(w * h * 4);
     if (!decodeSprite(dex, isBack, buf, need)) return nullptr;
-
-    // Per-species palette: index 0 -> transparent, 1..3 -> RGB565 entries.
-    const uint16_t *pal = isBack ? kGen3BackPalettes[dex]
-                                 : kGen3ColorPalettes[dex];
-    uint32_t rgba[4];
-    rgba[0] = 0;                              // transparent
-    rgba[1] = rgb565to8888(pal[1]);
-    rgba[2] = rgb565to8888(pal[2]);
-    rgba[3] = rgb565to8888(pal[3]);
-
-    // Expand 2bpp -> RGBA32.
-    uint32_t *pixels = (uint32_t *)malloc(sizeof(uint32_t) * w * h);
-    if (!pixels) return nullptr;
-    for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-            uint8_t idx = pixel2bpp(buf, w, y, x);
-            pixels[y * w + x] = rgba[idx];
-        }
-    }
 
     SDL_Texture *tex = SDL_CreateTexture(renderer,
                                          SDL_PIXELFORMAT_RGBA32,
                                          SDL_TEXTUREACCESS_STATIC,
                                          w, h);
-    if (!tex) {
-        free(pixels);
-        return nullptr;
-    }
+    if (!tex) return nullptr;
     SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
-    SDL_UpdateTexture(tex, nullptr, pixels, w * 4);
-    free(pixels);
+    SDL_UpdateTexture(tex, nullptr, buf, w * 4);
     // Nearest-neighbour scaling so the upscaled (4x-8x) destination stays
     // crunchy GBC-pixel sharp instead of bilinear-blurred.  Also set globally
     // via SDL_HINT_RENDER_SCALE_QUALITY before renderer creation as a fallback
