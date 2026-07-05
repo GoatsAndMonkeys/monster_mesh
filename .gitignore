@@ -41,3 +41,6 @@ src/mesh/raspihttp/private_key.pem
 
 # Ignore logo (set at build time with platformio-custom.py)
 data/boot/logo.*
+
+# Showdown data-gen cache (nested git checkout; must not be a submodule)
+scripts/.showdown_cache/
