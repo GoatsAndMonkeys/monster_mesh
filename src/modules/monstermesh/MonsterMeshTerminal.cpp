@@ -194,6 +194,15 @@ void MonsterMeshTerminal::close()
 void MonsterMeshTerminal::onKey(uint8_t key)
 {
     if (!open_) return;
+    if (pendingMenuCmd_ != MenuCmd::NONE && key >= '0' && key <= '9') {
+        char line[4] = { (char)key, '\0' };
+        println(line);
+        executeLine(line);
+        inbuf_[0] = '\0'; inlen_ = 0;
+        if (input_) lv_textarea_set_text(input_, "");
+        prompt();
+        return;
+    }
     if (key == 0x0D || key == '\n') {
         println(inbuf_);
         executeLine(inbuf_);

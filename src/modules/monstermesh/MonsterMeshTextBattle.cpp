@@ -2048,6 +2048,10 @@ void MonsterMeshTextBattle::serverAuthOnActionV2Pkt(uint32_t fromId,
         return;
     }
 
+    if (actionType == 0xFE /* pure-ACK sentinel — client has no action yet */) {
+        lastRecvMs_ = millis();
+        return;
+    }
     if (actionType == 2 /* flee */) {
         engine_.forfeit(1, engineLogCb, this);
         appendLog("Opponent fled.");
@@ -2590,6 +2594,7 @@ void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len
     if (needSwitch) {
         phase_ = Phase::WAIT_SWITCH;
         switchCursor_ = engine_.party(0).active;
+        clientActionType_ = 0xFF;  // clear stale action so dedup can't replay it
         Serial.printf("[MMB] client UPDATE applied seq=%u → WAIT_SWITCH\n",
                       (unsigned)seq);
         return;
@@ -2597,6 +2602,7 @@ void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len
     // Normal flow: server has resolved the turn and is now waiting for our
     // next action.
     phase_ = Phase::WAIT_ACTION;
+    clientActionType_ = 0xFF;  // clear stale action so dedup can't replay it
     Serial.printf("[MMB] client UPDATE applied seq=%u → WAIT_ACTION turn=%u\n",
                   (unsigned)seq, (unsigned)clientTurn_);
 }

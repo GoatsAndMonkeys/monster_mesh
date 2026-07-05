@@ -122,6 +122,42 @@ static bool patchSdSavPathWithDaycareXp(const char *sdRel, PokemonDaycare &dc);
 static bool writePartyToSavOnSd(const char *savPath, const Gen1Party &party);
 extern bool initWifi();
 
+// Block (up to maxMs) until the LoRa radio finishes any in-flight transmit.
+// Entering the ROM browser / emulator drives the display over the SPI bus the
+// radio shares; if a TX is mid-flight the two collide and hard-freeze the
+// device. isSending() (sendingPacket != NULL) is cleared by the radio's own
+// OSThread on TxDone, and our vTaskDelay yields so that thread can run. Bounded
+// so we never stall the UI if a long TX (high SF) is in progress.
+static void waitForRadioTxIdle(uint32_t maxMs)
+{
+    RadioLibInterface *r = RadioLibInterface::instance;
+    if (!r) return;
+    uint32_t start = millis();
+    while (r->isSending() && (millis() - start) < maxMs) {
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+}
+
+// Fully quiesce the LoRa radio for emulator / ROM-browser mode. The soft park
+// (g_meshSuspended flag only) left the SX1262 RXing autonomously with DIO1
+// live; its SPI traffic raced the browser's LGFX rendering on the shared bus
+// and intermittently hard-froze the device (freeze always landed around
+// renderBrowser, moved when logging changed timing = classic bus race). Here
+// we drain any in-flight TX, then sleep() the chip: standby → abort RX →
+// disableInterrupt → chip sleep with config retained. The bus then belongs to
+// the display/SD alone. Re-arm on exit is startReceive() in runOnce — the
+// documented wake-from-sleep path (it re-does standby + enableInterrupt).
+// Runs on the LoRa thread only (runOnce).
+static void quiesceRadioForEmu()
+{
+    RadioLibInterface *r = RadioLibInterface::instance;
+    if (!r) return;
+    waitForRadioTxIdle(250);
+    LOG_INFO("[MonsterMesh] radio quiesce: TX idle, putting SX126x to sleep\n");
+    r->sleep();
+    LOG_INFO("[MonsterMesh] radio quiesce: chip asleep — SPI bus is ours\n");
+}
+
 // LovyanGFX is available on T-Deck in both t-deck and t-deck-tft builds
 #include <LovyanGFX.hpp>
 #if HAS_TFT
@@ -2311,12 +2347,19 @@ int32_t MonsterMeshModule::runOnce()
     // a separate step + delay between gives the chip time to flush.
     if (radioNeedsRx_) {
         radioNeedsRx_ = false;
-        // No-op: enterEmulatorMode no longer calls disableInterrupt, so
-        // the radio is still in RX continuously during emu. g_meshSuspended
-        // drops packets at the receivePacket level for the duration. On
-        // exit we just clear g_meshSuspended (in exitEmulatorMode) and
-        // packets flow normally again — no startReceive needed.
-        LOG_INFO("[MonsterMesh] sync: radio already RX'ing (no-op re-arm)\n");
+        // Wake the radio from the sleep() that quiesceRadioForEmu() put it
+        // in on emu/browser entry. startReceive() is the documented
+        // wake-from-sleep path: it forces standby (chip wakes on NSS),
+        // reprograms RX, and re-enables the DIO1 interrupt. Small settle
+        // delay first so the last SD/TFT burst is fully off the bus —
+        // b330 showed re-arming hot on the heels of other SPI work hangs.
+        RadioLibInterface *r = RadioLibInterface::instance;
+        if (r) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            LOG_INFO("[MonsterMesh] sync: waking radio → startReceive\n");
+            r->startReceive();
+            LOG_INFO("[MonsterMesh] sync: radio RX re-armed\n");
+        }
     }
     if (radioParked_ && wifiBooted_) {
         LOG_INFO("[MonsterMesh] sync: tearing WiFi down\n");
@@ -2360,6 +2403,11 @@ int32_t MonsterMeshModule::runOnce()
         !textBattleActive_ && setupDone_ && emuInitialized_) {
         pendingEmuResume_ = false;
         LOG_INFO("[MonsterMesh] direct emu resume (ROM already loaded)\n");
+        // Gate new TX first (enterEmulatorMode flips g_meshSuspended), then
+        // fully quiesce the radio so its RX traffic can't race the display
+        // on the shared SPI bus while the emulator runs.
+        enterEmulatorMode();
+        quiesceRadioForEmu();
 #if HAS_TFT
         lv_display_t *disp = lv_display_get_default();
         if (disp && !savedFlushCb_) {
@@ -2385,7 +2433,6 @@ int32_t MonsterMeshModule::runOnce()
                 emu_.audio_ = nullptr;
             }
         }
-        enterEmulatorMode();
         emulatorActive_ = true;
         kbSetMode(true);
         setupStatus_ = "Playing!";
@@ -2394,6 +2441,13 @@ int32_t MonsterMeshModule::runOnce()
     if (pendingBrowserActivate_ && !browserActive_ && !emulatorActive_ &&
         !textBattleActive_ && setupDone_) {
         pendingBrowserActivate_ = false;
+        // ROM-loader SPI-bus wedge fix: gate new TX via enterEmulatorMode()
+        // FIRST, then fully quiesce the radio (drain TX + chip sleep) so its
+        // autonomous RX can't race the browser rendering on the shared bus.
+        // TX-drain alone was not enough — a freeze reproduced with the last
+        // TX already completed, pointing at RX-vs-display contention.
+        enterEmulatorMode();
+        quiesceRadioForEmu();
 #if HAS_TFT
         lv_display_t *disp = lv_display_get_default();
         if (disp && !savedFlushCb_) {
@@ -2408,7 +2462,6 @@ int32_t MonsterMeshModule::runOnce()
             g_deviceUiLgfx->fillScreen(0x0000);
         }
 #endif
-        enterEmulatorMode();
         browserActive_ = true;
         browserNeedsScan_ = true;
     }
@@ -2563,12 +2616,13 @@ int32_t MonsterMeshModule::runOnce()
         (void)mmtAcceptedTxTarget_;
     }
 
+
     // Event-driven daycare-XP flush to .sav. Daycare bumps its
     // lastEventTime each time runEventCycle fires (the only path that can
     // change totalXpGained). When that timestamp moves past our high-
     // watermark, sync once. SD only spins up on real XP change.
     {
-        bool cartLoaded = emuInitialized_ || emu_.isRunning();
+        bool cartLoaded = emuInitialized_;  // see writeback gate below re: not ORing isRunning()
         uint32_t evtTime = daycare_.getLastEventTime();
         if (!emulatorActive_ && !browserActive_ && !cartLoaded &&
             daycare_.isActive() && loadedSavPath_[0] &&
@@ -2576,21 +2630,28 @@ int32_t MonsterMeshModule::runOnce()
             lastSavSyncedEventTime_ = evtTime;
             const char *sdRel = loadedSavPath_;
             if (strncmp(sdRel, "/sd", 3) == 0) sdRel += 3;
-            concurrency::LockGuard g(spiLock);
+            // NO LockGuard here — patchSdSavPathWithDaycareXp takes spiLock
+            // internally. spiLock is a NON-RECURSIVE binary semaphore: taking
+            // it here and again inside was a self-deadlock that hung the whole
+            // main OSThread loop (frozen UI, TASK_WDT reset ~90 s later).
             if (patchSdSavPathWithDaycareXp(sdRel, daycare_)) {
                 LOG_INFO("[MonsterMesh] daycare→sav flush: '%s'\n", sdRel);
             }
         }
     }
 
+
     if (pendingSavWriteBack_) {
         pendingSavWriteBack_ = false;
-        // Cart-loaded gate matches the daycare patcher: emu_.running_ stays
-        // true once a cart starts and never resets, so we OR with
-        // emuInitialized_ which DOES go false on Eject Cart. Both must be
-        // false (= cart not in memory) before we touch the SAV — otherwise
-        // the emu's next writeSaveFile would clobber our XP patch.
-        bool cartLoaded = emuInitialized_ || emu_.isRunning();
+        // Cart-loaded gate: only touch the SAV when NO cart is in memory,
+        // otherwise the emu's next writeSaveFile would clobber our XP patch.
+        // Use emuInitialized_ alone — it is set true at ROM launch and false
+        // on Eject Cart, so it accurately tracks "cart in memory". Do NOT OR
+        // with emu_.isRunning(): that flag is set true in begin() and is never
+        // reset (there's no emu stop path), so ORing it kept cartLoaded stuck
+        // true forever after the first ROM launch — which silently blocked
+        // every terminal battle-XP writeback, even after ejecting the cart.
+        bool cartLoaded = emuInitialized_;
         if (!emulatorActive_ && !browserActive_ &&
             !cartLoaded && terminal_.hasParty() &&
             loadedSavPath_[0]) {
@@ -2604,6 +2665,7 @@ int32_t MonsterMeshModule::runOnce()
                      (int)(loadedSavPath_[0] != 0));
         }
     }
+
 
     // Deferred terminal party load — runs on the LoRa thread so the LVGL
     // thread can paint the terminal panel immediately without waiting on
@@ -2676,10 +2738,13 @@ int32_t MonsterMeshModule::runOnce()
         pendingAutoCheckOut_ = false;
         if (daycare_.isActive()) {
             const char *romPath = emu_.romPath();
-            bool cartLoaded = emuInitialized_ || emu_.isRunning();
+            bool cartLoaded = emuInitialized_;  // not || isRunning(): that flag never resets
             bool patched = false;
             if (!cartLoaded && romPath && romPath[0]) {
-                concurrency::LockGuard g(spiLock);
+                // NO LockGuard — patchSavOnSdWithDaycareXp locks spiLock
+                // internally; double-locking the non-recursive binary
+                // semaphore here was THE loader freeze (self-deadlock →
+                // TASK_WDT). See matching note at the daycare→sav flush.
                 patched = patchSavOnSdWithDaycareXp(romPath, daycare_);
             }
             if (!patched) {
@@ -3432,6 +3497,56 @@ int32_t MonsterMeshModule::runOnce()
             snprintf(rivalTag, sizeof(rivalTag), "%.4s", n.shortName);
             LOG_INFO("[MonsterMesh] text battle: rival = %s (%u pokemon)\n",
                      rivalTag, (unsigned)party);
+        }
+        // `fight 0` (PvPC): build a random opponent SCALED TO YOUR PARTY — the
+        // same number of Pokemon, and levels near your average — like the RPi
+        // local CPU fight.  Without this, fight 0 fell through to a random gym
+        // trainer whose fixed level/size rarely matched the player.
+        if (fightSkipPeers_ && cpuParty.count == 0) {
+            const Gen1Party &me = terminal_.getParty();
+            uint8_t myCount = me.count > 6 ? 6 : me.count;
+            if (myCount == 0) myCount = 1;
+            uint16_t sum = 0; uint8_t cnt = 0;
+            for (uint8_t i = 0; i < me.count && i < 6; ++i)
+                if (me.mons[i].level) { sum += me.mons[i].level; ++cnt; }
+            int avgLv = cnt ? (int)(sum / cnt) : 5;
+
+            // species + 4 move IDs — a varied Gen-1 pool with sensible movesets.
+            static const uint8_t POOL[][5] = {
+                {  4, 10, 45, 52,  0 }, {  7, 33, 39, 55,  0 }, {  1, 33, 45, 22,  0 },
+                { 25, 84, 45, 98,  0 }, { 52, 10, 45, 44,  0 }, {  6, 52, 17, 10,  0 },
+                { 16, 33, 45, 16,  0 }, { 19, 33, 39, 98,  0 }, { 41, 33,141,  0,  0 },
+                { 74, 33, 88,  0,  0 }, { 92, 93, 45,  0,  0 }, { 54, 55, 10,  0,  0 },
+                { 66,  2, 33,  0,  0 }, { 60,145, 33,  0,  0 }, { 23, 33, 45, 44,  0 },
+                { 27, 10, 33, 88,  0 },
+            };
+            const int POOL_N = (int)(sizeof(POOL) / sizeof(POOL[0]));
+            cpuParty.count = myCount;
+            int prev = -1;
+            for (uint8_t i = 0; i < myCount; ++i) {
+                int idx = (int)(esp_random() % (uint32_t)POOL_N);
+                if (idx == prev) idx = (idx + 1) % POOL_N;   // no back-to-back dupes
+                prev = idx;
+                uint8_t dex = POOL[idx][0];
+                uint8_t internal = dexToInternal[dex];
+                int lv = avgLv + (int)(esp_random() % 7) - 3;  // your avg ± 3
+                if (lv < 2)   lv = 2;
+                if (lv > 100) lv = 100;
+                cpuParty.species[i]       = internal;
+                cpuParty.mons[i].species  = internal;
+                cpuParty.mons[i].level    = (uint8_t)lv;
+                cpuParty.mons[i].boxLevel = (uint8_t)lv;
+                memcpy(cpuParty.mons[i].moves, POOL[idx] + 1, 4);
+                uint32_t exp = expForLevel(dex, (uint8_t)lv);
+                cpuParty.mons[i].exp[0] = (exp >> 16) & 0xFF;
+                cpuParty.mons[i].exp[1] = (exp >> 8)  & 0xFF;
+                cpuParty.mons[i].exp[2] =  exp        & 0xFF;
+                cpuParty.mons[i].dvs[0] = 0x88;
+                cpuParty.mons[i].dvs[1] = 0x88;
+            }
+            snprintf(rivalTag, sizeof(rivalTag), "CPU");
+            LOG_INFO("[MonsterMesh] fight 0: PvPC foe scaled to you (%u mons, ~L%d)\n",
+                     (unsigned)myCount, avgLv);
         }
         // Fallback: no usable neighbor (none present, or picked one had empty
         // party). Pick a random gym trainer so the user always gets a real foe.
@@ -4418,12 +4533,16 @@ static bool patchSavOnSdWithDaycareXp(const char *romPath, PokemonDaycare &dc)
 static bool patchSdSavPathWithDaycareXp(const char *sdRel, PokemonDaycare &dc)
 {
     if (!sdRel || !sdRel[0]) return false;
-    SD.end();
-    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-    if (!SD.begin(SDCARD_CS, SPI)) {
-        LOG_WARN("[MonsterMesh] D6 SAV write: SD.begin failed\n");
-        return false;
-    }
+    // SD shares the SPI bus with the radio and TFT, so both SD phases below
+    // hold spiLock. TWO hard-won rules:
+    //  1. Callers must NOT hold spiLock. It is a NON-RECURSIVE binary
+    //     semaphore — an outer LockGuard plus the one here self-deadlocks
+    //     the main OSThread loop (frozen UI, dead keyboard, TASK_WDT reset
+    //     ~90 s later). This was the "loader freezes after emulator + eject
+    //     + terminal battle" bug.
+    //  2. The lock is NOT held across dc.checkOut(): that call persists
+    //     daycare state to internal-flash LittleFS, and stalling the
+    //     display/radio on the SPI bus for a flash write is pointless.
 
     // Standard Gen 1 SAV is 32KB.
     constexpr size_t SAV_SIZE = 32 * 1024;
@@ -4434,35 +4553,60 @@ static bool patchSdSavPathWithDaycareXp(const char *sdRel, PokemonDaycare &dc)
         return false;
     }
 
-    File f = SD.open(sdRel, FILE_READ);
-    if (!f) {
-        LOG_WARN("[MonsterMesh] D6 SAV write: SD.open('%s') for read failed\n", sdRel);
-        free(sram);
-        return false;
-    }
-    int n = f.read(sram, SAV_SIZE);
-    f.close();
-    if (n < (int)SAV_SIZE) {
-        LOG_WARN("[MonsterMesh] D6 SAV write: short read (%d/%u)\n",
-                 n, (unsigned)SAV_SIZE);
-        free(sram);
-        return false;
+    // Phase 1 — read the SAV from SD (spiLock held).
+    {
+        concurrency::LockGuard g(spiLock);
+        SD.end();
+        SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+        if (!SD.begin(SDCARD_CS, SPI)) {
+            LOG_WARN("[MonsterMesh] D6 SAV write: SD.begin failed\n");
+            free(sram);
+            return false;
+        }
+        File f = SD.open(sdRel, FILE_READ);
+        if (!f) {
+            LOG_WARN("[MonsterMesh] D6 SAV write: SD.open('%s') for read failed\n", sdRel);
+            free(sram);
+            return false;
+        }
+        int n = f.read(sram, SAV_SIZE);
+        f.close();
+        if (n < (int)SAV_SIZE) {
+            LOG_WARN("[MonsterMesh] D6 SAV write: short read (%d/%u)\n",
+                     n, (unsigned)SAV_SIZE);
+            free(sram);
+            return false;
+        }
     }
 
     // checkOut() patches in-place (additive only) and zeroes totalXpGained
     // so the next checkout doesn't double-count. Only the EXP / level / 5
-    // stat fields per party slot + the checksum byte are touched.
+    // stat fields per party slot + the checksum byte are touched. Runs
+    // WITHOUT spiLock (rule 2 above).
     dc.checkOut(sram);
 
-    // Truncate-on-write so we don't leave stale bytes if the file shrunk.
-    File w = SD.open(sdRel, FILE_WRITE);
-    if (!w) {
-        LOG_WARN("[MonsterMesh] D6 SAV write: SD.open('%s') for write failed\n", sdRel);
-        free(sram);
-        return false;
+    // Phase 2 — write it back (spiLock held). Fresh SD reinit: another bus
+    // user (LVGL flush, radio) may have transacted between the phases.
+    size_t written = 0;
+    {
+        concurrency::LockGuard g(spiLock);
+        SD.end();
+        SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+        if (!SD.begin(SDCARD_CS, SPI)) {
+            LOG_WARN("[MonsterMesh] D6 SAV write: SD.begin (write phase) failed\n");
+            free(sram);
+            return false;
+        }
+        // Truncate-on-write so we don't leave stale bytes if the file shrunk.
+        File w = SD.open(sdRel, FILE_WRITE);
+        if (!w) {
+            LOG_WARN("[MonsterMesh] D6 SAV write: SD.open('%s') for write failed\n", sdRel);
+            free(sram);
+            return false;
+        }
+        written = w.write(sram, SAV_SIZE);
+        w.close();
     }
-    size_t written = w.write(sram, SAV_SIZE);
-    w.close();
     free(sram);
     if (written != SAV_SIZE) {
         LOG_WARN("[MonsterMesh] D6 SAV write: short write (%u/%u)\n",
@@ -4858,7 +5002,7 @@ void MonsterMeshModule::buildLvBattleScreen()
 {
     if (lvBattleScreen_) return;
     Serial.printf("[MMB] buildLvBattleScreen: lv_obj_create scr\n");
-    Serial.flush();
+   
     lv_obj_t *scr = lv_obj_create(NULL);
     // P2.38: P2.37 added lv_obj_set_size/pos/border_width/margin_all
     // on `scr` — that combo crashes during widget tree build (deck
@@ -4944,7 +5088,7 @@ void MonsterMeshModule::buildLvBattleScreen()
     Serial.printf("[MMB] buildLvBattleScreen: player canvas %dx%d buf=%u\n",
                   LV_PLAYER_W, LV_PLAYER_H,
                   (unsigned)sizeof(lvPlayerCanvasBuf_));
-    Serial.flush();
+   
     lv_obj_t *pSpr = lv_canvas_create(scr);
     lv_obj_set_size(pSpr, LV_PLAYER_W, LV_PLAYER_H);
     lv_obj_align(pSpr, LV_ALIGN_TOP_LEFT, 4, 94);
@@ -4996,7 +5140,7 @@ void MonsterMeshModule::buildLvBattleScreen()
 
     lvBattleScreen_ = scr;
     Serial.printf("[MMB] buildLvBattleScreen: DONE scr=%p\n", scr);
-    Serial.flush();
+   
     LOG_INFO("[MonsterMesh] LVGL battle screen built (Gen-1 layout)\n");
 
     // P2.39c: LVGL-thread refresh timer. Replaces the runOnce-side
@@ -6145,14 +6289,14 @@ void MonsterMeshModule::enterEmulatorMode()
     // come up instantly after pressing ALT.
     wifiSuppressed = true;
     g_meshSuspended = true;
-    // No-op park on the radio chip: previously we called disableInterrupt()
-    // here to silence DIO1 callbacks. That left the chip in a state that
-    // startReceive() on exit could not recover from — every exit hung at
-    // setStandby/checkNotification inside startReceive. Instead, let the
-    // chip keep RX'ing autonomously; g_meshSuspended already drops the
-    // packets at the receivePacket level and gates TX at three other layers
-    // (per feedback_mm_tx_gate_layered.md), so emu mode stays quiet.
-    LOG_INFO("MonsterMesh: radios parked (soft — IRQ left enabled to avoid resume hang)\n");
+    // Flags only here — the hard radio park (TX drain + SX126x sleep) runs in
+    // runOnce via quiesceRadioForEmu() right after this returns, on the LoRa
+    // thread. History: a bare disableInterrupt() here once broke resume
+    // (b330); the soft park that replaced it left the chip RX'ing, whose SPI
+    // traffic raced the browser rendering and froze the device. The current
+    // scheme sleeps the chip (config kept) and wakes it with startReceive()
+    // on exit — the same pair Meshtastic's own light-sleep uses.
+    LOG_INFO("MonsterMesh: radios parked (flags; hard quiesce follows in runOnce)\n");
 }
 
 void MonsterMeshModule::exitEmulatorMode()

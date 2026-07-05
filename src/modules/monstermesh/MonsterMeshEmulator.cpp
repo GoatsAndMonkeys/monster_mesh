@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <sys/stat.h>
 
+
 // peanut_gb.h is a single-header library with all function bodies inline.
 // It MUST only be included in this one translation unit.
 // audio_read() and audio_write() are defined in MonsterMeshAudio.cpp
@@ -300,7 +301,11 @@ void MonsterMeshEmulator::loadSaveFile(const char *romPath) {
     romPathToSavePath(romPath, savPath, sizeof(savPath));
     Serial.printf("[EMU] loading save: %s (ROM: %s)\n", savPath, romPath);
 
-    // SD shares SPI bus — reinit before access
+    // SD shares the SPI bus with the radio and TFT — must hold spiLock during
+    // access, or a concurrent LVGL/TFT flush on the same bus freezes the device
+    // (hard hang -> watchdog reset).  loadROM() and writeSaveFile() already do
+    // this; loadSaveFile() was the one path missing it.
+    concurrency::LockGuard g(spiLock);
     SD.end();
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
     if (!SD.begin(SDCARD_CS, SPI)) {

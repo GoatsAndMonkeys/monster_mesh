@@ -119,16 +119,45 @@ void PokemonDaycare::checkOut(uint8_t *sram) {
     active_ = false;
 
     if (sram) {
-        // Collect XP gained and dex numbers for the patcher
-        uint8_t dexNums[6] = {};
-        uint32_t xpGained[6] = {};
-        for (uint8_t i = 0; i < state_.partyCount; i++) {
-            dexNums[i] = state_.pokemon[i].speciesDex;
-            xpGained[i] = state_.pokemon[i].totalXpGained;
+        // Collect XP gained, dex numbers, and pre-patch levels for the patcher.
+        uint8_t  dexNums[6]   = {};
+        uint32_t xpGained[6]  = {};
+        uint8_t  oldLevels[6] = {};
+        uint8_t  n = state_.partyCount < 6 ? state_.partyCount : 6;
+        for (uint8_t i = 0; i < n; i++) {
+            dexNums[i]   = state_.pokemon[i].speciesDex;
+            xpGained[i]  = state_.pokemon[i].totalXpGained;
+            oldLevels[i] = sram[SAV_POKEMON_DATA + i * SAV_POKEMON_SIZE
+                                + PKM_LEVEL_PARTY];
         }
 
-        // Patch SRAM: add XP, update levels, recalc stats, fix checksum
+        // Patch SRAM: add XP, update levels, recalc stats, fix checksum.
         DaycareSavPatcher::checkout(sram, dexNums, xpGained, state_.partyCount);
+
+        // Teach the level-up moves that come with those daycare level-ups.  The
+        // game's own learn logic is bypassed by the direct SRAM patch, so do it
+        // here: empty move slots are filled automatically.  Because check-out
+        // runs at ROM-launch with no UI to prompt the player, a Pokemon that
+        // already knows 4 moves auto-forgets its weakest to make room (matches
+        // the "drop the weakest" rule).
+        bool taughtAny = false;
+        for (uint8_t i = 0; i < n; i++) {
+            if (xpGained[i] == 0) continue;
+            uint8_t newLevel = sram[SAV_POKEMON_DATA + i * SAV_POKEMON_SIZE
+                                    + PKM_LEVEL_PARTY];
+            DaycareSavPatcher::MoveLearnResult res;
+            DaycareSavPatcher::learnMoves(sram, i, dexNums[i], oldLevels[i],
+                                          newLevel, res);
+            if (res.learnedCount) taughtAny = true;
+            for (uint8_t k = 0; k < res.pendingCount; k++) {
+                uint8_t slot = DaycareSavPatcher::weakestMoveSlot(sram, i);
+                DaycareSavPatcher::setMove(sram, i, slot, res.pending[k]);
+                taughtAny = true;
+            }
+        }
+        // checkout() already fixed the checksum; re-fix since learnMoves /
+        // setMove mutated move and PP bytes afterwards.
+        if (taughtAny) DaycareSavPatcher::fixChecksum(sram);
     }
 
     saveState();

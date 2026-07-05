@@ -245,8 +245,11 @@ bool TFTView_320x240::setupUIConfig(const meshtastic_DeviceUIConfig &uiconfig)
     // TODO: set virtual keyboard according language
     //  setKeyboard(db.uiConfig.language);
 
-    // set theme
-    setTheme(db.uiConfig.theme);
+    // set theme — default to GBC green on fresh flash (uiConfig.theme == 0 means Dark,
+    // but MonsterMesh ships GBC as the intended default for new devices).
+    uint32_t initTheme = db.uiConfig.theme;
+    if (initTheme == 0) initTheme = (uint32_t)Themes::eGbcGreen;
+    setTheme(initTheme);
 
     // grey out bell until we got the ringtone (0 = silent)
     Themes::recolorButton(objects.home_bell_button, false);

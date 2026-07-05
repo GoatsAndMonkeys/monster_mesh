@@ -3,6 +3,7 @@
 #include "main.h" // for audioThread
 #include "AudioThread.h"
 
+
 MonsterMeshAudio *MonsterMeshAudio::instance_ = nullptr;
 
 // ── Free functions for peanut_gb ─────────────────────────────────────────────
@@ -61,25 +62,31 @@ bool MonsterMeshAudio::begin() {
     i2s_config.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
     i2s_config.communication_format = I2S_COMM_FORMAT_STAND_I2S;
     i2s_config.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
-    i2s_config.dma_buf_count = 16;
-    i2s_config.dma_buf_len = 1024;
+    // 8 x 256 frames = 8KB of DMA-capable internal RAM. The old 16 x 1024
+    // (64KB) exceeded free internal DMA RAM once the ROM/PSRAM + Meshtastic
+    // were up, so i2s_driver_install returned ESP_ERR_NO_MEM (0x101 = 257) —
+    // which then hit the crashy retry below. This footprint installs reliably.
+    i2s_config.dma_buf_count = 8;
+    i2s_config.dma_buf_len = 256;
     i2s_config.use_apll = false;
     i2s_config.tx_desc_auto_clear = true;
 
     esp_err_t err = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
-    if (err == 257 /* ESP_ERR_INVALID_STATE */) {
-        // The driver thinks it's still installed even though we uninstalled
-        // it. Hammer it: stop+uninstall+small-yield+retry. The ESP-IDF I2S
-        // driver sometimes needs the DMA to fully drain before it
-        // re-accepts an install.
-        Serial.printf("[AUDIO] install returned INVALID_STATE — retrying\n");
-        i2s_stop(I2S_NUM_0);
+    Serial.printf("[AUDIO] i2s_driver_install err=%d\n", (int)err);
+    if (err != ESP_OK) {
+        // Install failed (commonly ESP_ERR_NO_MEM when internal DMA RAM is tight).
+        // Do NOT call i2s_stop here: the driver is NOT installed, so its internal
+        // handle is NULL and i2s_stop() would null-deref and HARD-RESET the device
+        // — this was the "crash right after save loaded" bug. Uninstall is a safe
+        // no-op when absent; yield and retry the install exactly once.
         i2s_driver_uninstall(I2S_NUM_0);
         vTaskDelay(pdMS_TO_TICKS(50));
         err = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+        Serial.printf("[AUDIO] i2s_driver_install retry err=%d\n", (int)err);
     }
     if (err != ESP_OK) {
-        Serial.printf("[AUDIO] i2s_driver_install failed: %d\n", err);
+        // Never crash over sound — the game runs fine silently.
+        Serial.printf("[AUDIO] audio disabled (install err=%d) — running silent\n", (int)err);
         return false;
     }
 
