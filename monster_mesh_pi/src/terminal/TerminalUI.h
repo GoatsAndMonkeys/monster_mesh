@@ -56,16 +56,12 @@ static constexpr const char *LOCAL_DESC[]  = {
 };
 static constexpr int LOCAL_COUNT = 3;
 
-// NOTE: the "Battle rules" row label is rendered dynamically (it shows the
-// current gen) in renderMenu(); the string here is just a placeholder width.
-static constexpr const char *SYSTEM_ITEMS[] = { "Help", "Battle rules", "Quit" };
+static constexpr const char *SYSTEM_ITEMS[] = { "Help", "Quit" };
 static constexpr const char *SYSTEM_DESC[]  = {
     "Show button controls",
-    "Toggle Gen-1 vs Gen-3 battle mechanics",
     "Return to RetroPie",
 };
-static constexpr int SYSTEM_COUNT = 3;
-static constexpr int SYSTEM_BATTLE_RULES_ITEM = 1;  // index rendered dynamically
+static constexpr int SYSTEM_COUNT = 2;
 
 // ── TerminalUI ────────────────────────────────────────────────────────────────
 
@@ -262,10 +258,11 @@ private:
 
     // ── Battle state ──────────────────────────────────────────────────────────
     Gen1BattleEngine engine_;
-    // Battle-mechanics generation passed to every engine_.start(): 1 = classic
-    // Gen-1, 3 = Gen 2/3-style (Special split, fixed crits, Dark/Steel + modern
-    // types). Toggled from the SYSTEM menu for A/B testing.
-    uint8_t     battleGen_    = 1;
+    // Battle-mechanics generation passed to every engine_.start(). The whole
+    // project runs Gen 2/3-style mechanics (Special split, fixed crits,
+    // Dark/Steel + modern types) — no toggle, so every device matches for
+    // deterministic cross-play.
+    uint8_t     battleGen_    = 3;
     bool        inBattle_     = false;
     uint8_t     localSide_    = 0;   // 0 = player is P0 (always for local battles)
     bool        roguelike_    = false;

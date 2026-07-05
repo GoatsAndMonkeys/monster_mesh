@@ -657,14 +657,7 @@ void TerminalUI::renderMenu() {
     if (maxRows < 0) maxRows = 0;
     for (int i = 0; i < count && i < maxRows; i++) {
         if (i == activeItem_) wattron(winMenu_, A_REVERSE | COLOR_PAIR(3));
-        // The SYSTEM "Battle rules" row shows the current mechanics gen.
-        char dyn[32];
-        const char *label = items[i];
-        if (activeTab_ == 2 && i == SYSTEM_BATTLE_RULES_ITEM) {
-            snprintf(dyn, sizeof(dyn), "Battle rules: GEN %u", (unsigned)battleGen_);
-            label = dyn;
-        }
-        mvwprintw(winMenu_, 3 + i, 2, "%-*s", cols_ - 4, label);
+        mvwprintw(winMenu_, 3 + i, 2, "%-*s", cols_ - 4, items[i]);
         if (i == activeItem_) wattroff(winMenu_, A_REVERSE | COLOR_PAIR(3));
     }
 
@@ -2264,13 +2257,7 @@ void TerminalUI::activateLocalItem(int item) {
 void TerminalUI::activateSystemItem(int item) {
     switch (item) {
         case 0: screen_ = Screen::HELP; break;
-        case 1:  // Battle rules: toggle Gen-1 <-> Gen-3 mechanics
-            battleGen_ = (battleGen_ >= 3) ? 1 : 3;
-            pushActivity(battleGen_ >= 3
-                ? "> Battle rules: GEN 3 (split Sp.Atk/Sp.Def, 1/16 crits, Dark/Steel)"
-                : "> Battle rules: GEN 1 (classic)");
-            break;
-        case 2: screen_ = Screen::CONFIRM_QUIT; break;
+        case 1: screen_ = Screen::CONFIRM_QUIT; break;
     }
 }
 
