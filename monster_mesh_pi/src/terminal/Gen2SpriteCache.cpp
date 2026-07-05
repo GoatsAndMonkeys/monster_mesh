@@ -1,6 +1,6 @@
 #include "Gen2SpriteCache.h"
-#include "Gen2ColorIcons.h"
-#include "Gen2BackIcons.h"
+#include "Gen3ColorIcons.h"  // battle station now uses Gen 3 (Emerald/FRLG) art
+#include "Gen3BackIcons.h"
 
 extern "C" {
 #include "puff.h"
@@ -28,17 +28,17 @@ void clear() {
 }
 
 void dims(bool isBack, int *outW, int *outH) {
-    if (outW) *outW = isBack ? GEN2_BACK_W : GEN2_COLOR_W;
-    if (outH) *outH = isBack ? GEN2_BACK_H : GEN2_COLOR_H;
+    if (outW) *outW = isBack ? GEN3_BACK_W : GEN3_COLOR_W;
+    if (outH) *outH = isBack ? GEN3_BACK_H : GEN3_COLOR_H;
 }
 
 // Decode the deflate blob for one species into a 2bpp buffer.
 static bool decodeSprite(int dex, bool isBack, uint8_t *out, size_t outCap) {
     if (dex < 1 || dex > 151) return false;
-    const uint32_t *offsets = isBack ? kGen2BackDeflateOffsets
-                                     : kGen2ColorDeflateOffsets;
-    const uint8_t  *blob    = isBack ? kGen2BackDeflate
-                                     : kGen2ColorDeflate;
+    const uint32_t *offsets = isBack ? kGen3BackDeflateOffsets
+                                     : kGen3ColorDeflateOffsets;
+    const uint8_t  *blob    = isBack ? kGen3BackDeflate
+                                     : kGen3ColorDeflate;
     uint32_t start = offsets[dex];
     uint32_t end   = offsets[dex + 1];
     if (end <= start) return false;
@@ -72,17 +72,17 @@ static SDL_Texture *buildTexture(SDL_Renderer *renderer, int dex, bool isBack) {
     if (!renderer) return nullptr;
     if (dex < 1 || dex > 151) return nullptr;
 
-    int w = isBack ? GEN2_BACK_W  : GEN2_COLOR_W;
-    int h = isBack ? GEN2_BACK_H  : GEN2_COLOR_H;
+    int w = isBack ? GEN3_BACK_W  : GEN3_COLOR_W;
+    int h = isBack ? GEN3_BACK_H  : GEN3_COLOR_H;
 
     // Decode 2bpp packed buffer.
-    uint8_t buf[GEN2_COLOR_W * GEN2_COLOR_H / 4];  // 784 B — covers both sizes
+    uint8_t buf[GEN3_COLOR_W * GEN3_COLOR_H / 4];  // 784 B — covers both sizes
     size_t  need = (size_t)(w * h + 3) / 4;
     if (!decodeSprite(dex, isBack, buf, need)) return nullptr;
 
     // Per-species palette: index 0 -> transparent, 1..3 -> RGB565 entries.
-    const uint16_t *pal = isBack ? kGen2BackPalettes[dex]
-                                 : kGen2ColorPalettes[dex];
+    const uint16_t *pal = isBack ? kGen3BackPalettes[dex]
+                                 : kGen3ColorPalettes[dex];
     uint32_t rgba[4];
     rgba[0] = 0;                              // transparent
     rgba[1] = rgb565to8888(pal[1]);
