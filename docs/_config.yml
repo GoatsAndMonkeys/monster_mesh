@@ -1,0 +1,31 @@
+# GitHub Pages / Jekyll configuration for the MonsterMesh docs site.
+# Served from the `main` branch, `/docs` folder → https://goatsandmonkeys.github.io/monster_mesh/
+title: MonsterMesh
+tagline: Game Boy emulation, monster battles, and pentesting over the LoRa mesh
+description: >-
+  MonsterMesh is a Game Boy emulator, a Generation-1 monster-battling RPG, and a
+  WiFi/BLE "Pentest Pikachu" security toy that run over the Meshtastic LoRa mesh —
+  on the LilyGO T-Deck, Raspberry Pi, and Heltec V3/V4/T114. No internet required.
+
+url: https://goatsandmonkeys.github.io
+baseurl: /monster_mesh
+
+# GitHub-Pages-supported theme (clean single-column landing).
+theme: jekyll-theme-cayman
+
+# Extra supported plugins: SEO meta tags (title/description/Open Graph) + sitemap.xml.
+# jekyll-optional-front-matter, jekyll-relative-links and jekyll-titles-from-headings
+# are always-on GitHub Pages plugins, so the existing docs render and cross-link
+# without needing front matter.
+plugins:
+  - jekyll-seo-tag
+  - jekyll-sitemap
+
+# Repo metadata (used by jekyll-github-metadata / SEO tags).
+repository: GoatsAndMonkeys/monster_mesh
+github:
+  repository_url: https://github.com/GoatsAndMonkeys/monster_mesh
+
+# Keep Jekyll from trying to process build/support files if any land here.
+exclude:
+  - _config.yml

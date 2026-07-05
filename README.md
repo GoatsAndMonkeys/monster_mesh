@@ -18,6 +18,20 @@ On top of the raw emulator, MonsterMesh adds a native **Generation-1 battle engi
 
 ---
 
+## The MonsterMesh project — three platforms, three branches
+
+MonsterMesh is one game world that runs on three different kinds of hardware. Each lives on its own branch of this repository:
+
+| Platform | Branch | Hardware | What it is | Build |
+|----------|--------|----------|------------|-------|
+| **T-Deck** (this branch) | [`main`](https://github.com/GoatsAndMonkeys/monster_mesh/tree/main) | LilyGO T-Deck (ESP32-S3) | Game Boy emulator + Gen-1 battle RPG + mesh daycare, as a Meshtastic module | `pio run -e t-deck-tft` |
+| **Raspberry Pi** | [`mm/monster-mesh-pi`](https://github.com/GoatsAndMonkeys/monster_mesh/tree/mm/monster-mesh-pi) | Raspberry Pi / RetroPie handheld (e.g. GPi Case 2W) | The same RPG/daycare/battle layer as an ncurses terminal (`mmd` daemon + `mmterm`), talking to a Meshtastic node over USB | `cmake` — see the [Pi README](https://github.com/GoatsAndMonkeys/monster_mesh/blob/mm/monster-mesh-pi/monster_mesh_pi/README.md) |
+| **Pentest Pikachu** | [`pentest-pikachu`](https://github.com/GoatsAndMonkeys/monster_mesh/tree/pentest-pikachu) | Heltec V3 / V4 (WiFi) · Heltec T114 (BLE) | Turns the radio into a Pokémon-themed WiFi/BLE security auditor — nearby vulnerabilities trigger monster battles | `pio run -e heltec-v3` / `-e heltec-v4` / `-e heltec-t114-pet` |
+
+All three share the same deterministic Gen-1 battle engine and mesh protocol, so T-Deck, Pi, and Heltec players interoperate over the same LoRa mesh. **This README covers the T-Deck build.**
+
+---
+
 ## Table of contents
 
 - [Features](#features)
