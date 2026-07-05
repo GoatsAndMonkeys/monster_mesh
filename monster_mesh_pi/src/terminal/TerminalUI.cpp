@@ -495,6 +495,7 @@ void TerminalUI::render() {
         case Screen::DAYCARE_EVENT: renderDaycareEvent();                    break;
         case Screen::BATTLE:        renderBattle();                          break;
         case Screen::BATTLE_END:    renderBattleEnd();                       break;
+        case Screen::MOVE_LEARN:    renderMoveLearn();                       break;
         case Screen::GYM_SELECT:    renderGymSelect();                       break;
         case Screen::PVP_BATTLE:    renderPvpBattle();                       break;
         case Screen::PVP_BATTLE_END:renderPvpBattleEnd();                    break;
@@ -803,6 +804,120 @@ void TerminalUI::renderDaycareEvent() {
     }
 
     mvwprintw(winMenu_, 1, 1, "[B] Back");
+}
+
+// ── Move-learn chooser ──────────────────────────────────────────────────────────
+// Fired when a daycare level-up teaches a move to a Pokemon that already knows
+// four.  The list is rendered in the (taller) info panel; the weakest current
+// move is pre-highlighted so the player can just press A.  Options 0-3 forget
+// that move; option 4 declines.
+
+int TerminalUI::weakestMoveIndex(const PendingLearn &pl) const {
+    int best = 0, bestScore = 1000;
+    for (int i = 0; i < 4; i++) {
+        const Gen1MoveData *m = pl.curMoves[i] ? gen1Move(pl.curMoves[i]) : nullptr;
+        int score = m ? m->power : 0;
+        // A 0-power status move (Thunder Wave, Sleep Powder, ...) is often more
+        // useful than a weak attack, so give it a nominal score rather than
+        // always auto-dropping it.  The player can still override.
+        if (score == 0) score = 35;
+        if (pl.curMoves[i] == 0) score = -1;  // an empty slot is always weakest
+        if (score < bestScore) { bestScore = score; best = i; }
+    }
+    return best;
+}
+
+void TerminalUI::advanceLearnQueue() {
+    if (!learnQueue_.empty()) learnQueue_.erase(learnQueue_.begin());
+    if (learnQueue_.empty()) {
+        screen_ = Screen::MENU;
+    } else {
+        learnCursor_ = weakestMoveIndex(learnQueue_.front());
+    }
+}
+
+void TerminalUI::renderMoveLearn() {
+    werase(winInfo_);
+    werase(winMenu_);
+    if (learnQueue_.empty()) { screen_ = Screen::MENU; return; }
+
+    const PendingLearn &pl = learnQueue_.front();
+    const Gen1MoveData *nm = gen1Move(pl.newMove);
+
+    mvwprintw(winInfo_, 0, 1, "=== Move Learning ===");
+    wattron(winInfo_, A_BOLD);
+    mvwprintw(winInfo_, 2, 2, "%s wants to learn %s (PWR %u)!",
+              pl.nick, moveName(pl.newMove), nm ? (unsigned)nm->power : 0);
+    wattroff(winInfo_, A_BOLD);
+    mvwprintw(winInfo_, 4, 2, "Forget which move?");
+
+    for (int i = 0; i < 5; i++) {
+        int row = 6 + i;
+        const char *cursor = (i == learnCursor_) ? ">" : " ";
+        if (i == learnCursor_) wattron(winInfo_, A_REVERSE | COLOR_PAIR(3));
+        if (i < 4) {
+            const Gen1MoveData *cm = pl.curMoves[i] ? gen1Move(pl.curMoves[i]) : nullptr;
+            if (pl.curMoves[i])
+                mvwprintw(winInfo_, row, 2, "%s %-13s PWR %u",
+                          cursor, moveName(pl.curMoves[i]),
+                          cm ? (unsigned)cm->power : 0);
+            else
+                mvwprintw(winInfo_, row, 2, "%s (empty slot)", cursor);
+        } else {
+            mvwprintw(winInfo_, row, 2, "%s Don't learn %s", cursor,
+                      moveName(pl.newMove));
+        }
+        if (i == learnCursor_) wattroff(winInfo_, A_REVERSE | COLOR_PAIR(3));
+    }
+
+    int remaining = (int)learnQueue_.size() - 1;
+    if (remaining > 0)
+        mvwprintw(winInfo_, 12, 2, "(%d more move%s to decide)",
+                  remaining, remaining == 1 ? "" : "s");
+
+    mvwprintw(winMenu_, 1, 1, "[Up/Down] Pick  [A] Confirm  [B] Skip");
+}
+
+void TerminalUI::moveLearnButton(const ButtonEvent &ev) {
+    if (learnQueue_.empty()) { screen_ = Screen::MENU; return; }
+
+    switch (ev.button) {
+        case GpiButton::UP:
+            learnCursor_ = (learnCursor_ + 5 - 1) % 5;
+            break;
+        case GpiButton::DOWN:
+            learnCursor_ = (learnCursor_ + 1) % 5;
+            break;
+        case GpiButton::A: {
+            PendingLearn pl = learnQueue_.front();
+            int forget = learnCursor_;   // 4 == don't learn (daemon skips >=4)
+            char cmd[96];
+            snprintf(cmd, sizeof(cmd),
+                "{\"cmd\":\"LEARN_MOVE\",\"slot\":%u,\"forget\":%d,\"move\":%u}",
+                (unsigned)pl.slot, forget, (unsigned)pl.newMove);
+            ipc_.send(cmd);
+            if (forget < 4) {
+                pushActivity("  %s learned %s (forgot %s)", pl.nick,
+                             moveName(pl.newMove), moveName(pl.curMoves[forget]));
+                // Keep later decisions for the SAME slot accurate: the move we
+                // just replaced is now the new move.
+                for (auto &q : learnQueue_)
+                    if (q.slot == pl.slot) q.curMoves[forget] = pl.newMove;
+            } else {
+                pushActivity("  %s did not learn %s", pl.nick,
+                             moveName(pl.newMove));
+            }
+            advanceLearnQueue();
+            break;
+        }
+        case GpiButton::B:
+            pushActivity("  %s did not learn %s", learnQueue_.front().nick,
+                         moveName(learnQueue_.front().newMove));
+            advanceLearnQueue();
+            break;
+        default:
+            break;
+    }
 }
 
 // ── Help ──────────────────────────────────────────────────────────────────────
@@ -1230,6 +1345,7 @@ void TerminalUI::handleButton(const ButtonEvent &ev) {
         case Screen::DAYCARE_EVENT: daycareEventButton(ev); break;
         case Screen::BATTLE:        battleButton(ev);       break;
         case Screen::BATTLE_END:    battleEndButton(ev);    break;
+        case Screen::MOVE_LEARN:    moveLearnButton(ev);    break;
         case Screen::GYM_SELECT:    gymSelectButton(ev);    break;
         case Screen::PVP_BATTLE:    pvpBattleButton(ev);    break;
         case Screen::PVP_BATTLE_END:pvpBattleEndButton(ev); break;
@@ -1924,6 +2040,7 @@ void TerminalUI::battleEndButton(const ButtonEvent &ev) {
                     }
                 }
                 engine_.replaceOpponent(nextGymParty);
+                resetBattleParticipants();
                 battleLog_.clear();
                 moveSel_      = 0;
                 switchMode_   = false;
@@ -1945,6 +2062,7 @@ void TerminalUI::battleEndButton(const ButtonEvent &ev) {
             Gen1Party nextE4;
             if (lordBuildE4Party(pendingE4Idx_, nextE4)) {
                 engine_.replaceOpponent(nextE4);
+                resetBattleParticipants();
                 battleLog_.clear();
                 moveSel_      = 0;
                 switchMode_   = false;
@@ -2309,6 +2427,7 @@ void TerminalUI::buildPlayerPartyForBattle() {
 
     uint32_t seed = (uint32_t)(millis() ^ (uint32_t)(uintptr_t)this);
     engine_.start(party_, cpu, seed);
+    resetBattleParticipants();
     screen_  = Screen::BATTLE;
 }
 
@@ -2353,6 +2472,7 @@ void TerminalUI::startRoguelike() {
 
     uint32_t seed = (uint32_t)(millis() ^ (uint32_t)wildDex ^ (uint32_t)wildLv);
     engine_.start(party_, wild, seed);
+    resetBattleParticipants();
     screen_ = Screen::BATTLE;
 }
 
@@ -3376,17 +3496,7 @@ void TerminalUI::startPentestBattle() {
     battleResult_ = Gen1BattleEngine::Result::ONGOING;
     uint32_t seed = (uint32_t)(millis() ^ ((uint32_t)wildDex << 8) ^ wildLv);
     engine_.start(party_, wild, seed);
-
-    // Override the foe's nickname with the WiFi SSID so the status box shows
-    // the target network name ("SSID L14") instead of the Pokemon species name.
-    if (pentestSsid_[0]) {
-        Gen1BattleEngine::BattleParty &fp = engine_.party(1);
-        int n = 0;
-        for (int i = 0; pentestSsid_[i] && n < 10; i++, n++)
-            fp.mons[0].nickname[n] = pentestSsid_[i];
-        fp.mons[0].nickname[n] = '\0';
-    }
-
+    resetBattleParticipants();
     screen_ = Screen::BATTLE;
 }
 
@@ -3402,6 +3512,13 @@ void TerminalUI::runTurnWithXp() {
     uint16_t preHp[Gen1BattleEngine::MAX_PARTY] = {};
     for (uint8_t i = 0; i < ep.count; i++) preHp[i] = ep.mons[i].hp;
     uint8_t killerSlot = pp.active;
+
+    // XP sharing: mark that our currently-active mon fought the enemy that is
+    // out right now.  This accumulates across turns, so if a second mon is
+    // switched in against the same enemy, both are recorded and split its EXP
+    // when it faints (Gen 1 behaviour).
+    if (ep.active < Gen1BattleEngine::MAX_PARTY && pp.active < 6)
+        enemyParticipants_[ep.active] |= (uint8_t)(1u << pp.active);
 
     engine_.executeTurn(battleLogSinkStatic, this);
 
@@ -3427,67 +3544,82 @@ void TerminalUI::runTurnWithXp() {
                 pentestMarkBeaten(enemyDex);
             }
 
-            // Gen 1: only the active mon at the time of the KO earns XP.
-            // Bench members get nothing -- switch them in to level them.
-            if (killerSlot < 6) {
-                sessionXp_[killerSlot]   += xp;
-                slotLevelXp_[killerSlot] += xp;
+            // XP sharing (Gen 1): every mon that fought this enemy and is
+            // still alive splits the yield evenly.  Fall back to the KO'er if
+            // the participant mask is somehow empty (e.g. a KO from a status
+            // effect the first turn it was sent out).  Bench mons that never
+            // faced this enemy still get nothing.
+            uint8_t mask = (i < Gen1BattleEngine::MAX_PARTY) ? enemyParticipants_[i] : 0;
+            uint8_t sharers[6];
+            uint8_t nShare = 0;
+            for (uint8_t s = 0; s < 6 && s < pp.count; s++) {
+                if ((mask & (1u << s)) && pp.mons[s].hp > 0) sharers[nShare++] = s;
             }
+            if (nShare == 0 && killerSlot < 6) sharers[nShare++] = killerSlot;
 
-            char line[64];
-            snprintf(line, sizeof(line), "%s gained %u EXP!",
-                     pp.mons[killerSlot].nickname, (unsigned)xp);
-            battleLog_.push_back(line);
+            uint32_t share = (nShare > 0) ? (xp / nShare) : 0;
+            if (share < 1) share = 1;  // never round a real KO down to zero
 
             // Gym / E4 gauntlets: DON'T level up mid-run.  The level should
             // change once, after the whole gym/league is cleared — not after
-            // every trainer.  XP still accumulates in sessionXp_ above and is
+            // every trainer.  XP still accumulates in sessionXp_ below and is
             // flushed to the daemon at the end, which recomputes the SAV level
             // (and the SAV_WRITEBACK summary shows the net level change).  For
             // one-off battles (Fight / roguelike / pentest) we still level up
             // mid-battle as normal.
             bool deferLevels = (inGymBattle_ || inE4Battle_);
 
-            // Medium-fast level-up: XP needed to gain ONE level from L to
-            // L+1 = (L+1)^3 - L^3.  slotLevelXp_ accumulates until it
-            // crosses that delta, then we bump the engine's BattlePoke
-            // level, scale stats linearly, and add the maxHp delta to
-            // current HP (Gen 1 heal-on-level).
-            Gen1BattleEngine::BattlePoke &mon = pp.mons[killerSlot];
-            while (!deferLevels && mon.level < 100 && killerSlot < 6) {
-                uint32_t L = mon.level;
-                uint32_t levelDelta = (L + 1) * (L + 1) * (L + 1) - L * L * L;
-                if (slotLevelXp_[killerSlot] < levelDelta) break;
-                slotLevelXp_[killerSlot] -= levelDelta;
+            char line[64];
+            for (uint8_t si = 0; si < nShare; si++) {
+                uint8_t slot = sharers[si];
+                sessionXp_[slot]   += share;
+                slotLevelXp_[slot] += share;
 
-                uint8_t newLevel = mon.level + 1;
-                uint16_t oldMax  = mon.maxHp;
-                mon.maxHp = (uint16_t)((uint32_t)mon.maxHp * newLevel / mon.level);
-                mon.atk   = (uint16_t)((uint32_t)mon.atk   * newLevel / mon.level);
-                mon.def   = (uint16_t)((uint32_t)mon.def   * newLevel / mon.level);
-                mon.spd   = (uint16_t)((uint32_t)mon.spd   * newLevel / mon.level);
-                mon.spc   = (uint16_t)((uint32_t)mon.spc   * newLevel / mon.level);
-                if (mon.maxHp > oldMax) mon.hp += (mon.maxHp - oldMax);
-                mon.level = newLevel;
-
-                snprintf(line, sizeof(line), "%s grew to L%u!",
-                         mon.nickname, (unsigned)newLevel);
+                snprintf(line, sizeof(line), "%s gained %u EXP!",
+                         pp.mons[slot].nickname, (unsigned)share);
                 battleLog_.push_back(line);
 
-                // Pentest Pikachu: announce any move learned at this level and
-                // the L30 evolution.  Both take effect on the NEXT scan, when
-                // the party is rebuilt from the new level (the engine's active
-                // moveset/species is fixed for the current battle).
-                if (inPentestBattle_) {
-                    for (const PikaLearn &e : kPikaLearnset) {
-                        if (e.level == newLevel) {
-                            snprintf(line, sizeof(line), "Learned %s!",
-                                     moveName(e.move));
-                            battleLog_.push_back(line);
+                // Medium-fast level-up: XP needed to gain ONE level from L to
+                // L+1 = (L+1)^3 - L^3.  slotLevelXp_ accumulates until it
+                // crosses that delta, then we bump the engine's BattlePoke
+                // level, scale stats linearly, and add the maxHp delta to
+                // current HP (Gen 1 heal-on-level).
+                Gen1BattleEngine::BattlePoke &mon = pp.mons[slot];
+                while (!deferLevels && mon.level < 100) {
+                    uint32_t L = mon.level;
+                    uint32_t levelDelta = (L + 1) * (L + 1) * (L + 1) - L * L * L;
+                    if (slotLevelXp_[slot] < levelDelta) break;
+                    slotLevelXp_[slot] -= levelDelta;
+
+                    uint8_t newLevel = mon.level + 1;
+                    uint16_t oldMax  = mon.maxHp;
+                    mon.maxHp = (uint16_t)((uint32_t)mon.maxHp * newLevel / mon.level);
+                    mon.atk   = (uint16_t)((uint32_t)mon.atk   * newLevel / mon.level);
+                    mon.def   = (uint16_t)((uint32_t)mon.def   * newLevel / mon.level);
+                    mon.spd   = (uint16_t)((uint32_t)mon.spd   * newLevel / mon.level);
+                    mon.spc   = (uint16_t)((uint32_t)mon.spc   * newLevel / mon.level);
+                    if (mon.maxHp > oldMax) mon.hp += (mon.maxHp - oldMax);
+                    mon.level = newLevel;
+
+                    snprintf(line, sizeof(line), "%s grew to L%u!",
+                             mon.nickname, (unsigned)newLevel);
+                    battleLog_.push_back(line);
+
+                    // Pentest Pikachu: announce any move learned at this level
+                    // and the L30 evolution.  Both take effect on the NEXT
+                    // scan, when the party is rebuilt from the new level (the
+                    // engine's active moveset/species is fixed for this battle).
+                    if (inPentestBattle_) {
+                        for (const PikaLearn &e : kPikaLearnset) {
+                            if (e.level == newLevel) {
+                                snprintf(line, sizeof(line), "Learned %s!",
+                                         moveName(e.move));
+                                battleLog_.push_back(line);
+                            }
                         }
+                        if (newLevel == PIKACHU_EVOLVE_LEVEL)
+                            battleLog_.push_back("PIKACHU evolved into RAICHU!");
                     }
-                    if (newLevel == PIKACHU_EVOLVE_LEVEL)
-                        battleLog_.push_back("PIKACHU evolved into RAICHU!");
                 }
             }
         }
@@ -3856,6 +3988,7 @@ void TerminalUI::parsePvpAccept(const std::string &msg) {
     // Restart engine against the real foe instead of the random CPU
     uint32_t seed = (uint32_t)(millis() ^ (uint32_t)(uintptr_t)this);
     engine_.start(party_, foeParty, seed);
+    resetBattleParticipants();
 
     // Server-mode battle state
     pvpServerMode_         = true;
@@ -3997,7 +4130,29 @@ void TerminalUI::onIpcMessage(const std::string &msg) {
             pushActivity("> No XP to save (none earned this fight)");
         } else {
             pushActivity("=== Progress saved to .sav ===");
-            // Walk the slots[...] array and print one line per Pokemon.
+            // Parse a "key":[n,n,...] int array out of a slot object.
+            auto parseIntArray = [](const std::string &obj, const char *key,
+                                    uint8_t *out, int maxN) -> int {
+                std::string pat = std::string("\"") + key + "\":[";
+                size_t a = obj.find(pat);
+                if (a == std::string::npos) return 0;
+                a += pat.size();
+                size_t b = obj.find(']', a);
+                if (b == std::string::npos) return 0;
+                int n = 0;
+                size_t i = a;
+                while (i < b && n < maxN) {
+                    while (i < b && (obj[i] == ',' || obj[i] == ' ')) i++;
+                    if (i >= b) break;
+                    out[n++] = (uint8_t)atoi(obj.c_str() + i);
+                    while (i < b && obj[i] != ',') i++;
+                }
+                return n;
+            };
+
+            // Walk the slots[...] array and print one line per Pokemon.  Slot
+            // objects contain nested arrays ("learned"/"pending"/"moves") but
+            // those use [] not {}, so the first '}' still closes the object.
             size_t pos = msg.find("\"slots\":[");
             if (pos != std::string::npos) {
                 pos += 9;
@@ -4009,6 +4164,7 @@ void TerminalUI::onIpcMessage(const std::string &msg) {
                     std::string sl = msg.substr(pos, end - pos + 1);
 
                     std::string nick = jsonGetStr(sl, "nick");
+                    int slot = jsonGetInt(sl, "slot", -1);
                     int oldL = jsonGetInt(sl, "old_level", 0);
                     int newL = jsonGetInt(sl, "new_level", 0);
                     int xp   = jsonGetInt(sl, "xp", 0);
@@ -4018,8 +4174,38 @@ void TerminalUI::onIpcMessage(const std::string &msg) {
                     else
                         pushActivity("  %-10s L%d        (+%d XP)",
                                      nick.c_str(), oldL, xp);
+
+                    // Moves auto-learned into empty slots — just report them.
+                    uint8_t learned[8];
+                    int nLearned = parseIntArray(sl, "learned", learned, 8);
+                    for (int k = 0; k < nLearned; k++)
+                        pushActivity("  %s learned %s!", nick.c_str(),
+                                     moveName(learned[k]));
+
+                    // Moves that need a forget-choice — queue a chooser prompt.
+                    uint8_t pending[8], curMoves[4] = {};
+                    int nPending = parseIntArray(sl, "pending", pending, 8);
+                    if (nPending > 0 && slot >= 0 && slot < 6) {
+                        parseIntArray(sl, "moves", curMoves, 4);
+                        for (int k = 0; k < nPending; k++) {
+                            PendingLearn pl{};
+                            pl.slot    = (uint8_t)slot;
+                            pl.newMove = pending[k];
+                            for (int m = 0; m < 4; m++) pl.curMoves[m] = curMoves[m];
+                            strncpy(pl.nick, nick.c_str(), sizeof(pl.nick) - 1);
+                            learnQueue_.push_back(pl);
+                        }
+                    }
                     pos = end + 1;
                 }
+            }
+
+            // If any Pokemon wants to learn a move but is full, jump into the
+            // chooser (weakest move pre-selected).  The daemon patches each
+            // choice as we confirm it.
+            if (!learnQueue_.empty()) {
+                learnCursor_ = weakestMoveIndex(learnQueue_.front());
+                screen_ = Screen::MOVE_LEARN;
             }
         }
     }
@@ -4338,6 +4524,7 @@ void TerminalUI::parseNeighborParty(const std::string &msg) {
     battleResult_ = Gen1BattleEngine::Result::ONGOING;
     uint32_t seed = (uint32_t)(millis() ^ asyncFightNodeId_);
     engine_.start(party_, foe, seed);
+    resetBattleParticipants();
     screen_       = Screen::BATTLE;
 }
 
@@ -4508,6 +4695,7 @@ void TerminalUI::startGymBattle(uint8_t gymIdx, uint8_t trainerIdx)
 
     uint32_t seed = (uint32_t)(millis() ^ ((uint32_t)gymIdx << 8) ^ trainerIdx);
     engine_.start(party_, gymParty, seed);
+    resetBattleParticipants();
     screen_ = Screen::BATTLE;
 }
 
@@ -4542,6 +4730,7 @@ void TerminalUI::startE4Battle(uint8_t e4Idx)
 
     uint32_t seed = (uint32_t)(millis() ^ ((uint32_t)0xE4 << 8) ^ e4Idx);
     engine_.start(party_, e4Party, seed);
+    resetBattleParticipants();
     screen_ = Screen::BATTLE;
 }
 
@@ -4587,6 +4776,7 @@ void TerminalUI::syncBattleWindow() {
     s.foe.hp      = em.hp;
     s.foe.maxHp   = em.maxHp;
     s.foe.status  = em.status;
+    s.foe.confused = (em.confuseTurns > 0);
     snprintf(s.foe.nickname, sizeof(s.foe.nickname), "%s", em.nickname);
 
     s.you.species = pm.species;
@@ -4594,6 +4784,7 @@ void TerminalUI::syncBattleWindow() {
     s.you.hp      = pm.hp;
     s.you.maxHp   = pm.maxHp;
     s.you.status  = pm.status;
+    s.you.confused = (pm.confuseTurns > 0);
     snprintf(s.you.nickname, sizeof(s.you.nickname), "%s", pm.nickname);
 
     for (int i = 0; i < 4; i++) {

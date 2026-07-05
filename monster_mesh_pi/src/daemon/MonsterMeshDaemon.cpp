@@ -856,6 +856,28 @@ void MonsterMeshDaemon::onIpcMessage(const std::string &msg) {
                     }
                     bool patched = DaycareSavPatcher::checkout(
                         sram, dexNums, xpGained, st.partyCount);
+
+                    // Teach level-up moves for every slot that gained levels.
+                    // Empty move slots are filled automatically; moves that
+                    // don't fit (all 4 slots occupied) are reported as
+                    // "pending" so the terminal can prompt the player to pick
+                    // one to forget.  checkout() already fixed the checksum;
+                    // re-fix it here since learnMoves() mutated move/PP bytes.
+                    DaycareSavPatcher::MoveLearnResult learn[6];
+                    bool anyMoveChange = false;
+                    if (patched) {
+                        for (uint8_t i = 0; i < st.partyCount && i < 6; i++) {
+                            if (xpGained[i] == 0) continue;
+                            uint8_t newLevel = sram[SAV_POKEMON_DATA
+                                + i * SAV_POKEMON_SIZE + PKM_LEVEL_PARTY];
+                            DaycareSavPatcher::learnMoves(
+                                sram, i, dexNums[i], oldLevels[i], newLevel,
+                                learn[i]);
+                            if (learn[i].learnedCount) anyMoveChange = true;
+                        }
+                        if (anyMoveChange) DaycareSavPatcher::fixChecksum(sram);
+                    }
+
                     if (!patched) {
                         ipc_.push("{\"type\":\"SAV_WRITEBACK\",\"ok\":1,\"applied\":0}");
                     } else {
@@ -899,12 +921,37 @@ void MonsterMeshDaemon::onIpcMessage(const std::string &msg) {
                                 p += snprintf(summary + p, sizeof(summary) - p,
                                     "%s{\"slot\":%u,\"nick\":\"%s\","
                                     "\"old_level\":%u,\"new_level\":%u,"
-                                    "\"xp\":%u}",
+                                    "\"xp\":%u",
                                     first_slot ? "" : ",",
                                     (unsigned)i, nicks[i],
                                     (unsigned)oldLevels[i],
                                     (unsigned)newLevel,
                                     (unsigned)xpGained[i]);
+                                // Moves auto-learned into empty slots.
+                                p += snprintf(summary + p, sizeof(summary) - p,
+                                    ",\"learned\":[");
+                                for (uint8_t k = 0; k < learn[i].learnedCount; k++)
+                                    p += snprintf(summary + p, sizeof(summary) - p,
+                                        "%s%u", k ? "," : "",
+                                        (unsigned)learn[i].learned[k]);
+                                // Moves that need a forget-choice (party full).
+                                p += snprintf(summary + p, sizeof(summary) - p,
+                                    "],\"pending\":[");
+                                for (uint8_t k = 0; k < learn[i].pendingCount; k++)
+                                    p += snprintf(summary + p, sizeof(summary) - p,
+                                        "%s%u", k ? "," : "",
+                                        (unsigned)learn[i].pending[k]);
+                                // Current 4 move IDs (post-patch) so the UI can
+                                // show the "forget which?" list without a round-trip.
+                                p += snprintf(summary + p, sizeof(summary) - p,
+                                    "],\"moves\":[");
+                                for (int k = 0; k < 4; k++)
+                                    p += snprintf(summary + p, sizeof(summary) - p,
+                                        "%s%u", k ? "," : "",
+                                        (unsigned)sram[SAV_POKEMON_DATA
+                                            + i * SAV_POKEMON_SIZE
+                                            + DaycareSavPatcher::PKM_MOVES + k]);
+                                p += snprintf(summary + p, sizeof(summary) - p, "]}");
                                 first_slot = false;
                             }
                             p += snprintf(summary + p, sizeof(summary) - p, "]}");
@@ -913,6 +960,63 @@ void MonsterMeshDaemon::onIpcMessage(const std::string &msg) {
                         }
                     }
                 }
+            }
+        }
+    } else if (strcmp(cmd, "LEARN_MOVE") == 0) {
+        // {"cmd":"LEARN_MOVE","slot":N,"forget":I,"move":M}
+        // Player picked move I (0-3) to forget so the Pokemon in party slot N
+        // can learn move M.  Re-read the current .sav, replace that slot,
+        // re-fix the checksum, and atomically rewrite.  forget>=4 (or any
+        // out-of-range value) means the player declined — nothing is written.
+        auto extractInt = [&](const char *key) -> int {
+            char search[32];
+            snprintf(search, sizeof(search), "\"%s\":", key);
+            const char *pp = strstr(s, search);
+            if (!pp) return -1;
+            pp += strlen(search);
+            while (*pp == ' ') pp++;
+            return atoi(pp);
+        };
+        int slot   = extractInt("slot");
+        int forget = extractInt("forget");
+        int move   = extractInt("move");
+        const char *savPath = watcher_.currentSavPath();
+        if (slot < 0 || slot >= 6 || move <= 0 || forget < 0 || forget >= 4) {
+            ipc_.push("{\"type\":\"LEARN_MOVE_RESULT\",\"ok\":0,\"reason\":\"skip\"}");
+        } else if (!savPath || !savPath[0]) {
+            ipc_.push("{\"type\":\"LEARN_MOVE_RESULT\",\"ok\":0,\"reason\":\"no path\"}");
+        } else {
+            // Read from disk, not the watcher snapshot, which may predate the
+            // auto-learn writeback that just happened.
+            uint8_t sram[32768] = {};
+            FILE *rf = fopen(savPath, "rb");
+            size_t rd = rf ? fread(sram, 1, sizeof(sram), rf) : 0;
+            if (rf) fclose(rf);
+            if (rd != sizeof(sram)) {
+                ipc_.push("{\"type\":\"LEARN_MOVE_RESULT\",\"ok\":0,\"reason\":\"read\"}");
+            } else {
+                DaycareSavPatcher::setMove(sram, (uint8_t)slot,
+                                           (uint8_t)forget, (uint8_t)move);
+                DaycareSavPatcher::fixChecksum(sram);
+                char tmpPath[300];
+                snprintf(tmpPath, sizeof(tmpPath), "%s.mmtmp", savPath);
+                FILE *wf = fopen(tmpPath, "wb");
+                bool ok = false;
+                if (wf) {
+                    size_t w = fwrite(sram, 1, sizeof(sram), wf);
+                    fflush(wf);
+                    fsync(fileno(wf));
+                    fclose(wf);
+                    ok = (w == sizeof(sram)) && (rename(tmpPath, savPath) == 0);
+                }
+                if (!ok) unlink(tmpPath);
+                char resp[128];
+                snprintf(resp, sizeof(resp),
+                    "{\"type\":\"LEARN_MOVE_RESULT\",\"ok\":%d,"
+                    "\"slot\":%d,\"move\":%d}", ok ? 1 : 0, slot, move);
+                ipc_.push(resp);
+                LOG_INFO("LEARN_MOVE slot=%d forget=%d move=%d ok=%d",
+                         slot, forget, move, ok ? 1 : 0);
             }
         }
     } else {

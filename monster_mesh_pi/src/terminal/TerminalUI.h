@@ -22,6 +22,7 @@ enum class Screen {
     DAYCARE_EVENT,  // last daycare event detail
     BATTLE,         // local Gen1 battle (vs CPU)
     BATTLE_END,     // battle result, press A to return
+    MOVE_LEARN,     // daycare level-up taught a move; pick one to forget
     GYM_SELECT,     // gym list with badge status
     PVP_BATTLE,     // networked battle vs T-Deck (state driven by daemon UPDATEs)
     PVP_BATTLE_END, // networked battle result
@@ -189,6 +190,36 @@ private:
     // Mewtwo as on a Lv70 one.
     uint32_t sessionXp_[6]    = {};
     uint32_t slotLevelXp_[6]  = {};
+
+    // XP sharing: bitmask, per ENEMY party slot, of which of our party slots
+    // fought it (were the active mon on any turn while that enemy was out).
+    // When the enemy faints, its yield is split among the still-alive
+    // participants — matching Gen 1's "everyone who battled shares the EXP".
+    // Reset at the start of every battle and every new trainer via
+    // resetBattleParticipants().
+    uint8_t  enemyParticipants_[Gen1BattleEngine::MAX_PARTY] = {};
+    void resetBattleParticipants() {
+        for (auto &m : enemyParticipants_) m = 0;
+    }
+
+    // Move-learn chooser: when a daycare level-up teaches a move but the
+    // Pokemon already knows 4, the daemon reports it as "pending" and we queue
+    // a decision here.  The chooser pre-selects the weakest current move (by
+    // base power) so the player can just confirm, or move the cursor to keep a
+    // different one / decline.  One entry per (slot, new move) pair.
+    struct PendingLearn {
+        uint8_t slot;          // party slot 0-5
+        uint8_t newMove;       // move the Pokemon wants to learn
+        uint8_t curMoves[4];   // its 4 current moves (to choose which to drop)
+        char    nick[12];
+    };
+    std::vector<PendingLearn> learnQueue_;
+    int learnCursor_ = 0;      // 0-3 = forget that move; 4 = don't learn
+    void renderMoveLearn();
+    void moveLearnButton(const ButtonEvent &ev);
+    void advanceLearnQueue();  // pop front, set cursor to weakest, or exit
+    // Index (0-3) of the weakest of the front decision's current moves.
+    int weakestMoveIndex(const PendingLearn &pl) const;
 
     // Activity log - scrolling feed above the menu (party loads, beacons,
     // events, achievements). Newest at end. Capped to 64 entries.

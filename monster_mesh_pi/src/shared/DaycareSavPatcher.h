@@ -8,6 +8,8 @@
 // NOT wired into build yet — standalone for validation.
 
 #include "platform.h"
+#include "Gen1Learnsets.h"
+#include "showdown_gen1_moves.h"  // gen1Move() for base PP of learned moves
 
 
 // ── SRAM layout constants ──────────────────────────────────────────────────
@@ -664,6 +666,67 @@ public:
         recalcStats(pkm, dexNum, newLevel);
 
         return newLevel;
+    }
+
+    // ── Move learning ───────────────────────────────────────────────────
+    static constexpr uint8_t PKM_MOVES = 0x08;  // 4 move ID bytes
+    static constexpr uint8_t PKM_PP    = 0x1D;  // 4 PP bytes (low 6=PP, hi 2=PP Ups)
+
+    struct MoveLearnResult {
+        uint8_t learned[8];       // moves auto-added into empty slots
+        uint8_t learnedCount = 0;
+        uint8_t pending[8];       // moves needing a forget-choice (all 4 full)
+        uint8_t pendingCount = 0;
+    };
+
+    // Auto-learn every level-up move gained crossing fromLevel (exclusive) ->
+    // toLevel (inclusive).  Empty (0) move slots are filled directly with the
+    // move + its base PP.  Moves that don't fit (party already has 4) are
+    // reported in res.pending for the player to resolve.  Already-known moves
+    // are skipped.  Does NOT fix the checksum — caller does that once at the end.
+    static void learnMoves(uint8_t *sram, uint8_t partyIdx, uint8_t dexNum,
+                           uint8_t fromLevel, uint8_t toLevel, MoveLearnResult &res) {
+        res.learnedCount = res.pendingCount = 0;
+        if (partyIdx >= 6 || dexNum == 0 || dexNum > 151 || toLevel <= fromLevel)
+            return;
+
+        uint8_t gained[16];
+        uint8_t n = gen1MovesLearnedBetween(dexNum, fromLevel, toLevel, gained, 16);
+        if (n == 0) return;
+
+        uint8_t *pkm = &sram[SAV_POKEMON_DATA + partyIdx * SAV_POKEMON_SIZE];
+        for (uint8_t i = 0; i < n; i++) {
+            uint8_t mv = gained[i];
+            // Skip if already known (avoids dupes when learnsets repeat a move).
+            bool known = false;
+            for (int s = 0; s < 4; s++) if (pkm[PKM_MOVES + s] == mv) known = true;
+            if (known) continue;
+
+            int empty = -1;
+            for (int s = 0; s < 4; s++) if (pkm[PKM_MOVES + s] == 0) { empty = s; break; }
+            if (empty >= 0) {
+                setMove(sram, partyIdx, (uint8_t)empty, mv);
+                if (res.learnedCount < 8) res.learned[res.learnedCount++] = mv;
+            } else if (res.pendingCount < 8) {
+                res.pending[res.pendingCount++] = mv;
+            }
+        }
+    }
+
+    // Write moveId into move slot `slotIdx` (0-3) with its base PP (PP Ups
+    // reset to 0).  moveId 0 clears the slot.  Does NOT fix the checksum.
+    static void setMove(uint8_t *sram, uint8_t partyIdx, uint8_t slotIdx,
+                        uint8_t moveId) {
+        if (partyIdx >= 6 || slotIdx >= 4) return;
+        uint8_t *pkm = &sram[SAV_POKEMON_DATA + partyIdx * SAV_POKEMON_SIZE];
+        pkm[PKM_MOVES + slotIdx] = moveId;
+        uint8_t pp = 0;
+        if (moveId) {
+            const Gen1MoveData *md = gen1Move(moveId);
+            pp = md ? md->pp : 0;
+            if (pp > 63) pp = 63;  // low 6 bits only; PP Ups (hi 2 bits) = 0
+        }
+        pkm[PKM_PP + slotIdx] = pp;
     }
 
     // ── Recalculate and fix the save checksum ──────────────────────────

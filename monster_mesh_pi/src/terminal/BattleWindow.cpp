@@ -296,8 +296,12 @@ void BattleWindow::drawFoeBox() {
     snprintf(lv, sizeof(lv), "L%d", (int)state_.foe.level);
     int lvW = BitmapFont::stringWidth(lv, 2);
     BitmapFont::drawString(renderer_, bx + bw - 8 - lvW, by + 20, lv, COL_INK, 2);
-    // Status tag (SLP/PAR/PSN/BRN/FRZ) just left of the level.
-    if (const char *st = statusTag(state_.foe.status)) {
+    // Status tag (SLP/PAR/PSN/BRN/FRZ) just left of the level.  Confusion is a
+    // volatile condition (not in the status byte), so fall back to "CNF" when
+    // there's no persistent status to show.
+    const char *st = statusTag(state_.foe.status);
+    if (!st && state_.foe.confused) st = "CNF";
+    if (st) {
         int stW = BitmapFont::stringWidth(st, 2);
         BitmapFont::drawString(renderer_, bx + bw - 8 - lvW - 10 - stW, by + 20,
                                st, COL_INK, 2);
@@ -335,8 +339,12 @@ void BattleWindow::drawYouBox() {
     snprintf(lv, sizeof(lv), "L%d", (int)state_.you.level);
     int lvW = BitmapFont::stringWidth(lv, 2);
     BitmapFont::drawString(renderer_, bx + bw - 8 - lvW, by + 20, lv, COL_INK, 2);
-    // Status tag (SLP/PAR/PSN/BRN/FRZ) just left of the level.
-    if (const char *st = statusTag(state_.you.status)) {
+    // Status tag (SLP/PAR/PSN/BRN/FRZ) just left of the level.  Confusion is a
+    // volatile condition (not in the status byte), so fall back to "CNF" when
+    // there's no persistent status to show.
+    const char *st = statusTag(state_.you.status);
+    if (!st && state_.you.confused) st = "CNF";
+    if (st) {
         int stW = BitmapFont::stringWidth(st, 2);
         BitmapFont::drawString(renderer_, bx + bw - 8 - lvW - 10 - stW, by + 20,
                                st, COL_INK, 2);

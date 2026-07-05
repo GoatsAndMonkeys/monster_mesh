@@ -31,6 +31,7 @@ public:
         uint16_t maxHp    = 0;
         char     nickname[12] = {};
         uint8_t  status   = 0;   // Gen-1 status byte (SLP/PSN/BRN/FRZ/PAR)
+        bool     confused = false;  // volatile confusion (not in the status byte)
     };
 
     struct MoveView {
