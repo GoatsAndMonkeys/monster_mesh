@@ -5280,6 +5280,10 @@ enum {
     SPR_DARK_PINK, SPR_DARK_RAINBOW,
     SPR_VARIANT_COUNT
 };
+// On-screen skin names, indexed by variant (Regular shows nothing).
+static const char *const kSkinNames[SPR_VARIANT_COUNT] = {
+    "", "Shiny", "Pink", "Rainbow", "Dark", "Dark Shiny", "Dark Pink", "Dark Rainbow"
+};
 
 static inline uint8_t luma565(uint16_t c)
 {
@@ -5526,8 +5530,11 @@ void MonsterMeshModule::updateLvBattleScreen()
     // ── Player panel ────
     if (me.count > 0 && me.active < me.count) {
         const auto &m = me.mons[me.active];
-        snprintf(buf, sizeof(buf), "%s",
-                 m.nickname[0] ? m.nickname : "???");
+        const char *nm = m.nickname[0] ? m.nickname : "???";
+        if (lvPlayerVariant_ != SPR_NORMAL && lvPlayerVariant_ < SPR_VARIANT_COUNT)
+            snprintf(buf, sizeof(buf), "%s [%s]", nm, kSkinNames[lvPlayerVariant_]);
+        else
+            snprintf(buf, sizeof(buf), "%s", nm);
         setLabel(lvPlayerName_, buf);
         snprintf(buf, sizeof(buf), "L%u", (unsigned)m.level);
         setLabel(lvPlayerLevel_, buf);
