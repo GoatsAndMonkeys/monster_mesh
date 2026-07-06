@@ -3,6 +3,7 @@
 
 #include "DaycareEventGen.h"
 #include "DaycareData.h"   // auto-generated species/move tables
+#include "DaycareSpeciesEvents.h"  // per-species authored day-care vignettes
 #include <stdarg.h>
 #include <string.h>
 #include <stdio.h>
@@ -657,7 +658,7 @@ void DaycareEventGen::generateCompositional(
             // Move practice
             if (sp->moveCount > 0) {
                 uint8_t moveIdx = rngRange(sp->moveCount);
-                uint8_t moveId = sp->moves[moveIdx];
+                uint16_t moveId = sp->moves[moveIdx];
                 const char *moveName = (moveId > 0 && moveId <= DAYCARE_MOVE_COUNT)
                                        ? daycareMoveNames[moveId] : "a move";
                 const char *actionFmt = actionsMove[rngRange(ACTIONS_MOVE_COUNT)];
@@ -804,6 +805,30 @@ void DaycareEventGen::generateCompositional(
 }
 
 // ── Dream events ─────────────────────────────────────────────────────────────
+
+// -- Species-specific daycare event (authored from the Pokedex) ---------------
+void DaycareEventGen::generateSpeciesEvent(DaycareEvent &out,
+    const DaycarePokemonState *localParty, uint8_t localPartyCount)
+{
+    uint8_t idx = pickPokemon(localPartyCount);
+    uint16_t dex = localParty[idx].speciesDex;
+    const char *name = getDisplayName(localParty[idx]);
+
+    uint8_t cnt = daycareSpeciesEventCount(dex);
+    const char *tmpl = cnt ? daycareSpeciesEvent(dex, rngRange(cnt)) : nullptr;
+    if (tmpl) {
+        snprintf(out.message, sizeof(out.message), tmpl, name);
+    } else {
+        snprintf(out.message, sizeof(out.message),
+                 "Your %s enjoyed a peaceful day at the day care.", name);
+    }
+
+    out.xp = 0;  // species vignettes are flavor
+    out.targetSpeciesIdx = idx;
+    out.targetNodeId = 0;
+    out.isBroadcast = false;
+    out.rarity = RARITY_COMMON;
+}
 
 void DaycareEventGen::generateDream(DaycareEvent &out,
     const DaycarePokemonState *localParty, uint8_t localPartyCount)
@@ -1097,6 +1122,14 @@ DaycareEvent DaycareEventGen::generate(
     else if (weather == WEATHER_RAIN) weatherChance = 25;
     if (weather != WEATHER_NONE && rngChance(weatherChance)) {
         generateWeatherEvent(ev, localParty, localPartyCount, weather);
+        state.totalEvents++;
+        return ev;
+    }
+
+    // Priority 4.5: species-specific Pokedex vignette (~55%) — the day care's
+    // signature flavor, tailored to each boarded Pokemon's real biology.
+    if (rngChance(55)) {
+        generateSpeciesEvent(ev, localParty, localPartyCount);
         state.totalEvents++;
         return ev;
     }

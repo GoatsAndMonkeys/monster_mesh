@@ -65,6 +65,9 @@ private:
     // Special events
     static void generateDream(DaycareEvent &out,
         const DaycarePokemonState *localParty, uint8_t localPartyCount);
+    // Species-specific vignette authored from the Pokedex biology/behavior.
+    static void generateSpeciesEvent(DaycareEvent &out,
+        const DaycarePokemonState *localParty, uint8_t localPartyCount);
     static void generateVisitor(DaycareEvent &out, uint32_t newNodeId,
         const DaycarePokemonState *localParty, uint8_t localPartyCount);
 
