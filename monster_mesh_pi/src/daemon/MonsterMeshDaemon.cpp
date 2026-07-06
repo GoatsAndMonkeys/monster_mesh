@@ -149,6 +149,7 @@ bool MonsterMeshDaemon::init(const char *serialPort, const char *saveDir) {
         // Push current party state too — if a SAV is loaded, the new client
         // will see the party list immediately instead of "waiting for daemon…".
         pushPartyUpdate();
+        pushMyWireParty();
     });
 
     // Ensure state directory exists
@@ -179,7 +180,11 @@ void MonsterMeshDaemon::tick() {
         mesh_.poll();
     }
 
-    watcher_.poll();
+    if (watcher_.poll()) {
+        // Save changed (any gen) — hand the terminal the exact wire-party
+        // bytes we'd transmit, so its engine seeding matches ours.
+        pushMyWireParty();
+    }
     ipc_.poll();
     daycare_.tick(now);
 
@@ -1212,6 +1217,11 @@ void MonsterMeshDaemon::pushNeighbors() {
 // The SAME bytes go on the wire AND (via the terminal's identical conversion
 // of the same sav) seed the engine, so both sides hash identical parties.
 void MonsterMeshDaemon::buildOurWireParty(Gen1BattleEngine::WireParty &out) {
+    // A Gen 2/3 save parsed by CrossGenSavReader is already in wire form.
+    if (watcher_.hasWireParty()) {
+        out = watcher_.wireParty();
+        return;
+    }
     Gen1Party ourParty;
     if (watcher_.hasParty()) {
         ourParty = watcher_.party();
@@ -1231,6 +1241,29 @@ void MonsterMeshDaemon::buildOurWireParty(Gen1BattleEngine::WireParty &out) {
         ourParty.mons[0].dvs[1]    = 0xFF;
     }
     gen1PartyToWireParty(ourParty, out);
+}
+
+// Push our current wire party to the terminal ("MY_WIRE_PARTY"). The terminal
+// seeds its battle engine from THESE bytes, which are also exactly what
+// CHALLENGE/ACCEPT transmit — one source of truth for both processes, so the
+// server-auth board hash can't diverge. Works for Gen 1 (converted) and
+// Gen 2/3 (CrossGenSavReader) saves alike.
+void MonsterMeshDaemon::pushMyWireParty() {
+    Gen1BattleEngine::WireParty w;
+    buildOurWireParty(w);
+    uint8_t blob[TB_WIRE_PARTY_BYTES];
+    packWireParty(w, blob);
+
+    char jsonBuf[1024];
+    int pos = snprintf(jsonBuf, sizeof(jsonBuf),
+        "{\"type\":\"MY_WIRE_PARTY\",\"sav_gen\":%u,\"count\":%u,\"party_min\":[",
+        (unsigned)watcher_.savGen(), (unsigned)w.count);
+    for (int i = 0; i < TB_WIRE_PARTY_BYTES; i++) {
+        if (i > 0) pos += snprintf(jsonBuf + pos, sizeof(jsonBuf) - pos, ",");
+        pos += snprintf(jsonBuf + pos, sizeof(jsonBuf) - pos, "%u", (unsigned)blob[i]);
+    }
+    snprintf(jsonBuf + pos, sizeof(jsonBuf) - pos, "]}");
+    ipc_.push(jsonBuf);
 }
 
 void MonsterMeshDaemon::sendBattleAccept(uint32_t peerNodeId, uint16_t sessionId, bool accepted) {

@@ -76,6 +76,7 @@ private:
 
     // Pack a Gen1Party into 109-byte partyMin wire format
     void buildOurWireParty(Gen1BattleEngine::WireParty &out);
+    void pushMyWireParty();
 
     // Send a proper TEXT_BATTLE_ACCEPT or DECLINE to the peer
     void sendBattleAccept(uint32_t peerNodeId, uint16_t sessionId, bool accepted);

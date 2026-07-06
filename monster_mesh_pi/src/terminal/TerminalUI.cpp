@@ -3956,12 +3956,17 @@ void TerminalUI::parsePvpAccept(const std::string &msg) {
     // Build Pi's own party (populates party_ and sets inBattle_=true, screen_=BATTLE)
     buildPlayerPartyForBattle();
 
-    // Restart engine against the real foe instead of the random CPU. Our own
-    // party goes through the SAME Gen1Party -> WireParty conversion the daemon
-    // used for the CHALLENGE blob, so our engine matches what the peer's
-    // engine derived from the wire bytes.
+    // Restart engine against the real foe instead of the random CPU. Prefer
+    // the daemon-pushed wire party (the exact bytes it sent in the CHALLENGE
+    // blob — required for Gen 2/3 saves, which have no Gen1Party form);
+    // fall back to converting our local Gen-1 party the same way the daemon
+    // would, so both engines derive from identical bytes either way.
     Gen1BattleEngine::WireParty myWire = {};
-    gen1PartyToWireParty(party_, myWire, battleGen_);
+    if (hasMyWireParty_) {
+        myWire = myWireParty_;
+    } else {
+        gen1PartyToWireParty(party_, myWire, battleGen_);
+    }
     uint32_t seed = (uint32_t)(millis() ^ (uint32_t)(uintptr_t)this);
     engine_.start(myWire, foeWire, seed, battleGen_);
     resetBattleParticipants();
@@ -4093,6 +4098,24 @@ void TerminalUI::onIpcMessage(const std::string &msg) {
     else if (type == "BATTLE_UPDATE")       parseBattleUpdate(msg);
     else if (type == "PVP_ACCEPT_RECEIVED") parsePvpAccept(msg);
     else if (type == "PVP_ACTION_RECEIVED") parsePvpAction(msg);
+    else if (type == "MY_WIRE_PARTY") {
+        // Daemon's authoritative wire form of OUR party (any gen). Decode the
+        // 139-byte blob; engine seeding prefers this over local conversion.
+        size_t pos = msg.find("\"party_min\":[");
+        if (pos != std::string::npos) {
+            uint8_t blob[TB_WIRE_PARTY_BYTES] = {};
+            pos += 13;
+            for (int i = 0; i < TB_WIRE_PARTY_BYTES; i++) {
+                while (pos < msg.size() && (msg[pos] == ' ' || msg[pos] == ',')) pos++;
+                if (pos >= msg.size() || msg[pos] == ']') break;
+                blob[i] = (uint8_t)atoi(msg.c_str() + pos);
+                while (pos < msg.size() && msg[pos] != ',' && msg[pos] != ']') pos++;
+            }
+            unpackWireParty(blob, myWireParty_);
+            hasMyWireParty_ = myWireParty_.count > 0;
+            mySavGen_ = (uint8_t)jsonGetInt(msg, "sav_gen", 1);
+        }
+    }
     else if (type == "NEIGHBORS")          parseNeighbors(msg);
     else if (type == "NEIGHBOR_PARTY")     parseNeighborParty(msg);
     else if (type == "SAV_WRITEBACK") {

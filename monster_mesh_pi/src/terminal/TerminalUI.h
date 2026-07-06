@@ -247,6 +247,14 @@ private:
     std::vector<std::string> pvpLog_;
     int      pvpMoveSel_    = 0;
 
+    // Our wire party as pushed by the daemon ("MY_WIRE_PARTY") — the exact
+    // bytes it transmits in CHALLENGE/ACCEPT. Seeding the engine from these
+    // (instead of re-deriving locally) keeps both processes byte-identical,
+    // and is the ONLY party source for Gen 2/3 saves (no Gen1Party form).
+    Gen1BattleEngine::WireParty myWireParty_ = {};
+    bool    hasMyWireParty_ = false;
+    uint8_t mySavGen_       = 1;
+
     // PvP SERVER role — Pi challenged a T-Deck, Pi runs the engine, sends UPDATEs
     bool    pvpServerMode_         = false;
     uint8_t pvpServerTurn_         = 0;

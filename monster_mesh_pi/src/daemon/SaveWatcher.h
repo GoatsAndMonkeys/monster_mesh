@@ -1,6 +1,7 @@
 #pragma once
 #include "../shared/platform.h"
 #include "../shared/PokemonData.h"
+#include "../battle/WirePartyCodec.h"   // WireParty (neutral cross-gen party)
 #include <string>
 #include <functional>
 #include <ctime>
@@ -29,6 +30,14 @@ public:
     bool hasParty() const { return hasParty_; }
     const Gen1Party &party() const { return party_; }
 
+    // Cross-gen: set when the newest save parsed as Gen 2 (GSC) or Gen 3
+    // (RSE/FRLG) via CrossGenSavReader. The party is already in neutral
+    // WireParty form (final stats computed by the reader). Gen-1 saves keep
+    // the Gen1Party path above (hasWireParty() == false).
+    bool hasWireParty() const { return hasWireParty_; }
+    const Gen1BattleEngine::WireParty &wireParty() const { return wireParty_; }
+    uint8_t savGen() const { return savGen_; }   // 1, 2 or 3
+
     // Read the raw 32KB SAV buffer (for passing to daycare checkIn)
     // Returns true if available. out must be at least 32768 bytes.
     bool getRawSav(uint8_t *out, size_t bufSize) const;
@@ -47,6 +56,9 @@ private:
     Gen1Party party_ = {};
     uint8_t rawSav_[32768] = {};
     bool hasRawSav_ = false;
+    Gen1BattleEngine::WireParty wireParty_ = {};
+    bool    hasWireParty_ = false;
+    uint8_t savGen_       = 1;
     PartyCallback cb_;
 
     bool scanAndLoad();

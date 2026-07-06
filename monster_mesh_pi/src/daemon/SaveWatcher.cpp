@@ -2,6 +2,7 @@
 
 #include "SaveWatcher.h"
 #include "../shared/DaycareSavPatcher.h"
+#include "../battle/CrossGenSavReader.h"   // Gen 2/3 .sav detection + parsing
 #include <sys/stat.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -133,7 +134,11 @@ bool SaveWatcher::scanAndLoad() {
         const char *name = ent->d_name;
         size_t nameLen = strlen(name);
         if (nameLen < 4) continue;
-        if (strcmp(name + nameLen - 4, ".sav") != 0) continue;
+        // Accept both .sav and .srm — RetroPie's libretro cores (gambatte,
+        // mGBA) write "<rom>.srm"; previously users had to symlink it to
+        // .sav. Loaders below validate content, so extension is just a filter.
+        if (strcmp(name + nameLen - 4, ".sav") != 0 &&
+            strcmp(name + nameLen - 4, ".srm") != 0) continue;
 
         char fullPath[512];
         snprintf(fullPath, sizeof(fullPath), "%s/%s", watchDir_, name);
@@ -167,12 +172,54 @@ bool SaveWatcher::loadSav(const char *path) {
         return false;
     }
 
-    uint8_t buf[GEN1_SAV_SIZE];
+    // Big enough for a Gen-3 GBA save (128 KB) plus emulator RTC footers.
+    // Static: keep the 128 KB off the stack (loadSav runs on the poll thread).
+    static uint8_t buf[140 * 1024];
     ssize_t n = ::read(fd, buf, sizeof(buf));
     ::close(fd);
 
+    if (n < (ssize_t)GEN1_SAV_SIZE) {
+        LOG_WARN("SaveWatcher: %s is %zd bytes, too small for any known save", path, n);
+        return false;
+    }
+
+    // ── Cross-gen first: Gen 3 (128 KB, section signatures) or Gen 2 (32 KB,
+    // GSC checksums). Strict validation, so a Gen-1 sav falls through. ──────
+    {
+        ParsedMon mons[6];
+        uint8_t gen = 0;
+        uint8_t wcount = crossGenReadSavParty(buf, (size_t)n, mons, gen);
+        if (wcount > 0) {
+            wireParty_ = Gen1BattleEngine::WireParty();
+            wireParty_.count = wcount;
+            for (uint8_t i = 0; i < wcount && i < 6; i++) {
+                Gen1BattleEngine::WireMon &w = wireParty_.mons[i];
+                w.species = mons[i].dex;
+                w.level   = mons[i].level;
+                w.maxHp   = mons[i].maxHp;
+                w.atk     = mons[i].atk;
+                w.def     = mons[i].def;
+                w.spe     = mons[i].spe;
+                w.spa     = mons[i].spa;
+                w.spd     = mons[i].spd;
+                for (int m = 0; m < 4; m++) w.moves[m] = mons[i].moves[m];
+            }
+            hasWireParty_ = true;
+            savGen_       = gen;
+            // Gen-1-only features (daycare checkIn, raw sav patching) don't
+            // apply to a Gen 2/3 save.
+            hasParty_  = false;
+            hasRawSav_ = false;
+            strncpy(currentSav_, path, sizeof(currentSav_) - 1);
+            currentSav_[sizeof(currentSav_) - 1] = '\0';
+            LOG_INFO("SaveWatcher: loaded %s as GEN %u save (%u Pokemon, wire party)",
+                     path, (unsigned)gen, (unsigned)wcount);
+            return true;
+        }
+    }
+
     if (n != (ssize_t)GEN1_SAV_SIZE) {
-        LOG_WARN("SaveWatcher: %s is %zd bytes, expected %zu", path, n, GEN1_SAV_SIZE);
+        LOG_WARN("SaveWatcher: %s is %zd bytes — not a valid Gen 1/2/3 save", path, n);
         return false;
     }
 
@@ -182,6 +229,8 @@ bool SaveWatcher::loadSav(const char *path) {
         LOG_WARN("SaveWatcher: %s has 0 party members", path);
         return false;
     }
+    hasWireParty_ = false;   // Gen-1 save: PvP converts via gen1PartyToWireParty
+    savGen_       = 1;
 
     memset(&party_, 0, sizeof(party_));
     party_.count = count;
