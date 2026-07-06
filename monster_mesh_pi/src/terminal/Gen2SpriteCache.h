@@ -15,8 +15,9 @@
 namespace Gen2SpriteCache {
 
 // Colour variants — order matches the T-Deck firmware's SPR_* enum.
+// Cycle order: Regular, Shiny, Pink, Rainbow, Dark, Dark-Shiny, Dark-Pink, Dark-Rainbow.
 enum {
-    VAR_NORMAL = 0, VAR_SHINY, VAR_RAINBOW, VAR_DARK, VAR_DARK_SHINY, VAR_PINK,
+    VAR_NORMAL = 0, VAR_SHINY, VAR_PINK, VAR_RAINBOW, VAR_DARK, VAR_DARK_SHINY,
     VAR_DARK_PINK, VAR_DARK_RAINBOW,
     VAR_COUNT
 };
