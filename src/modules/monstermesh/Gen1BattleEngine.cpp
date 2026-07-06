@@ -126,7 +126,7 @@ void Gen1BattleEngine::initBattlePokeFromSave(BattlePoke &dst,
     uint16_t spcExp = be16(src.spcExp);
 
     if (gen >= 3) {
-        const Gen3BaseStats &g = GEN3_BASE_STATS[dst.species < 152 ? dst.species : 0];
+        const Gen3BaseStats &g = GEN3_BASE_STATS[dst.species < 387 ? dst.species : 0];
         dst.type1 = g.type1; dst.type2 = g.type2;
         dst.maxHp = calcStat(g.hp,  hpDV,  hpExp,  dst.level, true);
         dst.atk   = calcStat(g.atk, atkDV, atkExp, dst.level, false);
@@ -152,7 +152,7 @@ void Gen1BattleEngine::initBattlePokeFromSave(BattlePoke &dst,
 }
 
 void Gen1BattleEngine::initBattlePokeFromBase(BattlePoke &dst,
-                                              uint8_t species, uint8_t level,
+                                              uint16_t species, uint8_t level,
                                               const uint8_t moves[4], uint8_t gen)
 {
     memset(&dst, 0, sizeof(dst));
@@ -161,7 +161,7 @@ void Gen1BattleEngine::initBattlePokeFromBase(BattlePoke &dst,
     dst.level   = level;
     // Wild encounters: average DVs = 8, no stat exp.
     if (gen >= 3) {
-        const Gen3BaseStats &g = GEN3_BASE_STATS[species < 152 ? species : 0];
+        const Gen3BaseStats &g = GEN3_BASE_STATS[species < 387 ? species : 0];
         dst.type1 = g.type1; dst.type2 = g.type2;
         dst.maxHp = calcStat(g.hp,  8, 0, level, true);
         dst.atk   = calcStat(g.atk, 8, 0, level, false);

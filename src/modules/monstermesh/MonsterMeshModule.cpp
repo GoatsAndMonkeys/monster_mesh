@@ -5075,7 +5075,7 @@ void MonsterMeshModule::buildLvBattleScreen()
                           lv_color_make(0x40, 0xC0, 0x40));
     lvFoePanel_ = foe;
 
-    // ── Foe sprite canvas (top-right, 56×56) ──────────────────────────
+    // ── Foe sprite canvas (top-right, 64×64 native) ──────────────────────────
     lv_obj_t *fSpr = lv_canvas_create(scr);
     lv_obj_set_size(fSpr, LV_SPRITE_W, LV_SPRITE_H);
     lv_obj_align(fSpr, LV_ALIGN_TOP_LEFT, 320 - LV_SPRITE_W - 4, 4);  // right-aligned
@@ -5259,14 +5259,14 @@ static void renderGen1BackSprite(lv_obj_t *canvas, uint8_t species)
 // stream (0xF81F = transparent sentinel, remapped to white so the sprite sits
 // on the light battle background). `isBack` picks the 48×48 back set vs 56×56
 // front. Replaces renderGen1Sprite/renderGen1BackSprite for the battle screen.
-static void renderGen3Sprite565(lv_obj_t *canvas, uint8_t species, bool isBack)
+static void renderGen3Sprite565(lv_obj_t *canvas, uint16_t species, bool isBack)
 {
     if (!canvas) return;
     uint8_t *canvasBuf = (uint8_t *)lv_canvas_get_buf(canvas);
     if (!canvasBuf) return;
     int w = isBack ? GEN3_BACK_565_W : GEN3_FRONT_565_W;
     int h = isBack ? GEN3_BACK_565_H : GEN3_FRONT_565_H;
-    if (species == 0 || species > 151) {
+    if (species == 0 || species > 386) {
         lv_canvas_fill_bg(canvas, lv_color_white(), LV_OPA_COVER);
         return;
     }

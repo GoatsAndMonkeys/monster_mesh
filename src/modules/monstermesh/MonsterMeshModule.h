@@ -627,10 +627,10 @@ public:
     // 28*28*2 = 1568 bytes each. Total +3 KB BSS.
     // Full-color Gen-3 sprites, upscaled to fill the battle slots (must match
     // GEN3_FRONT_565_W/H and GEN3_BACK_565_W/H in the Gen3*565.h headers).
-    static constexpr int LV_SPRITE_W = 88;   // foe (top-right)
-    static constexpr int LV_SPRITE_H = 88;
-    static constexpr int LV_PLAYER_W = 80;   // player back (bottom-left)
-    static constexpr int LV_PLAYER_H = 80;
+    static constexpr int LV_SPRITE_W = 64;   // foe (top-right), native Gen3
+    static constexpr int LV_SPRITE_H = 64;
+    static constexpr int LV_PLAYER_W = 64;   // player back (bottom-left), native Gen3
+    static constexpr int LV_PLAYER_H = 64;
     void *lvFoeCanvas_        = nullptr;
     void *lvPlayerCanvas_     = nullptr;
     uint8_t lvFoeCanvasBuf_[LV_SPRITE_W * LV_SPRITE_H * 2] = {};
