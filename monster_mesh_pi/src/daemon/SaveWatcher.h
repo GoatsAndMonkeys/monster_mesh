@@ -3,6 +3,7 @@
 #include "../shared/PokemonData.h"
 #include "../battle/WirePartyCodec.h"   // WireParty (neutral cross-gen party)
 #include <string>
+#include <vector>
 #include <functional>
 #include <ctime>
 
@@ -13,8 +14,9 @@ public:
     SaveWatcher();
     ~SaveWatcher();
 
-    // Start watching the save directory. Returns true on success.
-    bool start(const char *saveDir);
+    // Start watching one or more save directories (':'-separated list).
+    // Newest .sav/.srm across all of them wins. Returns true on success.
+    bool start(const char *saveDirs);
     void stop();
 
     void setPartyCallback(PartyCallback cb) { cb_ = cb; }
@@ -44,10 +46,10 @@ public:
 
 private:
     int inotifyFd_    = -1;
-    int watchFd_      = -1;
+    std::vector<int> watchFds_;     // one inotify watch per directory
     uint32_t lastPollMs_ = 0;       // macOS poll-based fallback
     static constexpr uint32_t POLL_INTERVAL_MS = 2000;
-    char watchDir_[256] = {};
+    std::vector<std::string> watchDirs_;
     char currentSav_[256] = {};
     time_t currentMtime_ = 0;       // mtime of the currently-loaded save, so a
                                     // content change to the *same* path forces

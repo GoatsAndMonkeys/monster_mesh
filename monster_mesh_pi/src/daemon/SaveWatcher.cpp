@@ -25,11 +25,26 @@ SaveWatcher::~SaveWatcher() {
     stop();
 }
 
-bool SaveWatcher::start(const char *saveDir) {
+bool SaveWatcher::start(const char *saveDirs) {
     stop();
 
-    strncpy(watchDir_, saveDir, sizeof(watchDir_) - 1);
-    watchDir_[sizeof(watchDir_) - 1] = '\0';
+    // Parse the ':'-separated directory list. Newest save across all of them
+    // wins, so a GB / GBC / GBA cart's save feeds in from its own roms dir.
+    watchDirs_.clear();
+    {
+        std::string s(saveDirs ? saveDirs : "");
+        size_t start = 0;
+        while (start <= s.size()) {
+            size_t colon = s.find(':', start);
+            std::string d = (colon == std::string::npos)
+                                ? s.substr(start)
+                                : s.substr(start, colon - start);
+            if (!d.empty()) watchDirs_.push_back(d);
+            if (colon == std::string::npos) break;
+            start = colon + 1;
+        }
+    }
+    if (watchDirs_.empty()) return false;
 
 #ifdef __linux__
     inotifyFd_ = inotify_init1(IN_NONBLOCK);
@@ -37,19 +52,27 @@ bool SaveWatcher::start(const char *saveDir) {
         LOG_WARN("SaveWatcher: inotify_init1 failed: %s", strerror(errno));
         return false;
     }
-
-    watchFd_ = inotify_add_watch(inotifyFd_, saveDir,
-                                  IN_CLOSE_WRITE | IN_MOVED_TO);
-    if (watchFd_ < 0) {
-        LOG_WARN("SaveWatcher: inotify_add_watch(%s) failed: %s",
-                 saveDir, strerror(errno));
+    for (const auto &d : watchDirs_) {
+        int wd = inotify_add_watch(inotifyFd_, d.c_str(),
+                                    IN_CLOSE_WRITE | IN_MOVED_TO);
+        if (wd < 0) {
+            // Non-fatal: a missing dir (e.g. no GBA games installed) must not
+            // stop us watching the others.
+            LOG_WARN("SaveWatcher: inotify_add_watch(%s) failed: %s",
+                     d.c_str(), strerror(errno));
+        } else {
+            watchFds_.push_back(wd);
+        }
+    }
+    if (watchFds_.empty()) {
         ::close(inotifyFd_);
         inotifyFd_ = -1;
         return false;
     }
-    LOG_INFO("SaveWatcher: watching %s (inotify)", saveDir);
+    LOG_INFO("SaveWatcher: watching %zu dir(s) (inotify)", watchDirs_.size());
 #else
-    LOG_INFO("SaveWatcher: watching %s (poll every %ums)", saveDir, POLL_INTERVAL_MS);
+    LOG_INFO("SaveWatcher: watching %zu dir(s) (poll every %ums)",
+             watchDirs_.size(), POLL_INTERVAL_MS);
 #endif
 
     lastPollMs_ = millis();
@@ -59,17 +82,18 @@ bool SaveWatcher::start(const char *saveDir) {
 
 void SaveWatcher::stop() {
 #ifdef __linux__
-    if (watchFd_ >= 0 && inotifyFd_ >= 0) {
-        inotify_rm_watch(inotifyFd_, watchFd_);
-        watchFd_ = -1;
+    for (int wd : watchFds_) {
+        if (wd >= 0 && inotifyFd_ >= 0) inotify_rm_watch(inotifyFd_, wd);
     }
+    watchFds_.clear();
     if (inotifyFd_ >= 0) {
         ::close(inotifyFd_);
         inotifyFd_ = -1;
     }
 #endif
-    hasParty_  = false;
-    hasRawSav_ = false;
+    hasParty_     = false;
+    hasRawSav_    = false;
+    hasWireParty_ = false;
     currentSav_[0] = '\0';
     currentMtime_  = 0;
 }
@@ -115,50 +139,59 @@ bool SaveWatcher::poll() {
 static bool s_warnedMissingDir = false;
 
 bool SaveWatcher::scanAndLoad() {
-    DIR *dir = opendir(watchDir_);
-    if (!dir) {
+    char bestPath[256] = {};
+    time_t bestMtime = 0;
+    bool anyDirOpened = false;
+
+    // Newest .sav/.srm across ALL watched directories wins — so switching
+    // carts (play Emerald after Red) automatically swaps in that team.
+    for (const auto &wd : watchDirs_) {
+        DIR *dir = opendir(wd.c_str());
+        if (!dir) continue;
+        anyDirOpened = true;
+
+        struct dirent *ent;
+        while ((ent = readdir(dir)) != nullptr) {
+            const char *name = ent->d_name;
+            size_t nameLen = strlen(name);
+            if (nameLen < 4) continue;
+            // Accept both .sav and .srm — RetroPie's libretro cores (gambatte,
+            // mGBA) write "<rom>.srm". Loaders validate content, so the
+            // extension is only a cheap filter.
+            const char *ext = name + nameLen - 4;
+            if (strcmp(ext, ".sav") != 0 && strcmp(ext, ".srm") != 0) continue;
+
+            char fullPath[512];
+            snprintf(fullPath, sizeof(fullPath), "%s/%s", wd.c_str(), name);
+
+            struct stat st;
+            if (stat(fullPath, &st) != 0) continue;
+
+            if (st.st_mtime > bestMtime) {
+                bestMtime = st.st_mtime;
+                strncpy(bestPath, fullPath, sizeof(bestPath) - 1);
+                bestPath[sizeof(bestPath) - 1] = '\0';
+            }
+        }
+        closedir(dir);
+    }
+
+    if (!anyDirOpened) {
         if (!s_warnedMissingDir) {
-            LOG_WARN("SaveWatcher: cannot open dir %s: %s",
-                     watchDir_, strerror(errno));
+            LOG_WARN("SaveWatcher: none of the %zu watch dir(s) are openable",
+                     watchDirs_.size());
             s_warnedMissingDir = true;
         }
         return false;
     }
     s_warnedMissingDir = false;  // reset on successful open
 
-    char bestPath[256] = {};
-    time_t bestMtime = 0;
-
-    struct dirent *ent;
-    while ((ent = readdir(dir)) != nullptr) {
-        const char *name = ent->d_name;
-        size_t nameLen = strlen(name);
-        if (nameLen < 4) continue;
-        // Accept both .sav and .srm — RetroPie's libretro cores (gambatte,
-        // mGBA) write "<rom>.srm"; previously users had to symlink it to
-        // .sav. Loaders below validate content, so extension is just a filter.
-        if (strcmp(name + nameLen - 4, ".sav") != 0 &&
-            strcmp(name + nameLen - 4, ".srm") != 0) continue;
-
-        char fullPath[512];
-        snprintf(fullPath, sizeof(fullPath), "%s/%s", watchDir_, name);
-
-        struct stat st;
-        if (stat(fullPath, &st) != 0) continue;
-
-        if (st.st_mtime > bestMtime) {
-            bestMtime = st.st_mtime;
-            strncpy(bestPath, fullPath, sizeof(bestPath) - 1);
-        }
-    }
-    closedir(dir);
-
     if (bestPath[0] == '\0') return false;
     // Reload when the newest save is a different file OR the same file whose
-    // contents changed (mtime moved).  The old code skipped any reload of the
-    // same path, so editing the loaded save in-place — e.g. reordering the
-    // party in the emulator — never propagated to the daemon.
-    if (strcmp(bestPath, currentSav_) == 0 && hasParty_ && bestMtime == currentMtime_)
+    // contents changed (mtime moved). Covers both Gen-1 (hasParty_) and Gen
+    // 2/3 (hasWireParty_) currently-loaded states.
+    if (strcmp(bestPath, currentSav_) == 0 &&
+        (hasParty_ || hasWireParty_) && bestMtime == currentMtime_)
         return false;
 
     currentMtime_ = bestMtime;
