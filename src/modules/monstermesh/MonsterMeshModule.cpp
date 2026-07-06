@@ -5274,8 +5274,9 @@ static void renderGen1BackSprite(lv_obj_t *canvas, uint8_t species)
 // palette; BARBIE shifts everything to hot pink with light eyes/highlights;
 // DARK_PINK is DARK but the reds shift to pink; DARK_RAINBOW is DARK but the
 // reds glow the animated rainbow. RAINBOW_D and DARK_RAINBOW animate.
+// Cycle order: Regular, Shiny, Pink, Rainbow, Dark, Dark-Shiny, Dark-Pink, Dark-Rainbow.
 enum {
-    SPR_NORMAL = 0, SPR_SHINY, SPR_RAINBOW_D, SPR_DARK, SPR_DARK_SHINY, SPR_BARBIE,
+    SPR_NORMAL = 0, SPR_SHINY, SPR_BARBIE, SPR_RAINBOW_D, SPR_DARK, SPR_DARK_SHINY,
     SPR_DARK_PINK, SPR_DARK_RAINBOW,
     SPR_VARIANT_COUNT
 };
