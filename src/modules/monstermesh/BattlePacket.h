@@ -104,6 +104,13 @@ enum class PktType : uint8_t {
     // up. Initiator holds its render in WAIT_PEER_READY until this arrives.
     TEXT_BATTLE_READY = 0x6C,
 
+    // Battle protocol V2: CHALLENGE/ACCEPT carrying the neutral cross-gen
+    // WireParty blob (139 B, see WirePartyCodec.h) instead of the Gen-1-only
+    // 109-B partyMin. New types (not new layouts under the old types) so a
+    // V1 device drops V2 packets instead of parsing garbage stats.
+    TEXT_BATTLE_CHALLENGE_V2 = 0x6D,
+    TEXT_BATTLE_ACCEPT_V2    = 0x6E,
+
     // BBS gym discovery (Phase C-1) — runs over PRIVATE_APP so it does NOT
     // appear in mesh chat. Never use TEXT_MESSAGE_APP for these.
     BBS_PING  = 0x70,  // broadcast probe; payload empty

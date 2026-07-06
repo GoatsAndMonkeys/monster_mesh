@@ -15,24 +15,8 @@
 
 #include <stdint.h>
 #include <string.h>
+#include "ParsedMon.h"                 // shared cross-gen result struct
 #include "showdown_gen3_basestats.h"   // Gen3BaseStats / GEN3_BASE_STATS[387]
-
-// ── Shared parsed-party record ──────────────────────────────────────────────
-// This MUST match the layout the Gen 2 reader uses. It is guarded so both
-// readers can be included in the same translation unit without a redefinition
-// error. NOTE FOR DEDUPE: if the Gen 2 reader defines ParsedMon under a
-// different guard macro, unify them (e.g. move this into a tiny shared
-// "ParsedMon.h") so the two definitions cannot silently diverge.
-#ifndef PARSEDMON_H
-#define PARSEDMON_H
-struct ParsedMon {
-    uint16_t dex;                              // national dex 1-386, 0 = empty
-    uint8_t  level;
-    uint16_t maxHp, atk, def, spe, spa, spd;   // FINAL battle stats
-    uint16_t moves[4];
-    char     nickname[11];
-};
-#endif  // PARSEDMON_H
 
 // ── little-endian readers ───────────────────────────────────────────────────
 static inline uint16_t gen3RD16(const uint8_t *p) {
@@ -131,6 +115,21 @@ static const uint8_t *gen3FindSection1(const uint8_t *save) {
         if (gen3RD16(sec + 0x0FF4) == 1) return sec;
     }
     return nullptr;
+}
+
+// ── validity probe ──────────────────────────────────────────────────────────
+// True if either save block (A@0x0000 / B@0xE000) contains at least one
+// section whose footer signature == 0x08012025 — i.e. `save` looks like a
+// valid Gen 3 battery save. Caller must guarantee 131072 readable bytes.
+static inline bool gen3SavLooksValid(const uint8_t *save) {
+    static const uint32_t kBlockBase[2] = { 0x00000u, 0x0E000u };
+    for (int blk = 0; blk < 2; blk++) {
+        for (int s = 0; s < 14; s++) {
+            const uint8_t *sec = save + kBlockBase[blk] + (uint32_t)s * 0x1000u;
+            if (gen3RD32(sec + 0x0FF8) == 0x08012025u) return true;
+        }
+    }
+    return false;
 }
 
 // ── decode a single 100-byte mon record into a ParsedMon ────────────────────

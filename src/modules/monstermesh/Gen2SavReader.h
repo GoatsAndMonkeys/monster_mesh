@@ -22,6 +22,7 @@
 
 #include <stdint.h>
 #include <string.h>
+#include "ParsedMon.h"                // shared cross-gen result struct
 #include "showdown_gen3_basestats.h"  // Gen3BaseStats, GEN3_BASE_STATS[387]
 
 // ── Party base offsets (English) ───────────────────────────────────────────
@@ -51,14 +52,30 @@ static constexpr uint8_t G2_SPC_EV     = 0x13;  // 2 bytes BE (Special stat exp)
 static constexpr uint8_t G2_DVS        = 0x15;  // 2 bytes packed DVs
 static constexpr uint8_t G2_LEVEL      = 0x1F;  // 1 byte (authoritative)
 
-// ── Result struct ──────────────────────────────────────────────────────────
-struct ParsedMon {
-    uint16_t dex;                              // national dex 1-386, 0 = empty slot
-    uint8_t  level;
-    uint16_t maxHp, atk, def, spe, spa, spd;   // FINAL battle stats (computed)
-    uint16_t moves[4];
-    char     nickname[11];
-};
+// ── Checksum validation ────────────────────────────────────────────────────
+// Primary-checksum check per the spec: 16-bit byte sum, stored LITTLE-ENDIAN.
+//   Gold/Silver: checksum @0x2D69 over 0x2009..0x2D68 (inclusive)
+//   Crystal:     checksum @0x2D0D over 0x2009..0x2B82 (inclusive)
+// Returns true if the stored checksum matches — i.e. `sram` looks like a valid
+// GSC save for the selected game. (A Gen 1 .sav is also 32KB but fails both.)
+// An all-zero region is rejected: sum 0 == stored 0 would otherwise make blank/
+// erased SRAM pass, and a real save always has nonzero data in this range.
+static inline bool gen2SavLooksValid(const uint8_t *sram, bool crystal) {
+    const uint32_t start  = 0x2009;
+    const uint32_t end    = crystal ? 0x2B82 : 0x2D68;  // inclusive
+    const uint32_t chkOff = crystal ? 0x2D0D : 0x2D69;
+
+    uint16_t sum     = 0;
+    bool     nonzero = false;
+    for (uint32_t i = start; i <= end; i++) {
+        sum += sram[i];
+        if (sram[i] != 0) nonzero = true;
+    }
+    if (!nonzero) return false;  // blank region — not a real save
+
+    uint16_t stored = (uint16_t)sram[chkOff] | ((uint16_t)sram[chkOff + 1] << 8);
+    return sum == stored;
+}
 
 // ── Inlined helpers (copied verbatim from DaycareSavPatcher.h) ──────────────
 

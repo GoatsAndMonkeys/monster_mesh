@@ -69,6 +69,20 @@ public:
     // overwrites the previous staging.
     void setMyTbParty(const Gen1Party &p, const char *name) {
         pendingMyParty_ = p;
+        haveWireParty_  = false;   // wire form (re)derived from this at send time
+        myTbName_[0] = '\0';
+        if (name && *name) {
+            snprintf(myTbName_, sizeof(myTbName_), "%.*s",
+                     (int)TB_MAX_NAME_LEN, name);
+        }
+    }
+
+    // Cross-gen staging: stage a ready-made neutral WireParty (from a Gen 2/3
+    // save via CrossGenSavReader) instead of a Gen1Party. Takes precedence
+    // over setMyTbParty until the next setMyTbParty call.
+    void setMyTbWireParty(const Gen1BattleEngine::WireParty &p, const char *name) {
+        wireMy_        = p;
+        haveWireParty_ = true;
         myTbName_[0] = '\0';
         if (name && *name) {
             snprintf(myTbName_, sizeof(myTbName_), "%.*s",
@@ -337,9 +351,14 @@ private:
     Role     role_ = Role::LEGACY;
     char     myTbName_[TB_MAX_NAME_LEN + 1] = {};
     char     peerTbName_[TB_MAX_NAME_LEN + 1] = {};
-    Gen1Party pendingMyParty_      = {};   // staged for CHALLENGE / ACCEPT
-    Gen1Party pendingClientParty_  = {};   // server: filled from ACCEPT
-    Gen1Party pendingServerParty_  = {};   // client: filled from CHALLENGE
+    Gen1Party pendingMyParty_      = {};   // staged for CHALLENGE / ACCEPT (Gen 1 path)
+    // Protocol V2 (neutral cross-gen) parties. wireMy_ is built from
+    // pendingMyParty_ at send time unless a Gen 2/3 save staged it directly
+    // (haveWireParty_). wirePeer_ is the opponent's party from the wire.
+    Gen1BattleEngine::WireParty wireMy_   = {};
+    Gen1BattleEngine::WireParty wirePeer_ = {};
+    bool    haveWireParty_ = false;
+    uint8_t sessionGen_    = 3;            // gen byte from CHALLENGE (client side)
 
     // SERVER: CHALLENGE retransmit until ACCEPT arrives.
     uint32_t lastChallengeMs_ = 0;

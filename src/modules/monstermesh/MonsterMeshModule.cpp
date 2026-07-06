@@ -690,6 +690,8 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                  (PktType)bp->type == PktType::TEXT_BATTLE_ACTION_V2    ||
                  (PktType)bp->type == PktType::TEXT_BATTLE_CHALLENGE    ||
                  (PktType)bp->type == PktType::TEXT_BATTLE_ACCEPT       ||
+                 (PktType)bp->type == PktType::TEXT_BATTLE_CHALLENGE_V2 ||
+                 (PktType)bp->type == PktType::TEXT_BATTLE_ACCEPT_V2    ||
                  (PktType)bp->type == PktType::TEXT_BATTLE_STATE_REQUEST||
                  (PktType)bp->type == PktType::TEXT_BATTLE_FULL_STATE   ||
                  (PktType)bp->type == PktType::TEXT_BATTLE_READY)       &&

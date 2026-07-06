@@ -4,7 +4,9 @@
 #include "MonsterMeshTextBattle.h"
 #include "showdown_gen1_moves.h"
 #include "showdown_gen1_basestats.h"
+#include "showdown_gen3_moves.h"  // gen3Move for gen-aware PP refill
 #include "Gen1Species.h"  // gen1NameToAscii for level-up messages
+#include "WirePartyCodec.h"  // protocol-V2 neutral cross-gen party blob
 #include <string.h>
 #include <stdio.h>
 
@@ -492,13 +494,20 @@ bool MonsterMeshTextBattle::handlePacket(uint32_t fromId,
     // ── Server-auth dispatch (must precede the mode_/session checks since
     // CHALLENGE arrives when mode_ == OFF and ACCEPT/ACTION_V2 may carry
     // session ids unknown to the legacy session_ field). ─────────────────
-    if (t == PktType::TEXT_BATTLE_CHALLENGE) {
+    if (t == PktType::TEXT_BATTLE_CHALLENGE_V2) {
         if (mode_ != Mode::OFF) return true;  // busy
         clientAuthOnChallengePkt(fromId, buf, len);
         return true;
     }
+    if (t == PktType::TEXT_BATTLE_CHALLENGE) {
+        // Protocol V1 (Gen-1 partyMin) peer — incompatible with the V2
+        // cross-gen wire format. Ignore; both sides need current firmware.
+        Serial.printf("[MMB] DROP V1 CHALLENGE from=0x%08X (peer needs V2 firmware)\n",
+                      (unsigned)fromId);
+        return true;
+    }
     if (mode_ != Mode::OFF && role_ == Role::SERVER) {
-        if (t == PktType::TEXT_BATTLE_ACCEPT) {
+        if (t == PktType::TEXT_BATTLE_ACCEPT_V2) {
             serverAuthOnAcceptPkt(fromId, buf, len);
             return true;
         }
@@ -1476,7 +1485,7 @@ void MonsterMeshTextBattle::render(lgfx::LGFX_Device *g)
         g->print(who);
         char party[40];
         snprintf(party, sizeof(party), "Party: %u mon",
-                 (unsigned)pendingServerParty_.count);
+                 (unsigned)wirePeer_.count);
         g->setTextColor(DIM, DARK);
         g->setCursor(34, by + 56);
         g->print(party);
@@ -1541,67 +1550,18 @@ void MonsterMeshTextBattle::render(lgfx::LGFX_Device *g)
 // Server-authoritative PvP — wire glue
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Local copies of packPartyMin / unpackPartyMin (mirror of the static
-// helpers in MonsterMeshModule.cpp; identical byte layout). Kept local so
-// the text-battle TU has no link-time dependency on the module's statics.
-namespace {
-void packPartyMinTb(const Gen1Party &src, uint8_t out[TB_PARTY_MIN_BYTES])
-{
-    out[0] = src.count;
-    for (uint8_t i = 0; i < 6; ++i) {
-        uint8_t *p = out + 1 + (size_t)i * 18;
-        const Gen1Pokemon &m = src.mons[i];
-        p[0] = m.species;
-        p[1] = m.level ? m.level : m.boxLevel;
-        p[2] = m.dvs[0];
-        p[3] = m.dvs[1];
-        memcpy(p +  4, m.hpExp,  2);
-        memcpy(p +  6, m.atkExp, 2);
-        memcpy(p +  8, m.defExp, 2);
-        memcpy(p + 10, m.spdExp, 2);
-        memcpy(p + 12, m.spcExp, 2);
-        memcpy(p + 14, m.moves,  4);
-    }
-}
-
-void unpackPartyMinTb(const uint8_t in[TB_PARTY_MIN_BYTES], Gen1Party &dst)
-{
-    memset(&dst, 0, sizeof(dst));
-    dst.count = in[0];
-    if (dst.count > 6) dst.count = 6;
-    for (uint8_t i = 0; i < 6; ++i) {
-        const uint8_t *p = in + 1 + (size_t)i * 18;
-        Gen1Pokemon &m = dst.mons[i];
-        m.species  = p[0];
-        m.level    = p[1];
-        m.boxLevel = p[1];
-        m.dvs[0]   = p[2];
-        m.dvs[1]   = p[3];
-        memcpy(m.hpExp,  p +  4, 2);
-        memcpy(m.atkExp, p +  6, 2);
-        memcpy(m.defExp, p +  8, 2);
-        memcpy(m.spdExp, p + 10, 2);
-        memcpy(m.spcExp, p + 12, 2);
-        memcpy(m.moves,  p + 14, 4);
-        for (uint8_t k = 0; k < 4; ++k) {
-            const Gen1MoveData *md = gen1Move(m.moves[k]);
-            m.pp[k] = md ? md->pp : 0;
-        }
-    }
-    for (uint8_t i = 0; i < 7; ++i) {
-        dst.species[i] = (i < dst.count) ? dst.mons[i].species : 0xFF;
-    }
-}
-} // namespace
+// Protocol V2: the party blob is the neutral cross-gen WireParty — see
+// WirePartyCodec.h (packWireParty / unpackWireParty / gen1PartyToWireParty).
+// The V1 Gen-1-only packPartyMinTb/unpackPartyMinTb helpers are gone with it.
 
 // Send the CHALLENGE packet. Layout:
-//   header (4B) | [0..3]=targetId (BE) [4]=gen [5]=nameLen [6..]=name | partyMin (109 B)
+//   header (4B) | [0..3]=targetId (BE) [4]=gen [5]=nameLen [6..]=name | WireParty (139 B)
 void MonsterMeshTextBattle::serverAuthSendChallenge()
 {
     uint8_t buf[BATTLELINK_MAX_PKT];
     memset(buf, 0, sizeof(buf));
     BattlePacket *pkt = (BattlePacket *)buf;
-    pkt->type = (uint8_t)PktType::TEXT_BATTLE_CHALLENGE;
+    pkt->type = (uint8_t)PktType::TEXT_BATTLE_CHALLENGE_V2;
     pkt->setSessionId(session_);
     pkt->seq = 0;  // CHALLENGE doesn't participate in the UPDATE seq stream
 
@@ -1613,12 +1573,15 @@ void MonsterMeshTextBattle::serverAuthSendChallenge()
 
     size_t nameLen = strlen(myTbName_);
     if (nameLen > TB_MAX_NAME_LEN) nameLen = TB_MAX_NAME_LEN;
-    pkt->payload[4] = 1;                          // gen 1
+    pkt->payload[4] = 3;                          // gen-3 mechanics (default)
     pkt->payload[5] = (uint8_t)nameLen;
     memcpy(pkt->payload + 6, myTbName_, nameLen);
-    packPartyMinTb(pendingMyParty_, pkt->payload + 6 + nameLen);
+    // Wire form of our party: staged directly by a Gen 2/3 save, or derived
+    // from the Gen-1 party here (same numbers the engine computes locally).
+    if (!haveWireParty_) gen1PartyToWireParty(pendingMyParty_, wireMy_);
+    packWireParty(wireMy_, pkt->payload + 6 + nameLen);
 
-    size_t payloadLen = 6 + nameLen + TB_PARTY_MIN_BYTES;
+    size_t payloadLen = 6 + nameLen + TB_WIRE_PARTY_BYTES;
     Serial.printf("[MMB] serverAuthSendChallenge: sz=%u tries=%u session=0x%04X target=0x%08X\n",
                   (unsigned)(BATTLELINK_HDR_SIZE + payloadLen),
                   (unsigned)challengeTries_ + 1, (unsigned)session_, (unsigned)remoteId_);
@@ -1917,10 +1880,10 @@ void MonsterMeshTextBattle::serverAuthOnAcceptPkt(uint32_t fromId,
                       (unsigned)fromId);
         return;
     }
-    if (len < BATTLELINK_HDR_SIZE + 2 + TB_PARTY_MIN_BYTES) {
+    if (len < BATTLELINK_HDR_SIZE + 2 + TB_WIRE_PARTY_BYTES) {
         Serial.printf("[MMB] DROP ACCEPT from=0x%08X reason=short_len=%u min=%u\n",
                       (unsigned)fromId, (unsigned)len,
-                      (unsigned)(BATTLELINK_HDR_SIZE + 2 + TB_PARTY_MIN_BYTES));
+                      (unsigned)(BATTLELINK_HDR_SIZE + 2 + TB_WIRE_PARTY_BYTES));
         return;
     }
     const BattlePacket *pkt = (const BattlePacket *)buf;
@@ -1934,7 +1897,7 @@ void MonsterMeshTextBattle::serverAuthOnAcceptPkt(uint32_t fromId,
     uint8_t accepted = pkt->payload[0];
     uint8_t nameLen  = pkt->payload[1];
     if (nameLen > TB_MAX_NAME_LEN) nameLen = TB_MAX_NAME_LEN;
-    if (len < (size_t)BATTLELINK_HDR_SIZE + 2 + nameLen + TB_PARTY_MIN_BYTES) {
+    if (len < (size_t)BATTLELINK_HDR_SIZE + 2 + nameLen + TB_WIRE_PARTY_BYTES) {
         Serial.printf("[MMB] DROP ACCEPT from=0x%08X reason=short_after_name "
                       "nameLen=%u len=%u\n",
                       (unsigned)fromId, nameLen, (unsigned)len);
@@ -1953,14 +1916,15 @@ void MonsterMeshTextBattle::serverAuthOnAcceptPkt(uint32_t fromId,
 
     memset(peerTbName_, 0, sizeof(peerTbName_));
     memcpy(peerTbName_, pkt->payload + 2, nameLen);
-    unpackPartyMinTb(pkt->payload + 2 + nameLen, pendingClientParty_);
+    unpackWireParty(pkt->payload + 2 + nameLen, wirePeer_);
 
     // Init engine: P0 = us, P1 = client. Seed is private to server (client
-    // never runs the engine so doesn't need it).
+    // never runs the engine so doesn't need it). wireMy_ was built when the
+    // CHALLENGE went out, so both engines seed from identical parties.
     uint32_t rngSeed = (uint32_t)(millis() ^ esp_random() ^ fromId);
-    engine_.start(pendingMyParty_, pendingClientParty_, rngSeed);
-    // Heal both sides — same rationale as legacy networked path (PARTY_MIN
-    // strips HP/PP/status; everyone starts fully healed in mesh PvP).
+    engine_.start(wireMy_, wirePeer_, rngSeed);
+    // Heal both sides — same rationale as legacy networked path (the wire
+    // party strips HP/PP/status; everyone starts fully healed in mesh PvP).
     for (uint8_t side = 0; side < 2; ++side) {
         auto &p = engine_.party(side);
         for (uint8_t i = 0; i < p.count && i < 6; ++i) {
@@ -1968,7 +1932,9 @@ void MonsterMeshTextBattle::serverAuthOnAcceptPkt(uint32_t fromId,
             m.hp     = m.maxHp;
             m.status = 0;
             for (uint8_t s = 0; s < 4; ++s) {
-                const Gen1MoveData *mv = gen1Move(m.moves[s]);
+                const Gen1MoveData *mv = (engine_.gen() >= 3)
+                                             ? gen3Move(m.moves[s])
+                                             : gen1Move(m.moves[s]);
                 m.pp[s] = mv ? mv->pp : 0;
             }
         }
@@ -2006,7 +1972,7 @@ void MonsterMeshTextBattle::serverAuthOnAcceptPkt(uint32_t fromId,
     Serial.printf("[MMB] server-auth ACCEPT(1) from=0x%08X name=%s "
                   "count=%u seed=0x%08X\n",
                   (unsigned)fromId, peerTbName_,
-                  (unsigned)pendingClientParty_.count,
+                  (unsigned)wirePeer_.count,
                   (unsigned)rngSeed);
 }
 
@@ -2118,10 +2084,10 @@ void MonsterMeshTextBattle::serverAuthRetransmit(uint32_t nowMs)
 void MonsterMeshTextBattle::clientAuthOnChallengePkt(uint32_t fromId,
                                                      const uint8_t *buf, size_t len)
 {
-    if (len < BATTLELINK_HDR_SIZE + 6 + TB_PARTY_MIN_BYTES) {
+    if (len < BATTLELINK_HDR_SIZE + 6 + TB_WIRE_PARTY_BYTES) {
         Serial.printf("[MMB] DROP CHALLENGE from=0x%08X reason=short_len=%u min=%u\n",
                       (unsigned)fromId, (unsigned)len,
-                      (unsigned)(BATTLELINK_HDR_SIZE + 6 + TB_PARTY_MIN_BYTES));
+                      (unsigned)(BATTLELINK_HDR_SIZE + 6 + TB_WIRE_PARTY_BYTES));
         return;
     }
     const BattlePacket *pkt = (const BattlePacket *)buf;
@@ -2139,13 +2105,13 @@ void MonsterMeshTextBattle::clientAuthOnChallengePkt(uint32_t fromId,
 
     uint8_t gen     = pkt->payload[4];
     uint8_t nameLen = pkt->payload[5];
-    if (gen != 1) {
-        Serial.printf("[MMB] DROP CHALLENGE from=0x%08X reason=gen=%u (expected 1)\n",
+    if (gen != 1 && gen != 3) {
+        Serial.printf("[MMB] DROP CHALLENGE from=0x%08X reason=gen=%u (expected 1|3)\n",
                       (unsigned)fromId, gen);
         return;
     }
     if (nameLen > TB_MAX_NAME_LEN) nameLen = TB_MAX_NAME_LEN;
-    if (len < (size_t)BATTLELINK_HDR_SIZE + 6 + nameLen + TB_PARTY_MIN_BYTES) {
+    if (len < (size_t)BATTLELINK_HDR_SIZE + 6 + nameLen + TB_WIRE_PARTY_BYTES) {
         Serial.printf("[MMB] DROP CHALLENGE from=0x%08X reason=short_after_name "
                       "nameLen=%u len=%u\n",
                       (unsigned)fromId, nameLen, (unsigned)len);
@@ -2182,7 +2148,8 @@ void MonsterMeshTextBattle::clientAuthOnChallengePkt(uint32_t fromId,
 
     memset(peerTbName_, 0, sizeof(peerTbName_));
     memcpy(peerTbName_, pkt->payload + 6, nameLen);
-    unpackPartyMinTb(pkt->payload + 6 + nameLen, pendingServerParty_);
+    unpackWireParty(pkt->payload + 6 + nameLen, wirePeer_);
+    sessionGen_ = gen;
 
     char line[40];
     snprintf(line, sizeof(line), "%.12s wants to battle!",
@@ -2192,9 +2159,9 @@ void MonsterMeshTextBattle::clientAuthOnChallengePkt(uint32_t fromId,
     lastRecvMs_ = millis();
     dirty_ = true;
     Serial.printf("[MMB] server-auth CHALLENGE rx from=0x%08X session=0x%04X "
-                  "name=%s count=%u\n",
+                  "name=%s count=%u gen=%u\n",
                   (unsigned)fromId, (unsigned)session_,
-                  peerTbName_, (unsigned)pendingServerParty_.count);
+                  peerTbName_, (unsigned)wirePeer_.count, (unsigned)gen);
 }
 
 void MonsterMeshTextBattle::clientAuthSendAccept(bool accepted)
@@ -2202,7 +2169,7 @@ void MonsterMeshTextBattle::clientAuthSendAccept(bool accepted)
     uint8_t buf[BATTLELINK_MAX_PKT];
     memset(buf, 0, sizeof(buf));
     BattlePacket *pkt = (BattlePacket *)buf;
-    pkt->type = (uint8_t)PktType::TEXT_BATTLE_ACCEPT;
+    pkt->type = (uint8_t)PktType::TEXT_BATTLE_ACCEPT_V2;
     pkt->setSessionId(session_);
     pkt->seq = 0;
 
@@ -2212,9 +2179,10 @@ void MonsterMeshTextBattle::clientAuthSendAccept(bool accepted)
     pkt->payload[0] = accepted ? 1 : 0;
     pkt->payload[1] = (uint8_t)nameLen;
     memcpy(pkt->payload + 2, myTbName_, nameLen);
-    packPartyMinTb(pendingMyParty_, pkt->payload + 2 + nameLen);
+    if (!haveWireParty_) gen1PartyToWireParty(pendingMyParty_, wireMy_);
+    packWireParty(wireMy_, pkt->payload + 2 + nameLen);
 
-    size_t payloadLen = 2 + nameLen + TB_PARTY_MIN_BYTES;
+    size_t payloadLen = 2 + nameLen + TB_WIRE_PARTY_BYTES;
     bool qOk = transport_.queueSend(buf, BATTLELINK_HDR_SIZE + payloadLen);
     Serial.printf("[MMB] clientAuthSendAccept: accepted=%u sz=%u session=0x%04X "
                   "awaitingFirstUpdate=%u queueOk=%d\n",
@@ -2242,7 +2210,7 @@ void MonsterMeshTextBattle::clientAuthSendAccept(bool accepted)
     // First-time path: init engine_ with both parties so the existing
     // renderer has the static data it needs (maxHp, move tables, nicknames).
     // We never call executeTurn — UPDATEs mutate engine_.party() fields.
-    engine_.start(pendingMyParty_, pendingServerParty_, /*rngSeed*/0);
+    engine_.start(wireMy_, wirePeer_, /*rngSeed*/0, sessionGen_);
     for (uint8_t side = 0; side < 2; ++side) {
         auto &p = engine_.party(side);
         for (uint8_t i = 0; i < p.count && i < 6; ++i) {
@@ -2250,7 +2218,9 @@ void MonsterMeshTextBattle::clientAuthSendAccept(bool accepted)
             m.hp     = m.maxHp;
             m.status = 0;
             for (uint8_t s = 0; s < 4; ++s) {
-                const Gen1MoveData *mv = gen1Move(m.moves[s]);
+                const Gen1MoveData *mv = (engine_.gen() >= 3)
+                                             ? gen3Move(m.moves[s])
+                                             : gen1Move(m.moves[s]);
                 m.pp[s] = mv ? mv->pp : 0;
             }
         }
