@@ -44,7 +44,7 @@ public:
         // Gen-3 mode only: Special split into Sp.Atk / Sp.Def. Unused (0)
         // in Gen-1 mode, which keeps using spc for both. See setGen().
         uint16_t spaG3 = 0, spdG3 = 0;
-        uint8_t  moves[4]  = {};
+        uint16_t moves[4]  = {};
         uint8_t  pp[4]     = {};
         // Live state (cleared on switch-out except status)
         uint8_t  status    = ST_NONE;
@@ -71,7 +71,7 @@ public:
         // EFF_MIMIC: a single slot temporarily holds a copied move; the
         // original is restored on switch-out.
         uint8_t  mimicSlot     = 0xFF;
-        uint8_t  mimicOrigMove = 0;
+        uint16_t mimicOrigMove = 0;
         uint8_t  mimicOrigPp   = 0;
         // EFF_TRANSFORM: full backup of the fields Transform overwrites,
         // restored on switch-out.
@@ -80,7 +80,7 @@ public:
         uint8_t  origType1     = 0, origType2 = 0;
         uint16_t origAtk = 0, origDef = 0, origSpd = 0, origSpc = 0;
         uint16_t origSpaG3 = 0, origSpdG3 = 0;
-        uint8_t  origMoves[4]  = {};
+        uint16_t origMoves[4]  = {};
         uint8_t  origPp[4]     = {};
     };
 
@@ -93,12 +93,32 @@ public:
         uint8_t    reflectTurns = 0, lightScreenTurns = 0;
     };
 
+    // Neutral cross-gen party mon: national dex + FINAL computed stats + moves.
+    // Each save reader (Gen 1/2/3) fills this its own way; the wire carries it
+    // verbatim, so the receiver never re-derives stats and there is no cross-gen
+    // formula ambiguity. spe=Speed, spa=Sp.Atk, spd=Sp.Def.
+    struct WireMon {
+        uint16_t species = 0;                       // national dex 1-386, 0=empty
+        uint8_t  level   = 0;
+        uint16_t maxHp = 0, atk = 0, def = 0, spe = 0, spa = 0, spd = 0;
+        uint16_t moves[4] = {};
+    };
+    struct WireParty {
+        uint8_t count = 0;
+        WireMon mons[MAX_PARTY];
+    };
+
     // Caller-provided log sink. Engine may emit several messages per turn.
     using LogSink = void (*)(const char *line, void *ctx);
 
     // Initialise from two Gen1Party save records. Both sides MUST pass the
     // same `rngSeed` for deterministic execution.
     void start(const Gen1Party &p1, const Gen1Party &p2,
+               uint32_t rngSeed, uint8_t gen = 3);
+
+    // Start from neutral wire parties (final stats already computed). PvP path:
+    // teams arrive from Gen 1/2/3 saves over the mesh in WireParty form.
+    void start(const WireParty &p1, const WireParty &p2,
                uint32_t rngSeed, uint8_t gen = 3);
 
     // Battle-mechanics generation: 1 = classic Gen-1, 3 = Gen 2/3-style
@@ -150,6 +170,13 @@ public:
     static void initBattlePokeFromBase(BattlePoke &dst,
                                        uint16_t species, uint8_t level,
                                        const uint8_t moves[4], uint8_t gen = 1);
+    // Build a BattlePoke from a neutral WireMon (final stats verbatim; type from
+    // the base-stats table; PP from the move table). Used by the PvP path.
+    static void initBattlePokeFromWire(BattlePoke &dst, const WireMon &src,
+                                       uint8_t gen = 3);
+    // Extract a WireMon (national dex + final stats + moves) from a built
+    // BattlePoke — used by the sender to pack its own party for transmission.
+    static void battlePokeToWireMon(const BattlePoke &src, WireMon &out);
 
 private:
     BattleParty p_[2];
