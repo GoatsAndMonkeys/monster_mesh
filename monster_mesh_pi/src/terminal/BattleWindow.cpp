@@ -347,6 +347,13 @@ void BattleWindow::drawYouBox() {
     snprintf(line, sizeof(line), "%s", state_.you.nickname[0] ? state_.you.nickname : "?");
     BitmapFont::drawString(renderer_, bx + 8, by + 20, line, COL_INK, 2);
 
+    // Active colour skin name (so the player can tell which of the 8 is showing).
+    static const char *const kSkinNames[Gen2SpriteCache::VAR_COUNT] = {
+        "", "Shiny", "Pink", "Rainbow", "Dark", "Dark Shiny", "Dark Pink", "Dark Rainbow"
+    };
+    if (youVariant_ > 0 && youVariant_ < Gen2SpriteCache::VAR_COUNT)
+        BitmapFont::drawString(renderer_, bx + 8, by + 40, kSkinNames[youVariant_], COL_DIMINK, 1);
+
     char lv[16];
     snprintf(lv, sizeof(lv), "L%d", (int)state_.you.level);
     int lvW = BitmapFont::stringWidth(lv, 2);
