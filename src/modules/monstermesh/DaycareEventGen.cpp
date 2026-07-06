@@ -4,6 +4,7 @@
 #include "DaycareEventGen.h"
 #include "DaycareData.h"   // auto-generated species/move tables
 #include "DaycareSpeciesEvents.h"  // per-species authored day-care vignettes
+#include "DaycareSocialEvents.h"  // per-species SOCIAL vignettes
 #include <stdarg.h>
 #include <string.h>
 #include <stdio.h>
@@ -32,12 +33,12 @@ static bool rngChance(uint8_t percentChance) {
 // ── Type affinity helpers ───────────────────────────────────────────────────
 
 // Eevee family: Eevee(133), Vaporeon(134), Jolteon(135), Flareon(136)
-static bool isEeveeFamily(uint8_t dex) {
+static bool isEeveeFamily(uint16_t dex) {
     return dex >= 133 && dex <= 136;
 }
 
 // Check if two Pokemon have type affinity (same type OR Eevee family)
-static bool hasTypeAffinity(uint8_t dex1, uint8_t dex2) {
+static bool hasTypeAffinity(uint16_t dex1, uint16_t dex2) {
     // Eevee family always has affinity with each other
     if (isEeveeFamily(dex1) && isEeveeFamily(dex2)) return true;
 
@@ -54,6 +55,16 @@ static bool hasTypeAffinity(uint8_t dex1, uint8_t dex2) {
 // Uses static buffers — call one at a time, copy result if you need both simultaneously.
 static char _nameBuf1[48];
 static char _nameBuf2[48];
+
+// Local trainer identity, set at check-in, used to retag social remoteMessage.
+char DaycareEventGen::s_localShort[8] = {};
+char DaycareEventGen::s_localGame[8]  = {};
+void DaycareEventGen::setLocalTrainer(const char *shortName, const char *gameName) {
+    if (shortName) { strncpy(s_localShort, shortName, sizeof(s_localShort) - 1); s_localShort[sizeof(s_localShort) - 1] = '\0'; }
+    else s_localShort[0] = '\0';
+    if (gameName) { strncpy(s_localGame, gameName, sizeof(s_localGame) - 1); s_localGame[sizeof(s_localGame) - 1] = '\0'; }
+    else s_localGame[0] = '\0';
+}
 
 // Format local Pokemon name: "Your Species" or "Your Species, NICK"
 static const char *fmtLocalName(const DaycarePokemonState &pkmn) {
@@ -108,7 +119,7 @@ static const char *getNeighborDisplayName(const DaycareNeighborPokemon &n) {
 }
 
 // Pick a neighbor, weighted toward same-type affinity with the given local Pokemon
-static uint8_t pickNeighbor(uint8_t localDex,
+static uint8_t pickNeighbor(uint16_t localDex,
                             const DaycareNeighborPokemon *neighbors, uint8_t count) {
     if (count <= 1) return 0;
 
@@ -540,7 +551,7 @@ bool DaycareEventGen::tryFlatTemplate(
     if (!rngChance(30)) return false;
 
     uint8_t idx = pickPokemon(localPartyCount);
-    uint8_t dex = localParty[idx].speciesDex;
+    uint16_t dex = localParty[idx].speciesDex;
 
     // Collect matching templates for this species
     uint8_t matches[FLAT_TEMPLATE_COUNT];
@@ -604,7 +615,7 @@ void DaycareEventGen::generateCompositional(
     DaycareState &state, DaycareWeatherType weather, bool isNight)
 {
     uint8_t idx = pickPokemon(localPartyCount);
-    uint8_t dex = localParty[idx].speciesDex;
+    uint16_t dex = localParty[idx].speciesDex;
     const DaycareSpecies *sp = daycareGetSpecies(dex);
     if (!sp) {
         snprintf(out.message, sizeof(out.message), "Your Pokemon had a quiet day.");
@@ -619,7 +630,10 @@ void DaycareEventGen::generateCompositional(
 
     // Roll event category based on type behavior weights
     // Boost social weight 3x when neighbors are present
-    uint16_t socialW = (neighborCount > 0) ? (uint16_t)(tb.social * 3) : 0;
+    // With other Pokemon on the mesh, social interactions dominate: weight
+    // social at 3x the combined non-social weight (~75% of compositional events).
+    uint16_t nonSocialW = tb.combat + tb.explore + tb.rest + tb.mischief;
+    uint16_t socialW = (neighborCount > 0) ? (uint16_t)(nonSocialW * 3) : 0;
     uint16_t totalWeight = socialW + tb.combat + tb.explore + tb.rest + tb.mischief;
     uint16_t roll = rngNext() % totalWeight;
     DaycareEventCategory cat;
@@ -681,10 +695,53 @@ void DaycareEventGen::generateCompositional(
             uint8_t ni = pickNeighbor(dex, neighbors, neighborCount);
             const DaycareNeighborPokemon &neighbor = neighbors[ni];
             const char *otherFull = fmtNeighborName(neighbor);
-            const char *action = actionsSocial[rngRange(ACTIONS_SOCIAL_COUNT)];
+            // Prefer a species-specific social line (two %s: local, partner);
+            // fall back to the generic action template.
+            const char *action = nullptr;  // set only on the generic-template path
+            uint8_t scnt = daycareSocialEventCount(dex);
+            const char *social = scnt ? daycareSocialEvent(dex, rngRange(scnt)) : nullptr;
+            if (social) {
+                snprintf(msgBuf, sizeof(msgBuf), social, name, otherFull);
+            } else {
+                action = actionsSocial[rngRange(ACTIONS_SOCIAL_COUNT)];
+                snprintf(msgBuf, sizeof(msgBuf), "Your %s %s %s %s",
+                         name, action, otherFull, loc);
+            }
 
-            snprintf(msgBuf, sizeof(msgBuf), "Your %s %s %s %s",
-                     name, action, otherFull, loc);
+            // Partner-perspective copy: same sentence (it describes OUR mon's
+            // behavior, so we retag rather than swap roles) — our mon gets our
+            // trainer tag, theirs becomes "your <species>".
+            {
+                char myTag[16] = {};
+                if (s_localShort[0]) {
+                    if (s_localGame[0])
+                        snprintf(myTag, sizeof(myTag), "%s-%s", s_localShort, s_localGame);
+                    else
+                        snprintf(myTag, sizeof(myTag), "%s", s_localShort);
+                }
+                char localForRemote[64];
+                if (myTag[0])
+                    snprintf(localForRemote, sizeof(localForRemote), "%s's %s", myTag, name);
+                else
+                    snprintf(localForRemote, sizeof(localForRemote), "%s", name);
+                const char *nSpecies = (neighbor.speciesDex >= 1 &&
+                                        neighbor.speciesDex <= DAYCARE_SPECIES_COUNT)
+                                       ? daycareSpeciesNames[neighbor.speciesDex] : "Pokemon";
+                char neighborForRemote[48];
+                if (neighbor.nickname[0])
+                    snprintf(neighborForRemote, sizeof(neighborForRemote), "your %s, %s", nSpecies, neighbor.nickname);
+                else
+                    snprintf(neighborForRemote, sizeof(neighborForRemote), "your %s", nSpecies);
+                char rbuf[200];
+                if (social)
+                    snprintf(rbuf, sizeof(rbuf), social, localForRemote, neighborForRemote);
+                else
+                    snprintf(rbuf, sizeof(rbuf), "Your %s %s %s %s", localForRemote, action, neighborForRemote, loc);
+                const char *rsrc = rbuf;
+                if (strncmp(rsrc, "Your ", 5) == 0) rsrc += 5;  // partner knows it's theirs
+                strncpy(out.remoteMessage, rsrc, sizeof(out.remoteMessage) - 1);
+                out.remoteMessage[sizeof(out.remoteMessage) - 1] = '\0';
+            }
 
             // Look up relationship
             DaycareRelationship *rel = getOrCreateRelationship(
@@ -708,10 +765,15 @@ void DaycareEventGen::generateCompositional(
                 if (rel->friendship <= 255 - gain) rel->friendship += gain;
                 else rel->friendship = 255;
 
-                // Sparring actions build rivalry
-                if (strcmp(action, "sparred with") == 0 ||
-                    strcmp(action, "raced") == 0 ||
-                    strcmp(action, "wrestled") == 0) {
+                // Sparring/contest actions build rivalry. Generic templates key
+                // off the action word; species-social lines (no action word) are
+                // contests ~30% of the time.
+                bool wasSpar = action
+                    ? (strcmp(action, "sparred with") == 0 ||
+                       strcmp(action, "raced") == 0 ||
+                       strcmp(action, "wrestled") == 0)
+                    : rngChance(30);
+                if (wasSpar) {
                     uint8_t rivalGain = 5;
                     if (rel->rivalry <= 255 - rivalGain) rel->rivalry += rivalGain;
                     else rel->rivalry = 255;
@@ -738,6 +800,9 @@ void DaycareEventGen::generateCompositional(
                     size_t ml = strlen(msgBuf);
                     if (ml + strlen(tierTag) < sizeof(msgBuf))
                         strcat(msgBuf, tierTag);
+                    size_t rl = strlen(out.remoteMessage);
+                    if (rl + strlen(tierTag) < sizeof(out.remoteMessage))
+                        strcat(out.remoteMessage, tierTag);
                 }
             }
 
@@ -834,7 +899,7 @@ void DaycareEventGen::generateDream(DaycareEvent &out,
     const DaycarePokemonState *localParty, uint8_t localPartyCount)
 {
     uint8_t idx = pickPokemon(localPartyCount);
-    uint8_t dex = localParty[idx].speciesDex;
+    uint16_t dex = localParty[idx].speciesDex;
     const char *name = getDisplayName(localParty[idx]);
 
     // Check for foreshadowing (if lots of XP accumulated — proxy for near level-up)
@@ -859,7 +924,7 @@ void DaycareEventGen::generateVisitor(DaycareEvent &out, uint32_t newNodeId,
     const DaycarePokemonState *localParty, uint8_t localPartyCount)
 {
     uint8_t idx = pickPokemon(localPartyCount);
-    uint8_t dex = localParty[idx].speciesDex;
+    uint16_t dex = localParty[idx].speciesDex;
     const char *name = getDisplayName(localParty[idx]);
 
     snprintf(out.message, sizeof(out.message),
@@ -882,7 +947,7 @@ bool DaycareEventGen::tryEscape(DaycareEvent &out,
     if (!rngChance(1)) return false;
 
     uint8_t idx = pickPokemon(localPartyCount);
-    uint8_t dex = localParty[idx].speciesDex;
+    uint16_t dex = localParty[idx].speciesDex;
     const DaycareSpecies *sp = daycareGetSpecies(dex);
     const char *name = getDisplayName(localParty[idx]);
 
@@ -919,7 +984,7 @@ void DaycareEventGen::generateWeatherEvent(DaycareEvent &out,
     DaycareWeatherType weather)
 {
     uint8_t idx = pickPokemon(localPartyCount);
-    uint8_t dex = localParty[idx].speciesDex;
+    uint16_t dex = localParty[idx].speciesDex;
     const DaycareSpecies *sp = daycareGetSpecies(dex);
     const char *name = getDisplayName(localParty[idx]);
 
@@ -1128,7 +1193,18 @@ DaycareEvent DaycareEventGen::generate(
 
     // Priority 4.5: species-specific Pokedex vignette (~55%) — the day care's
     // signature flavor, tailored to each boarded Pokemon's real biology.
-    if (rngChance(55)) {
+    // With other Pokemon on the mesh, SOCIAL interactions take priority (species-
+    // specific); when alone, a species-specific solo vignette. Both tailored to
+    // the boarded mon. generateCompositional heavily favors EVCAT_SOCIAL when
+    // neighbors are present (see socialW below).
+    if (neighborCount > 0) {
+        if (rngChance(70)) {
+            generateCompositional(ev, localParty, localPartyCount,
+                                  neighbors, neighborCount, state, weather, isNight);
+            state.totalEvents++;
+            return ev;
+        }
+    } else if (rngChance(65)) {
         generateSpeciesEvent(ev, localParty, localPartyCount);
         state.totalEvents++;
         return ev;

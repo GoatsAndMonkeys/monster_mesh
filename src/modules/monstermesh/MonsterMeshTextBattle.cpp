@@ -77,6 +77,7 @@ void MonsterMeshTextBattle::startNetworkedAsInitiator(uint32_t remoteId,
                                                      uint32_t existingSeed,
                                                      uint16_t existingSession)
 {
+    resultXpAwarded_ = false;
     mode_     = Mode::NETWORKED;
     phase_    = Phase::WAIT_REMOTE;
     remoteId_ = remoteId;
@@ -145,6 +146,7 @@ void MonsterMeshTextBattle::startNetworkedAsReceiver(uint32_t remoteId,
                                                      const Gen1Party &oppParty,
                                                      uint16_t existingSession)
 {
+    resultXpAwarded_ = false;
     mode_     = Mode::NETWORKED;
     phase_    = Phase::WAIT_ACTION;
     remoteId_ = remoteId;
@@ -339,6 +341,7 @@ void MonsterMeshTextBattle::startServerAuthAsInitiator(uint32_t remoteId,
                                                        const char *myName)
 {
     playerWon_ = false;
+    resultXpAwarded_ = false;
     mode_     = Mode::NETWORKED;
     phase_    = Phase::WAIT_REMOTE;   // "waiting for opponent to accept"
     role_     = Role::SERVER;
@@ -802,6 +805,10 @@ void MonsterMeshTextBattle::resolveTurn()
             case Gen1BattleEngine::Result::DRAW:   appendLog("It's a draw.");  break;
             default: break;
         }
+        // Mesh PvP: one-time result-based XP bonus for the local party. Must
+        // run BEFORE serverAuthSendUpdate() so the pendingXpPerSlot_ bump is
+        // drained by the module on this same finishing tick. No-op for LOCAL.
+        awardMeshResultXp();
         // Server-auth: ship a final UPDATE carrying result so the client
         // sees the end-of-battle state. Legacy path: nothing extra.
         if (role_ == Role::SERVER) serverAuthSendUpdate();
@@ -863,6 +870,42 @@ void MonsterMeshTextBattle::inBattleLevelUp(uint8_t slot)
     snprintf(line, sizeof(line), "%.10s grew to L%u!",
              ascii[0] ? ascii : "?", (unsigned)newLvl);
     appendLog(line);
+}
+
+// Result-based XP bonus for mesh (PvP) battles. Both sides earn regardless of
+// which device ran the engine. base = opponentAvgLevel * (won ? 6 : 2); added
+// to each surviving Gen-1 party slot's pendingXpPerSlot_ so it flows through
+// the EXISTING consumePendingXp → creditBattleXpPerSlot → SD-sav writeback
+// path (no new save-writer code). Idempotent per battle; NETWORKED only, so
+// local gym/wild fights are unaffected.
+void MonsterMeshTextBattle::awardMeshResultXp()
+{
+    if (resultXpAwarded_)        return;
+    if (mode_ != Mode::NETWORKED) return;   // mesh PvP only
+    resultXpAwarded_ = true;
+
+    const auto &me  = engine_.party(0);   // local party
+    const auto &foe = engine_.party(1);   // opponent party
+
+    // Opponent average level (fall back to 10 if levels are unavailable).
+    uint32_t sum = 0, n = 0;
+    for (uint8_t i = 0; i < foe.count && i < 6; ++i) {
+        uint8_t lv = foe.mons[i].level;
+        if (lv) { sum += lv; ++n; }
+    }
+    uint8_t oppLv = n ? (uint8_t)(sum / n) : 10;
+
+    uint32_t base = (uint32_t)oppLv * (playerWon_ ? 6u : 2u);
+    if (base < 1) base = 1;
+
+    for (uint8_t i = 0; i < me.count && i < 6; ++i) {
+        uint8_t dex = me.mons[i].species;
+        if (dex < 1 || dex > 151) continue;                 // Gen-1 species only
+        bool sentOut = (me.mons[i].hp > 0) ||
+                       (participantMask_ & (uint8_t)(1u << i));
+        if (!sentOut) continue;                             // alive or was sent out
+        pendingXpPerSlot_[i] += base;
+    }
 }
 
 void MonsterMeshTextBattle::handleFaints()
@@ -2132,6 +2175,7 @@ void MonsterMeshTextBattle::clientAuthOnChallengePkt(uint32_t fromId,
     }
 
     playerWon_ = false;
+    resultXpAwarded_ = false;
     mode_     = Mode::NETWORKED;
     role_     = Role::CLIENT;
     phase_    = Phase::WAIT_CHALLENGE_OVERLAY;
@@ -2556,6 +2600,10 @@ void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len
     dirty_ = true;
 
     if (finished) {
+        // Mesh PvP client: one-time result-based XP bonus for the local party
+        // (mirrors the server's award so both sides earn). Feeds the existing
+        // pendingXpPerSlot_ → SD-sav writeback path.
+        awardMeshResultXp();
         phase_ = Phase::FINISHED;
         // Still ACK so server clears unackedUpdate_ and stops retransmitting.
         clientAuthSendActionV2(0xFE /*null action*/, 0);

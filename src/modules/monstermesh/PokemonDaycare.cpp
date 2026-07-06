@@ -213,6 +213,7 @@ void PokemonDaycare::runEventCycle(uint32_t nowMs) {
     }
 
     // Generate event
+    DaycareEventGen::setLocalTrainer(shortName_, gameName_);
     DaycareEvent evt = DaycareEventGen::generate(
         state_.pokemon, state_.partyCount,
         neighbors_, neighborCount_,

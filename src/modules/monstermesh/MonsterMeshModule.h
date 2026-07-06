@@ -605,6 +605,8 @@ public:
     // Meshtastic-UI bleed-through is possible.
     void *lvBattleScreen_     = nullptr;
     void *lvBattleRefreshTimer_ = nullptr;  // lv_timer_t* (P2.39c)
+    void *lvSpriteAnimTimer_    = nullptr;  // lv_timer_t* — animates rainbow/trans sprite variants
+    void animateBattleSprites();            // advance phase + repaint animated sprite variants
     // P2.39e: deferred screen setup — showLvBattleScreen() must run on the
     // LVGL thread (monsterMeshKeyboardRead), not on runOnce() (main task).
     volatile bool needsBattleScreen_   = false;
@@ -635,8 +637,14 @@ public:
     void *lvPlayerCanvas_     = nullptr;
     uint8_t lvFoeCanvasBuf_[LV_SPRITE_W * LV_SPRITE_H * 2] = {};
     uint8_t lvPlayerCanvasBuf_[LV_PLAYER_W * LV_PLAYER_H * 2] = {};
-    uint8_t lvLastFoeSpecies_    = 0xFF;
-    uint8_t lvLastPlayerSpecies_ = 0xFF;
+    uint16_t lvLastFoeSpecies_    = 0xFFFF;   // uint16: national dex reaches 386
+    uint16_t lvLastPlayerSpecies_ = 0xFFFF;
+    // Sprite colour variant per side (0=normal,1=shiny,2=rainbow-V,3=rainbow-D,
+    // 4=trans-V,5=trans-D). 'V' cycles the player's for testing. Animated
+    // variants (>=2) scroll via lvSpriteAnimPhase_, advanced by the refresh timer.
+    uint8_t  lvPlayerVariant_ = 0;
+    uint8_t  lvFoeVariant_    = 0;
+    uint16_t lvSpriteAnimPhase_ = 0;
     void *lvPlayerPanel_      = nullptr;
     void *lvPlayerName_       = nullptr;
     void *lvPlayerLevel_      = nullptr;

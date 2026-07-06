@@ -285,6 +285,15 @@ private:
     // maxHp/atk/def/spd/spc linearly with newLevel/oldLevel, add the
     // maxHp delta to current hp (heal-on-level), bump level.
     void inBattleLevelUp(uint8_t slot);
+
+    // One-time result-based XP bonus for mesh (NETWORKED/PvP) battles so both
+    // sides earn regardless of which device ran the engine. base =
+    // opponentAvgLevel * (won ? 6 : 2); added to each surviving Gen-1 party
+    // slot's pendingXpPerSlot_ so it flows through the existing consumePendingXp
+    // → creditBattleXpPerSlot → SD-sav writeback path. Fires once per battle
+    // (resultXpAwarded_), and only for NETWORKED mode.
+    void awardMeshResultXp();
+    bool resultXpAwarded_ = false;
 public:
     // Drained each module tick. `out` is filled with per-slot XP earned
     // since the last drain; the LVGL thread credits each slot directly

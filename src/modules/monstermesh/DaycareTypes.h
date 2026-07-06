@@ -247,7 +247,7 @@ inline const char *rivalryTierName(uint8_t rivalry) {
 // ── Per-Pokemon daycare state ────────────────────────────────────────────────
 
 struct DaycarePokemonState {
-    uint8_t  speciesDex;          // Pokedex number (1-151)
+    uint16_t speciesDex;         // national dex (1-386)
     char     nickname[11];        // Player-set nickname (10 + null), empty = use species name
     uint8_t  savLevel;            // Level read from SAV file at check-in
     uint32_t savExp;              // Total EXP read from SAV file at check-in

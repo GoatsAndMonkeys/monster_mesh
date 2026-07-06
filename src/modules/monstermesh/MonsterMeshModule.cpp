@@ -2,8 +2,8 @@
 #include "../pentest/Gen1MiniIcons.h"   // legacy 14×14 silhouettes (kept for fallback)
 #include "../pentest/Gen1ColorIcons.h"  // 56×56 4-color GBC-palette sprites (P2.31)
 #include "../pentest/Gen2BackIcons.h"   // 48×48 4-color GBC-palette back sprites (P2.32)
-#include "Gen3Front565.h"               // full-color Gen-3 front sprites (RGB565) — battle screen
-#include "Gen3Back565.h"                // full-color Gen-3 back sprites (RGB565)
+#include "Gen3Front4bpp.h"              // 4bpp indexed Gen-3 front sprites + normal/shiny palettes
+#include "Gen3Back4bpp.h"               // 4bpp indexed Gen-3 back sprites + normal/shiny palettes
 
 #if defined(T_DECK) && !MESHTASTIC_EXCLUDE_MONSTERMESH
 
@@ -5182,6 +5182,15 @@ void MonsterMeshModule::buildLvBattleScreen()
         lvBattleRefreshTimer_ = lv_timer_create(refreshCb, 250, this);
         Serial.printf("[MMB] buildLvBattleScreen: refresh timer armed @250ms\n");
     }
+    // Dedicated sprite-animation tick (rainbow/trans scroll). ~90ms ≈ 11 fps;
+    // no-ops unless a side is on an animated variant, so it's free otherwise.
+    static auto animCb = [](lv_timer_t *t) {
+        auto *self = (MonsterMeshModule *)lv_timer_get_user_data(t);
+        if (self) self->animateBattleSprites();
+    };
+    if (!lvSpriteAnimTimer_) {
+        lvSpriteAnimTimer_ = lv_timer_create(animCb, 90, this);
+    }
 }
 
 // P2.31: render a Gen1ColorIcon (56×56 4-color, GBC-style palette) into
@@ -5257,37 +5266,197 @@ static void renderGen1BackSprite(lv_obj_t *canvas, uint8_t species)
     lv_obj_invalidate(canvas);
 }
 
-// Full-color Gen-3 sprite → RGB565 LVGL canvas. Decodes the deflated LE-RGB565
-// stream (0xF81F = transparent sentinel, remapped to white so the sprite sits
-// on the light battle background). `isBack` picks the 48×48 back set vs 56×56
-// front. Replaces renderGen1Sprite/renderGen1BackSprite for the battle screen.
-static void renderGen3Sprite565(lv_obj_t *canvas, uint16_t species, bool isBack)
+// ── Sprite colour variants ───────────────────────────────────────────────────
+// NORMAL/SHINY select a baked palette; RAINBOW_D recolours on the fly, mapping
+// diagonal position to a hue while preserving luma (animated, scrolls); DARK is
+// a "red balloon" splash — dark greyscale (gamma 2.1) everywhere, but red-hued
+// pixels keep their original colour; DARK_SHINY is the same splash on the shiny
+// palette; BARBIE shifts everything to hot pink with light eyes/highlights;
+// DARK_PINK is DARK but the reds shift to pink; DARK_RAINBOW is DARK but the
+// reds glow the animated rainbow. RAINBOW_D and DARK_RAINBOW animate.
+enum {
+    SPR_NORMAL = 0, SPR_SHINY, SPR_RAINBOW_D, SPR_DARK, SPR_DARK_SHINY, SPR_BARBIE,
+    SPR_DARK_PINK, SPR_DARK_RAINBOW,
+    SPR_VARIANT_COUNT
+};
+
+static inline uint8_t luma565(uint16_t c)
+{
+    uint8_t r = (uint8_t)(((c >> 11) & 0x1F) << 3);
+    uint8_t g = (uint8_t)(((c >> 5)  & 0x3F) << 2);
+    uint8_t b = (uint8_t)((c & 0x1F) << 3);
+    return (uint8_t)((77 * r + 150 * g + 29 * b) >> 8);   // Rec.601, *256
+}
+
+// A colour of hue `deg` (0..359) and saturation `sat` (0..255) whose luma
+// matches `Y` — keeps the pixel's brightness so shading is preserved.
+static uint16_t hueLuma(uint16_t deg, uint8_t sat, uint8_t Y)
+{
+    float h = (deg % 360) / 60.0f;
+    int   i = (int)h;
+    float f = h - i;
+    float s = sat / 255.0f;
+    const float v = 255.0f;
+    float p = v * (1 - s), q = v * (1 - s * f), t = v * (1 - s * (1 - f));
+    float r, g, b;
+    switch (i % 6) {
+        case 0:  r = v; g = t; b = p; break;
+        case 1:  r = q; g = v; b = p; break;
+        case 2:  r = p; g = v; b = t; break;
+        case 3:  r = p; g = q; b = v; break;
+        case 4:  r = t; g = p; b = v; break;
+        default: r = v; g = p; b = q; break;
+    }
+    int yb = (77 * (int)r + 150 * (int)g + 29 * (int)b) >> 8;
+    if (yb < 1) yb = 1;
+    float sc = (float)Y / yb;
+    int R = (int)(r * sc), G = (int)(g * sc), B = (int)(b * sc);
+    if (R > 255) R = 255; if (G > 255) G = 255; if (B > 255) B = 255;
+    return (uint16_t)(((R & 0xF8) << 8) | ((G & 0xFC) << 3) | (B >> 3));
+}
+
+// Fade saturation on bright pixels (luma > 175) so whites/eyes/highlights stay
+// pale instead of taking the full recolour — the "light eyes" look.
+static inline uint8_t satLite(uint8_t y, uint8_t baseSat)
+{
+    if (y <= 175) return baseSat;
+    int pct = 90 * (int)(y - 175) / 80;              // 0..90
+    int s = baseSat - baseSat * pct / 100;
+    return (uint8_t)(s < 15 ? 15 : s);
+}
+
+// Grey pixel (r=g=b) packed to RGB565.
+static inline uint16_t grey565(uint8_t y)
+{
+    return (uint16_t)(((y & 0xF8) << 8) | ((y & 0xFC) << 3) | (y >> 3));
+}
+
+// Goth darkness curve: y' = 255*(y/255)^2.1 — crushes darks/mids but keeps the
+// top end near white, so eyes/highlights survive. Built once into a LUT.
+static uint8_t s_gothLut[256];
+static bool    s_gothLutReady = false;
+static void initGothLut()
+{
+    for (int i = 0; i < 256; ++i) {
+        float v = powf(i / 255.0f, 2.1f) * 255.0f + 0.5f;
+        s_gothLut[i] = (uint8_t)(v > 255.0f ? 255 : (int)v);
+    }
+    s_gothLutReady = true;
+}
+
+// 4bpp indexed Gen-3 sprite → RGB565 LVGL canvas. `variant` picks normal/shiny
+// palette or an on-the-fly recolour; `phase` (0..359) animates the band methods
+// (scrolls the rainbow / trans bands). Index 0 = transparent → white bg.
+static void renderGen3Sprite4bpp(lv_obj_t *canvas, uint16_t species, bool isBack,
+                                 uint8_t variant, uint16_t phase)
 {
     if (!canvas) return;
     uint8_t *canvasBuf = (uint8_t *)lv_canvas_get_buf(canvas);
     if (!canvasBuf) return;
-    int w = isBack ? GEN3_BACK_565_W : GEN3_FRONT_565_W;
-    int h = isBack ? GEN3_BACK_565_H : GEN3_FRONT_565_H;
+    if ((variant == SPR_DARK || variant == SPR_DARK_SHINY || variant == SPR_DARK_PINK ||
+         variant == SPR_DARK_RAINBOW) && !s_gothLutReady) initGothLut();
+    int w = isBack ? GEN3_BACK_4BPP_W : GEN3_FRONT_4BPP_W;
+    int h = isBack ? GEN3_BACK_4BPP_H : GEN3_FRONT_4BPP_H;
     if (species == 0 || species > 386) {
         lv_canvas_fill_bg(canvas, lv_color_white(), LV_OPA_COVER);
         return;
     }
-    const uint32_t *offs = isBack ? kGen3Back565Offsets : kGen3Front565Offsets;
-    const uint8_t  *blob = isBack ? kGen3Back565Deflate  : kGen3Front565Deflate;
+    const uint32_t *offs = isBack ? kGen3Back4bppOffsets : kGen3Front4bppOffsets;
+    const uint8_t  *blob = isBack ? kGen3Back4bppDeflate  : kGen3Front4bppDeflate;
+    const uint16_t *palN = isBack ? kGen3BackPalNormal[species] : kGen3FrontPalNormal[species];
+    const uint16_t *palS = isBack ? kGen3BackPalShiny[species]  : kGen3FrontPalShiny[species];
     uint32_t start = offs[species], end = offs[species + 1];
     if (end <= start) { lv_canvas_fill_bg(canvas, lv_color_white(), LV_OPA_COVER); return; }
-    // The deflate stream is already LE-RGB565 == the canvas pixel format.
-    static uint8_t s_px[GEN3_FRONT_565_W * GEN3_FRONT_565_H * 2];  // 6272 B covers both
-    unsigned long destlen = (unsigned long)(w * h * 2);
+    static uint8_t s_idx[GEN3_FRONT_4BPP_W * GEN3_FRONT_4BPP_H / 2];   // 2048 B
+    unsigned long destlen = (unsigned long)(w * h / 2);
     unsigned long srclen  = end - start;
-    if (puff(s_px, &destlen, blob + start, &srclen) != 0) return;
+    if (puff(s_idx, &destlen, blob + start, &srclen) != 0) return;
+
+    const uint16_t *pal = (variant == SPR_SHINY || variant == SPR_DARK_SHINY) ? palS : palN;
     for (int i = 0; i < w * h; ++i) {
-        uint8_t lo = s_px[i * 2], hi = s_px[i * 2 + 1];
-        if (lo == 0x1F && hi == 0xF8) { lo = 0xFF; hi = 0xFF; }  // 0xF81F → white
-        canvasBuf[i * 2]     = lo;
-        canvasBuf[i * 2 + 1] = hi;
+        uint8_t idx = (i & 1) ? (s_idx[i >> 1] & 0x0F) : (s_idx[i >> 1] >> 4);
+        uint16_t c;
+        if (idx == 0) {
+            c = 0xFFFF;                          // transparent → white background
+        } else {
+            uint16_t base = pal[idx];
+            switch (variant) {
+                case SPR_RAINBOW_D: {                     // diagonal rainbow, scrolls
+                    int d = (i / w) + (i % w);
+                    uint16_t hue = (uint16_t)(((d * 306) / (2 * (h - 1)) + phase * 20) % 360);
+                    uint8_t y = luma565(base);
+                    c = hueLuma(hue, satLite(y, 242), y);  // 0.95*255, light eyes
+                    break;
+                }
+                case SPR_DARK:                            // "red balloon": dark grey, keep red
+                case SPR_DARK_SHINY: {                     // ...same, but on the shiny palette
+                    int r = ((base >> 11) & 0x1F) << 3;
+                    int g = ((base >> 5)  & 0x3F) << 2;
+                    int bl = (base & 0x1F) << 3;
+                    int mx = r > g ? (r > bl ? r : bl) : (g > bl ? g : bl);
+                    int chroma = mx - (r < g ? (r < bl ? r : bl) : (g < bl ? g : bl));
+                    bool red = false;
+                    if (mx == r && mx > 0 && chroma * 100 >= 45 * mx) {   // red-dominant, sat>=0.45
+                        int gb = g - bl;                                  // hue in [-18deg, +10deg]
+                        if (gb * 6 <= chroma && (bl - g) * 10 <= 3 * chroma) red = true;
+                    }
+                    c = red ? base : grey565(s_gothLut[luma565(base)]);   // gamma-2.1 dark grey
+                    break;
+                }
+                case SPR_BARBIE: {                        // hot pink, light eyes
+                    uint8_t y = luma565(base);
+                    c = hueLuma(329, satLite(y, 217), y); // barbie hue ~329, 0.85*255
+                    break;
+                }
+                case SPR_DARK_PINK:                       // dark, but reds -> pink
+                case SPR_DARK_RAINBOW: {                   // dark, but reds -> animated rainbow
+                    int r = ((base >> 11) & 0x1F) << 3;
+                    int g = ((base >> 5)  & 0x3F) << 2;
+                    int bl = (base & 0x1F) << 3;
+                    int mx = r > g ? (r > bl ? r : bl) : (g > bl ? g : bl);
+                    int chroma = mx - (r < g ? (r < bl ? r : bl) : (g < bl ? g : bl));
+                    bool red = false;
+                    if (mx == r && mx > 0 && chroma * 100 >= 45 * mx) {
+                        int gb = g - bl;
+                        if (gb * 6 <= chroma && (bl - g) * 10 <= 3 * chroma) red = true;
+                    }
+                    if (!red) { c = grey565(s_gothLut[luma565(base)]); break; }
+                    uint8_t Y = luma565(base);
+                    if (variant == SPR_DARK_PINK) {
+                        c = hueLuma(329, satLite(Y, 217), Y);
+                    } else {                               // SPR_DARK_RAINBOW
+                        int d = (i / w) + (i % w);
+                        uint16_t hue = (uint16_t)(((d * 306) / (2 * (h - 1)) + phase * 20) % 360);
+                        c = hueLuma(hue, satLite(Y, 242), Y);
+                    }
+                    break;
+                }
+                default: c = base; break;        // NORMAL / SHINY
+            }
+        }
+        canvasBuf[i * 2]     = (uint8_t)(c & 0xFF);
+        canvasBuf[i * 2 + 1] = (uint8_t)(c >> 8);
     }
     lv_obj_invalidate(canvas);
+}
+
+// Advance the animated sprite variants (rainbow/trans) one frame and repaint
+// the affected canvas(es). No-op for normal/shiny. Driven by lvSpriteAnimTimer_.
+void MonsterMeshModule::animateBattleSprites()
+{
+    if (!lvBattleActive_ || !textBattle_.isActive()) return;
+    // Only Rainbow and Dark-Rainbow animate; the rest are static.
+    auto animated = [](uint8_t v) { return v == SPR_RAINBOW_D || v == SPR_DARK_RAINBOW; };
+    if (!animated(lvPlayerVariant_) && !animated(lvFoeVariant_)) return;
+    // Monotonic tick counter, read *20 mod 360 for the rainbow hue; wrap at a
+    // multiple of 18 (360/20) so the hue cycle loops seamlessly.
+    lvSpriteAnimPhase_ = (uint16_t)((lvSpriteAnimPhase_ + 1) % 360);
+    if (animated(lvPlayerVariant_) && lvPlayerCanvas_ && lvLastPlayerSpecies_ != 0xFFFF)
+        renderGen3Sprite4bpp((lv_obj_t *)lvPlayerCanvas_, lvLastPlayerSpecies_, true,
+                             lvPlayerVariant_, lvSpriteAnimPhase_);
+    if (animated(lvFoeVariant_) && lvFoeCanvas_ && lvLastFoeSpecies_ != 0xFFFF)
+        renderGen3Sprite4bpp((lv_obj_t *)lvFoeCanvas_, lvLastFoeSpecies_, false,
+                             lvFoeVariant_, lvSpriteAnimPhase_);
 }
 
 void MonsterMeshModule::updateLvBattleScreen()
@@ -5308,16 +5477,16 @@ void MonsterMeshModule::updateLvBattleScreen()
     // Re-render sprites only when the active species changes (canvas
     // pixel-pushing is the most expensive part of an update).
     if (opp.count > 0 && opp.active < opp.count) {
-        uint8_t sp = opp.mons[opp.active].species;
+        uint16_t sp = opp.mons[opp.active].species;
         if (sp != lvLastFoeSpecies_) {
-            renderGen3Sprite565((lv_obj_t *)lvFoeCanvas_, sp, false);
+            renderGen3Sprite4bpp((lv_obj_t *)lvFoeCanvas_, sp, false, lvFoeVariant_, lvSpriteAnimPhase_);
             lvLastFoeSpecies_ = sp;
         }
     }
     if (me.count > 0 && me.active < me.count) {
-        uint8_t sp = me.mons[me.active].species;
+        uint16_t sp = me.mons[me.active].species;
         if (sp != lvLastPlayerSpecies_) {
-            renderGen3Sprite565((lv_obj_t *)lvPlayerCanvas_, sp, true);
+            renderGen3Sprite4bpp((lv_obj_t *)lvPlayerCanvas_, sp, true, lvPlayerVariant_, lvSpriteAnimPhase_);
             lvLastPlayerSpecies_ = sp;
         }
     }
@@ -5773,6 +5942,14 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
             !emulatorActive_ && !browserActive_ && ascii != 0x05 &&
             terminal_.hasInputFocus()) {
             terminal_.onKey(ascii);
+            return;
+        }
+        // 'V' cycles the player's sprite colour variant (testing hook):
+        // normal → shiny → rainbow-V → rainbow-D → trans-V → trans-D.
+        if (ascii == 'v' || ascii == 'V') {
+            lvPlayerVariant_ = (uint8_t)((lvPlayerVariant_ + 1) % SPR_VARIANT_COUNT);
+            lvLastPlayerSpecies_ = 0xFFFF;   // force a repaint with the new variant
+            if (lvBattleActive_) updateLvBattleScreen();
             return;
         }
         textBattle_.handleKey(ascii);
