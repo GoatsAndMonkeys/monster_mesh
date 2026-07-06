@@ -21,10 +21,12 @@ spec = importlib.util.spec_from_file_location("g3", os.path.join(HERE, "gen3_spr
 g3 = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(g3)
 
-# Sizes chosen to fill the T-Deck battle slots (320x240) without overlapping the
-# HP panels/log: foe 88x88 top-right, player 80x80 bottom-left (~1.5x native).
-FRONT = 88
-BACK = 80
+# Store NATIVE Gen-3 art (64x64) — bit-perfect, no fractional upscale. The
+# T-Deck decodes straight into a fixed LVGL canvas, so stored size == on-screen
+# size (64px). Covers the full national dex through Gen 3.
+FRONT = 64
+BACK = 64
+MAXDEX = 386
 SENTINEL = 0xF81F  # transparent marker (magenta) — mapped to bg on-device
 
 
@@ -50,11 +52,11 @@ def process(dex, kind, w, h):
 
 def write_header(path, sym, off_sym, macro_w, macro_h, w, h, blobs, title):
     flat = bytearray()
-    offsets = [0] * 153
-    for dex in range(152):
+    offsets = [0] * (MAXDEX + 2)
+    for dex in range(MAXDEX + 1):
         offsets[dex] = len(flat)
         flat.extend(blobs[dex])
-    offsets[152] = len(flat)
+    offsets[MAXDEX + 1] = len(flat)
     L = []
     L.append("// SPDX-License-Identifier: MIT")
     L.append(f"// {title}")
@@ -76,7 +78,7 @@ def write_header(path, sym, off_sym, macro_w, macro_h, w, h, blobs, title):
         L.append("    " + ", ".join(f"0x{b:02X}" for b in flat[i:i+16]) + ",")
     L.append("};")
     L.append("")
-    L.append(f"static const uint32_t {off_sym}[153] = {{")
+    L.append(f"static const uint32_t {off_sym}[{MAXDEX + 2}] = {{")
     for i in range(0, len(offsets), 8):
         L.append("    " + ", ".join(str(v) for v in offsets[i:i+8]) + ",")
     L.append("};")
@@ -86,14 +88,14 @@ def write_header(path, sym, off_sym, macro_w, macro_h, w, h, blobs, title):
 
 
 def main():
-    front_blobs = [b""] * 152
-    back_blobs = [b""] * 152
-    for dex in range(1, 152):
+    front_blobs = [b""] * (MAXDEX + 1)
+    back_blobs = [b""] * (MAXDEX + 1)
+    for dex in range(1, MAXDEX + 1):
         b, lab = process(dex, "front", FRONT, FRONT)
         front_blobs[dex] = b or b""
         b2, lab2 = process(dex, "back", BACK, BACK)
         back_blobs[dex] = b2 or b""
-        print(f"  {dex:3d} {g3.NAMES[dex]:14s} front={len(front_blobs[dex]):5d}B "
+        print(f"  {dex:3d} {g3.spname(dex):14s} front={len(front_blobs[dex]):5d}B "
               f"back={len(back_blobs[dex]):5d}B  ({lab})", file=sys.stderr)
     tf = write_header(os.path.join(OUTDIR, "Gen3Front565.h"),
                       "kGen3Front565Deflate", "kGen3Front565Offsets",

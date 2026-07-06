@@ -48,6 +48,9 @@ TYPE_ORDER = ["Normal", "Fighting", "Flying", "Poison", "Ground", "Rock",
 TYPE_IDX = {t: i for i, t in enumerate(TYPE_ORDER)}
 NTYPES = len(TYPE_ORDER)
 
+# Full national dex through Gen 3 (Bulbasaur .. Deoxys).
+MAXDEX = 386
+
 # Gen 2/3 physical/special split is by attack TYPE (Gen 4 made it per-move).
 SPECIAL_TYPES = {"Fire", "Water", "Grass", "Electric", "Psychic", "Ice",
                  "Dragon", "Dark"}
@@ -77,7 +80,7 @@ def parse_pokedex():
         if not nm:
             continue
         num = int(nm.group(1))
-        if not (1 <= num <= 151):
+        if not (1 <= num <= MAXDEX):
             continue
         tm = re.search(r"types:\s*\[([^\]]*)\]", body)
         bm = re.search(r"baseStats:\s*\{([^}]*)\}", body)
@@ -100,7 +103,7 @@ def parse_pokedex():
             "t1": TYPE_IDX[types[0]],
             "t2": TYPE_IDX[types[1]] if len(types) > 1 else TYPE_IDX[types[0]],
         }
-    missing = [d for d in range(1, 152) if d not in by_dex]
+    missing = [d for d in range(1, MAXDEX + 1) if d not in by_dex]
     if missing:
         sys.exit(f"ERROR: pokedex missing dex numbers: {missing}")
     return by_dex
@@ -129,7 +132,7 @@ def parse_typechart():
     return chart
 
 
-# ── Parse moves.ts: id -> (type, power, accuracy) modern values ───────────────
+# ── Parse moves.ts: id -> (num, name, type, power, accuracy, pp, priority) ─────
 def parse_moves_modern():
     text = read("moves.ts")
     out = {}
@@ -138,15 +141,48 @@ def parse_moves_modern():
         tm = re.search(r'\btype:\s*"([^"]+)"', body)
         pm = re.search(r"\bbasePower:\s*(\d+)", body)
         am = re.search(r"\baccuracy:\s*(true|\d+)", body)
+        nm = re.search(r"\bnum:\s*(-?\d+)", body)
+        namm = re.search(r'\bname:\s*"([^"]+)"', body)
+        ppm = re.search(r"\bpp:\s*(\d+)", body)
+        prm = re.search(r"\bpriority:\s*(-?\d+)", body)
         if not tm:
             continue
         out[mid] = {
+            "sid": mid,
+            "num": int(nm.group(1)) if nm else 0,
+            "name": namm.group(1) if namm else mid,
             "type": tm.group(1),
             "power": int(pm.group(1)) if pm else 0,
             # accuracy:true means never-miss -> engine uses 0 for that
             "acc": 0 if (am and am.group(1) == "true") else (int(am.group(1)) if am else 0),
+            "pp": int(ppm.group(1)) if ppm else 0,
+            "priority": int(prm.group(1)) if prm else 0,
         }
     return out
+
+
+# Highest national move id we emit (354 = last Gen-3 move, Psycho Boost).
+MAX_MOVE = 354
+
+
+def moves_by_num(modern):
+    """Map national move id 1..MAX_MOVE -> best Showdown entry.
+
+    Some ids have multiple sids (e.g. Hidden Power + its 16 typed variants all
+    share num 237). Prefer the base move (shortest sid) so we pick "hiddenpower".
+    """
+    by_num = {}
+    for mv in modern.values():
+        n = mv["num"]
+        if not (1 <= n <= MAX_MOVE):
+            continue
+        cur = by_num.get(n)
+        if cur is None or len(mv["sid"]) < len(cur["sid"]):
+            by_num[n] = mv
+    missing = [n for n in range(1, MAX_MOVE + 1) if n not in by_num]
+    if missing:
+        sys.exit(f"ERROR: moves.ts missing national move ids: {missing}")
+    return by_num
 
 
 # ── Parse our existing gen1 moves header: keep id/name/pp/priority/EFF/chance ──
@@ -195,9 +231,9 @@ def gen_basestats(dex):
              "    uint8_t hp, atk, def, spa, spd, spe;",
              "    uint8_t type1, type2;",
              "};", "",
-             "static constexpr Gen3BaseStats GEN3_BASE_STATS[152] = {",
+             f"static constexpr Gen3BaseStats GEN3_BASE_STATS[{MAXDEX + 1}] = {{",
              "    { 0, 0, 0, 0, 0, 0, 0, 0 },  // 0 placeholder"]
-    for d in range(1, 152):
+    for d in range(1, MAXDEX + 1):
         e = dex[d]
         lines.append("    {{ {hp:3d}, {atk:3d}, {df:3d}, {spa:3d}, {spd:3d}, {spe:3d}, "
                      "{t1:2d}, {t2:2d} }},  // {d}".format(
@@ -231,34 +267,48 @@ def gen_typechart(chart):
 
 
 def gen_moves(g1rows, modern):
+    # Index the existing Gen-1 header rows by Showdown id so we can keep each
+    # move's engine EFF_* effect, effect chance and exact display name.
+    g1_by_sid = {r["sid"]: r for r in g1rows}
+    by_num = moves_by_num(modern)
+
     lines = [HEADER, "",
              '#include "showdown_gen1_moves.h"  // reuse Gen1MoveData + EFF_* enum',
              "",
-             "// Same 165 move ids the Gen-1 saves store, but each move's TYPE, power",
-             "// and accuracy are updated to modern (Gen 2/3+) values (e.g. Bite->Dark,",
-             "// Karate Chop->Fighting). PP + the engine EFF_* effect are kept from Gen 1",
-             "// so move behaviour still runs. Category is derived from the (new) type.",
+             "// All Gen 1-3 moves (national ids 1..%d), typed & powered to modern" % MAX_MOVE,
+             "// (Gen 2/3+) values from Pokemon Showdown. Ids 1-165 keep the engine",
+             "// EFF_* effect + effect chance the Gen-1 saves rely on; the Gen 2/3",
+             "// additions (166-%d) are damage-only (EFF_NONE) for now -- status" % MAX_MOVE,
+             "// effects can be layered in later. Category is derived from the type.",
              "static constexpr Gen1MoveData GEN3_MOVES[] = {"]
-    retyped = 0
-    for r in g1rows:
-        mod = modern.get(r["sid"])
-        if mod and mod["type"] in TYPE_IDX:
-            tp = TYPE_IDX[mod["type"]]
-            pw = mod["power"]
-            ac = mod["acc"]
+    for n in range(1, MAX_MOVE + 1):
+        mv = by_num[n]
+        # Fairy didn't exist until Gen 6 -> fold back to Normal (all such moves
+        # in this range are status-only, so power/category are unaffected).
+        tp = TYPE_IDX.get(mv["type"], 0)
+        pw = mv["power"]
+        ac = mv["acc"]
+        pp = mv["pp"]
+        pr = mv["priority"]
+        g1 = g1_by_sid.get(mv["sid"])
+        if g1:
+            # Preserve the engine-implemented behaviour + exact existing name.
+            name = g1["name"]
+            eff = g1["eff"]
+            ec = g1["effchance"]
         else:
-            # move not in modern dex (shouldn't happen for gen1 moves) -> keep gen1-ish
-            tp, pw, ac = 0, 0, 0
+            name = mv["name"][:15]  # char name[16] -> 15 visible chars
+            eff = "EFF_NONE"
+            ec = 0
         lines.append('    {{ {num:3d}, "{name}", {tp:2d}, {pw:3d}, {ac:3d}, {pp:2d}, '
                      '{pr:2d}, {eff}, {ec:3d} }},  // {sid}'.format(
-                         num=r["num"], name=r["name"], tp=tp, pw=pw, ac=ac,
-                         pp=r["pp"], pr=r["priority"], eff=r["eff"],
-                         ec=r["effchance"], sid=r["sid"]))
+                         num=n, name=name, tp=tp, pw=pw, ac=ac, pp=pp, pr=pr,
+                         eff=eff, ec=ec, sid=mv["sid"]))
     lines.append("};")
-    lines.append(f"static constexpr uint8_t GEN3_MOVE_COUNT = {len(g1rows)};")
+    lines.append(f"static constexpr uint16_t GEN3_MOVE_COUNT = {MAX_MOVE};")
     lines.append("")
-    lines.append("inline const Gen1MoveData *gen3Move(uint8_t num) {")
-    lines.append("    for (uint8_t i = 0; i < GEN3_MOVE_COUNT; ++i)")
+    lines.append("inline const Gen1MoveData *gen3Move(uint16_t num) {")
+    lines.append("    for (uint16_t i = 0; i < GEN3_MOVE_COUNT; ++i)")
     lines.append("        if (GEN3_MOVES[i].num == num) return &GEN3_MOVES[i];")
     lines.append("    return nullptr;")
     lines.append("}")
@@ -284,7 +334,7 @@ def main():
 
     # quick sanity spot-checks
     print("\n-- sanity --")
-    print(f"  species parsed: {len(dex)} (want 151)")
+    print(f"  species parsed: {len(dex)} (want {MAXDEX})")
     # Gengar should be Ghost/Poison, high spa
     g = dex[94]
     print(f"  #94 Gengar spa={g['spa']} spd={g['spd']} "
@@ -302,6 +352,23 @@ def main():
     if bite:
         bt = modern.get("bite", {})
         print(f"  Bite modern type = {bt.get('type')} (expect Dark)")
+
+    # -- move table spot-checks --
+    by_num = moves_by_num(modern)
+    print(f"\n  GEN3_MOVES entries: {MAX_MOVE} (ids 1..{MAX_MOVE})")
+
+    def show(n, label):
+        mv = by_num[n]
+        tp = TYPE_ORDER[TYPE_IDX.get(mv["type"], 0)]
+        print(f"    #{n:3d} {mv['name']:<15} type={tp:<8} "
+              f"pow={mv['power']:3d} acc={mv['acc']:3d} pp={mv['pp']:2d} "
+              f"pri={mv['priority']:2d}  ({label})")
+
+    show(165, "last Gen-1: Struggle")
+    show(44,  "Gen-1 Bite -> Dark")
+    show(242, "Gen-2 Crunch -> Dark")
+    show(315, "Gen-3 Overheat -> Fire")
+    show(237, "Hidden Power (base pick)")
 
 
 if __name__ == "__main__":

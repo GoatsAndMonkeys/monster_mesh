@@ -72,7 +72,7 @@ enum Gen1MoveEffect : uint8_t {
 };
 
 struct Gen1MoveData {
-    uint8_t  num;          // Gen 1 move id (1-165)
+    uint16_t num;          // national move id (1-165 Gen1, up to 354 through Gen3)
     char     name[16];     // PascalCase ("Tackle")
     uint8_t  type;         // index into GEN1_TYPES
     uint8_t  power;        // base power, 0 = status-only
@@ -252,7 +252,7 @@ static constexpr Gen1MoveData GEN1_MOVES[] = {
     { 165, "Struggle",  0,  50,   0, 10,  0, EFF_RECOIL,   0 },  // struggle
 };
 
-inline const Gen1MoveData *gen1Move(uint8_t num) {
+inline const Gen1MoveData *gen1Move(uint16_t num) {
     for (uint8_t i = 0; i < GEN1_MOVE_COUNT; ++i)
         if (GEN1_MOVES[i].num == num) return &GEN1_MOVES[i];
     return nullptr;

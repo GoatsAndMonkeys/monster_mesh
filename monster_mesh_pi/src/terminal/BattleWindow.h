@@ -25,7 +25,7 @@ public:
     // Snapshot of everything the renderer needs for one frame.  TerminalUI
     // builds this each tick and hands it in via setState().
     struct PokeView {
-        uint8_t  species  = 0;   // gen 1 dex (1..151)
+        uint16_t species  = 0;   // national dex (1..386)
         uint8_t  level    = 0;
         uint16_t hp       = 0;
         uint16_t maxHp    = 0;

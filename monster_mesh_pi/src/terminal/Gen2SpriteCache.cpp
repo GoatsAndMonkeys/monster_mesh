@@ -11,17 +11,17 @@ extern "C" {
 
 namespace Gen2SpriteCache {
 
-// Two tables, one for each direction.  152 slots (0..151) — slot 0 unused
+// Two tables, one per direction. 387 slots (0..386) — slot 0 unused,
 // to match the dex numbering used by the palette tables.
-static SDL_Texture *s_front[152] = {};
-static SDL_Texture *s_back [152] = {};
+static SDL_Texture *s_front[387] = {};
+static SDL_Texture *s_back [387] = {};
 
 void init() {
-    for (int i = 0; i < 152; i++) { s_front[i] = nullptr; s_back[i] = nullptr; }
+    for (int i = 0; i < 387; i++) { s_front[i] = nullptr; s_back[i] = nullptr; }
 }
 
 void clear() {
-    for (int i = 0; i < 152; i++) {
+    for (int i = 0; i < 387; i++) {
         if (s_front[i]) { SDL_DestroyTexture(s_front[i]); s_front[i] = nullptr; }
         if (s_back [i]) { SDL_DestroyTexture(s_back [i]); s_back [i] = nullptr; }
     }
@@ -34,7 +34,7 @@ void dims(bool isBack, int *outW, int *outH) {
 
 // Decode the deflate blob for one species into a full-color RGBA (w*h*4) buffer.
 static bool decodeSprite(int dex, bool isBack, uint8_t *out, size_t outCap) {
-    if (dex < 1 || dex > 151) return false;
+    if (dex < 1 || dex > 386) return false;
     const uint32_t *offsets = isBack ? kGen3BackDeflateOffsets
                                      : kGen3ColorDeflateOffsets;
     const uint8_t  *blob    = isBack ? kGen3BackDeflate
@@ -50,7 +50,7 @@ static bool decodeSprite(int dex, bool isBack, uint8_t *out, size_t outCap) {
 
 static SDL_Texture *buildTexture(SDL_Renderer *renderer, int dex, bool isBack) {
     if (!renderer) return nullptr;
-    if (dex < 1 || dex > 151) return nullptr;
+    if (dex < 1 || dex > 386) return nullptr;
 
     int w = isBack ? GEN3_BACK_W  : GEN3_COLOR_W;
     int h = isBack ? GEN3_BACK_H  : GEN3_COLOR_H;
@@ -58,7 +58,7 @@ static SDL_Texture *buildTexture(SDL_Renderer *renderer, int dex, bool isBack) {
     // Decode the full-color RGBA32 pixel buffer (w*h*4 bytes, R,G,B,A per pixel;
     // A=0 = transparent background). The decoded bytes are already in
     // SDL_PIXELFORMAT_RGBA32 order, so we hand them straight to the texture.
-    static uint8_t buf[GEN3_COLOR_W * GEN3_COLOR_H * 4];  // 12544 B — covers both sizes
+    static uint8_t buf[GEN3_COLOR_W * GEN3_COLOR_H * 4];  // 16384 B — 64x64 RGBA, covers front+back
     size_t  need = (size_t)(w * h * 4);
     if (!decodeSprite(dex, isBack, buf, need)) return nullptr;
 
@@ -82,7 +82,7 @@ static SDL_Texture *buildTexture(SDL_Renderer *renderer, int dex, bool isBack) {
 }
 
 SDL_Texture *get(SDL_Renderer *renderer, int dex, bool isBack) {
-    if (dex < 1 || dex > 151) return nullptr;
+    if (dex < 1 || dex > 386) return nullptr;
     SDL_Texture **slot = isBack ? &s_back[dex] : &s_front[dex];
     if (*slot) return *slot;
     *slot = buildTexture(renderer, dex, isBack);

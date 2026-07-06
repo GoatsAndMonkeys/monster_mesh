@@ -35,7 +35,7 @@ public:
     };
 
     struct BattlePoke {
-        uint8_t  species   = 0;
+        uint16_t species   = 0;   // national dex (1-386)
         char     nickname[11] = {};
         uint8_t  level     = 0;
         uint8_t  type1     = 0, type2 = 0;
@@ -76,7 +76,7 @@ public:
         // EFF_TRANSFORM: full backup of the fields Transform overwrites,
         // restored on switch-out.
         bool     transformed   = false;
-        uint8_t  origSpecies   = 0;
+        uint16_t origSpecies   = 0;
         uint8_t  origType1     = 0, origType2 = 0;
         uint16_t origAtk = 0, origDef = 0, origSpd = 0, origSpc = 0;
         uint16_t origSpaG3 = 0, origSpdG3 = 0;
@@ -150,7 +150,7 @@ public:
                                        const Gen1Pokemon &src,
                                        const uint8_t nick[11], uint8_t gen = 1);
     static void initBattlePokeFromBase(BattlePoke &dst,
-                                       uint8_t species, uint8_t level,
+                                       uint16_t species, uint8_t level,
                                        const uint8_t moves[4], uint8_t gen = 1);
 
 private:

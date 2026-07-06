@@ -14,10 +14,11 @@
 
 #include "showdown_gen1_moves.h"  // reuse Gen1MoveData + EFF_* enum
 
-// Same 165 move ids the Gen-1 saves store, but each move's TYPE, power
-// and accuracy are updated to modern (Gen 2/3+) values (e.g. Bite->Dark,
-// Karate Chop->Fighting). PP + the engine EFF_* effect are kept from Gen 1
-// so move behaviour still runs. Category is derived from the (new) type.
+// All Gen 1-3 moves (national ids 1..354), typed & powered to modern
+// (Gen 2/3+) values from Pokemon Showdown. Ids 1-165 keep the engine
+// EFF_* effect + effect chance the Gen-1 saves rely on; the Gen 2/3
+// additions (166-354) are damage-only (EFF_NONE) for now -- status
+// effects can be layered in later. Category is derived from the type.
 static constexpr Gen1MoveData GEN3_MOVES[] = {
     {   1, "Pound",  0,  40, 100, 35,  0, EFF_NONE,   0 },  // pound
     {   2, "Karate Chop",  1,  50, 100, 25,  0, EFF_NONE,   0 },  // karatechop
@@ -36,7 +37,7 @@ static constexpr Gen1MoveData GEN3_MOVES[] = {
     {  15, "Cut",  0,  50,  95, 30,  0, EFF_NONE,   0 },  // cut
     {  16, "Gust",  2,  40, 100, 35,  0, EFF_NONE,   0 },  // gust
     {  17, "Wing Attack",  2,  60, 100, 35,  0, EFF_NONE,   0 },  // wingattack
-    {  18, "Whirlwind",  0,   0,   0, 20,  0, EFF_NONE,   0 },  // whirlwind
+    {  18, "Whirlwind",  0,   0,   0, 20, -6, EFF_NONE,   0 },  // whirlwind
     {  19, "Fly",  2,  90,  95, 15,  0, EFF_CHARGE_TURN,   0 },  // fly
     {  20, "Bind",  0,  15,  85, 20,  0, EFF_TRAPPING,   0 },  // bind
     {  21, "Slam",  0,  80,  75, 20,  0, EFF_NONE,   0 },  // slam
@@ -64,7 +65,7 @@ static constexpr Gen1MoveData GEN3_MOVES[] = {
     {  43, "Leer",  0,   0, 100, 30,  0, EFF_DROP_DEF,   0 },  // leer
     {  44, "Bite", 16,  60, 100, 25,  0, EFF_FLINCH,  30 },  // bite
     {  45, "Growl",  0,   0, 100, 40,  0, EFF_DROP_ATK,   0 },  // growl
-    {  46, "Roar",  0,   0,   0, 20,  0, EFF_NONE,   0 },  // roar
+    {  46, "Roar",  0,   0,   0, 20, -6, EFF_NONE,   0 },  // roar
     {  47, "Sing",  0,   0,  55, 15,  0, EFF_STATUS_SLP,   0 },  // sing
     {  48, "Supersonic",  0,   0,  55, 20,  0, EFF_STATUS_CONFUSE,   0 },  // supersonic
     {  49, "Sonic Boom",  0,   0,  90, 20,  0, EFF_FIXED_DMG,   0 },  // sonicboom
@@ -146,7 +147,7 @@ static constexpr Gen1MoveData GEN3_MOVES[] = {
     { 125, "Bone Club",  4,  65,  85, 20,  0, EFF_NONE,  10 },  // boneclub
     { 126, "Fire Blast",  9, 110,  85,  5,  0, EFF_STATUS_BRN,  10 },  // fireblast
     { 127, "Waterfall", 10,  80, 100, 15,  0, EFF_NONE,  20 },  // waterfall
-    { 128, "Clamp", 10,  35,  85, 10,  0, EFF_TRAPPING,   0 },  // clamp
+    { 128, "Clamp", 10,  35,  85, 15,  0, EFF_TRAPPING,   0 },  // clamp
     { 129, "Swift",  0,  60,   0, 20,  0, EFF_SWIFT_NEVERMISS,   0 },  // swift
     { 130, "Skull Bash",  0, 130, 100, 10,  0, EFF_CHARGE_TURN,   0 },  // skullbash
     { 131, "Spike Cannon",  0,  20, 100, 15,  0, EFF_MULTI_HIT,   0 },  // spikecannon
@@ -183,12 +184,201 @@ static constexpr Gen1MoveData GEN3_MOVES[] = {
     { 162, "Super Fang",  0,   0,  90, 10,  0, EFF_SUPER_FANG,   0 },  // superfang
     { 163, "Slash",  0,  70, 100, 20,  0, EFF_NONE,   0 },  // slash
     { 164, "Substitute",  0,   0,   0, 10,  0, EFF_SUBSTITUTE,   0 },  // substitute
-    { 165, "Struggle",  0,  50,   0, 10,  0, EFF_RECOIL,   0 },  // struggle
+    { 165, "Struggle",  0,  50,   0,  1,  0, EFF_RECOIL,   0 },  // struggle
+    { 166, "Sketch",  0,   0,   0,  1,  0, EFF_NONE,   0 },  // sketch
+    { 167, "Triple Kick",  1,  10,  90, 10,  0, EFF_NONE,   0 },  // triplekick
+    { 168, "Thief", 16,  60, 100, 25,  0, EFF_NONE,   0 },  // thief
+    { 169, "Spider Web",  7,   0,   0, 10,  0, EFF_NONE,   0 },  // spiderweb
+    { 170, "Mind Reader",  0,   0,   0,  5,  0, EFF_NONE,   0 },  // mindreader
+    { 171, "Nightmare",  8,   0, 100, 15,  0, EFF_NONE,   0 },  // nightmare
+    { 172, "Flame Wheel",  9,  60, 100, 25,  0, EFF_NONE,   0 },  // flamewheel
+    { 173, "Snore",  0,  50, 100, 15,  0, EFF_NONE,   0 },  // snore
+    { 174, "Curse",  8,   0,   0, 10,  0, EFF_NONE,   0 },  // curse
+    { 175, "Flail",  0,   0, 100, 15,  0, EFF_NONE,   0 },  // flail
+    { 176, "Conversion 2",  0,   0,   0, 30,  0, EFF_NONE,   0 },  // conversion2
+    { 177, "Aeroblast",  2, 100,  95,  5,  0, EFF_NONE,   0 },  // aeroblast
+    { 178, "Cotton Spore", 11,   0, 100, 40,  0, EFF_NONE,   0 },  // cottonspore
+    { 179, "Reversal",  1,   0, 100, 15,  0, EFF_NONE,   0 },  // reversal
+    { 180, "Spite",  8,   0, 100, 10,  0, EFF_NONE,   0 },  // spite
+    { 181, "Powder Snow", 14,  40, 100, 25,  0, EFF_NONE,   0 },  // powdersnow
+    { 182, "Protect",  0,   0,   0, 10,  4, EFF_NONE,   0 },  // protect
+    { 183, "Mach Punch",  1,  40, 100, 30,  1, EFF_NONE,   0 },  // machpunch
+    { 184, "Scary Face",  0,   0, 100, 10,  0, EFF_NONE,   0 },  // scaryface
+    { 185, "Feint Attack", 16,  60,   0, 20,  0, EFF_NONE,   0 },  // feintattack
+    { 186, "Sweet Kiss",  0,   0,  75, 10,  0, EFF_NONE,   0 },  // sweetkiss
+    { 187, "Belly Drum",  0,   0,   0, 10,  0, EFF_NONE,   0 },  // bellydrum
+    { 188, "Sludge Bomb",  3,  90, 100, 10,  0, EFF_NONE,   0 },  // sludgebomb
+    { 189, "Mud-Slap",  4,  20, 100, 10,  0, EFF_NONE,   0 },  // mudslap
+    { 190, "Octazooka", 10,  65,  85, 10,  0, EFF_NONE,   0 },  // octazooka
+    { 191, "Spikes",  4,   0,   0, 20,  0, EFF_NONE,   0 },  // spikes
+    { 192, "Zap Cannon", 12, 120,  50,  5,  0, EFF_NONE,   0 },  // zapcannon
+    { 193, "Foresight",  0,   0,   0, 40,  0, EFF_NONE,   0 },  // foresight
+    { 194, "Destiny Bond",  8,   0,   0,  5,  0, EFF_NONE,   0 },  // destinybond
+    { 195, "Perish Song",  0,   0,   0,  5,  0, EFF_NONE,   0 },  // perishsong
+    { 196, "Icy Wind", 14,  55,  95, 15,  0, EFF_NONE,   0 },  // icywind
+    { 197, "Detect",  1,   0,   0,  5,  4, EFF_NONE,   0 },  // detect
+    { 198, "Bone Rush",  4,  25,  90, 10,  0, EFF_NONE,   0 },  // bonerush
+    { 199, "Lock-On",  0,   0,   0,  5,  0, EFF_NONE,   0 },  // lockon
+    { 200, "Outrage", 15, 120, 100, 10,  0, EFF_NONE,   0 },  // outrage
+    { 201, "Sandstorm",  5,   0,   0, 10,  0, EFF_NONE,   0 },  // sandstorm
+    { 202, "Giga Drain", 11,  75, 100, 10,  0, EFF_NONE,   0 },  // gigadrain
+    { 203, "Endure",  0,   0,   0, 10,  4, EFF_NONE,   0 },  // endure
+    { 204, "Charm",  0,   0, 100, 20,  0, EFF_NONE,   0 },  // charm
+    { 205, "Rollout",  5,  30,  90, 20,  0, EFF_NONE,   0 },  // rollout
+    { 206, "False Swipe",  0,  40, 100, 40,  0, EFF_NONE,   0 },  // falseswipe
+    { 207, "Swagger",  0,   0,  85, 15,  0, EFF_NONE,   0 },  // swagger
+    { 208, "Milk Drink",  0,   0,   0,  5,  0, EFF_NONE,   0 },  // milkdrink
+    { 209, "Spark", 12,  65, 100, 20,  0, EFF_NONE,   0 },  // spark
+    { 210, "Fury Cutter",  7,  40,  95, 20,  0, EFF_NONE,   0 },  // furycutter
+    { 211, "Steel Wing", 17,  70,  90, 25,  0, EFF_NONE,   0 },  // steelwing
+    { 212, "Mean Look",  0,   0,   0,  5,  0, EFF_NONE,   0 },  // meanlook
+    { 213, "Attract",  0,   0, 100, 15,  0, EFF_NONE,   0 },  // attract
+    { 214, "Sleep Talk",  0,   0,   0, 10,  0, EFF_NONE,   0 },  // sleeptalk
+    { 215, "Heal Bell",  0,   0,   0,  5,  0, EFF_NONE,   0 },  // healbell
+    { 216, "Return",  0,   0, 100, 20,  0, EFF_NONE,   0 },  // return
+    { 217, "Present",  0,   0,  90, 15,  0, EFF_NONE,   0 },  // present
+    { 218, "Frustration",  0,   0, 100, 20,  0, EFF_NONE,   0 },  // frustration
+    { 219, "Safeguard",  0,   0,   0, 25,  0, EFF_NONE,   0 },  // safeguard
+    { 220, "Pain Split",  0,   0,   0, 20,  0, EFF_NONE,   0 },  // painsplit
+    { 221, "Sacred Fire",  9, 100,  95,  5,  0, EFF_NONE,   0 },  // sacredfire
+    { 222, "Magnitude",  4,   0, 100, 30,  0, EFF_NONE,   0 },  // magnitude
+    { 223, "Dynamic Punch",  1, 100,  50,  5,  0, EFF_NONE,   0 },  // dynamicpunch
+    { 224, "Megahorn",  7, 120,  85, 10,  0, EFF_NONE,   0 },  // megahorn
+    { 225, "Dragon Breath", 15,  60, 100, 20,  0, EFF_NONE,   0 },  // dragonbreath
+    { 226, "Baton Pass",  0,   0,   0, 40,  0, EFF_NONE,   0 },  // batonpass
+    { 227, "Encore",  0,   0, 100,  5,  0, EFF_NONE,   0 },  // encore
+    { 228, "Pursuit", 16,  40, 100, 20,  0, EFF_NONE,   0 },  // pursuit
+    { 229, "Rapid Spin",  0,  50, 100, 40,  0, EFF_NONE,   0 },  // rapidspin
+    { 230, "Sweet Scent",  0,   0, 100, 20,  0, EFF_NONE,   0 },  // sweetscent
+    { 231, "Iron Tail", 17, 100,  75, 15,  0, EFF_NONE,   0 },  // irontail
+    { 232, "Metal Claw", 17,  50,  95, 35,  0, EFF_NONE,   0 },  // metalclaw
+    { 233, "Vital Throw",  1,  70,   0, 10, -1, EFF_NONE,   0 },  // vitalthrow
+    { 234, "Morning Sun",  0,   0,   0,  5,  0, EFF_NONE,   0 },  // morningsun
+    { 235, "Synthesis", 11,   0,   0,  5,  0, EFF_NONE,   0 },  // synthesis
+    { 236, "Moonlight",  0,   0,   0,  5,  0, EFF_NONE,   0 },  // moonlight
+    { 237, "Hidden Power",  0,  60, 100, 15,  0, EFF_NONE,   0 },  // hiddenpower
+    { 238, "Cross Chop",  1, 100,  80,  5,  0, EFF_NONE,   0 },  // crosschop
+    { 239, "Twister", 15,  40, 100, 20,  0, EFF_NONE,   0 },  // twister
+    { 240, "Rain Dance", 10,   0,   0,  5,  0, EFF_NONE,   0 },  // raindance
+    { 241, "Sunny Day",  9,   0,   0,  5,  0, EFF_NONE,   0 },  // sunnyday
+    { 242, "Crunch", 16,  80, 100, 15,  0, EFF_NONE,   0 },  // crunch
+    { 243, "Mirror Coat", 13,   0, 100, 20, -5, EFF_NONE,   0 },  // mirrorcoat
+    { 244, "Psych Up",  0,   0,   0, 10,  0, EFF_NONE,   0 },  // psychup
+    { 245, "Extreme Speed",  0,  80, 100,  5,  2, EFF_NONE,   0 },  // extremespeed
+    { 246, "Ancient Power",  5,  60, 100,  5,  0, EFF_NONE,   0 },  // ancientpower
+    { 247, "Shadow Ball",  8,  80, 100, 15,  0, EFF_NONE,   0 },  // shadowball
+    { 248, "Future Sight", 13, 120, 100, 10,  0, EFF_NONE,   0 },  // futuresight
+    { 249, "Rock Smash",  1,  40, 100, 15,  0, EFF_NONE,   0 },  // rocksmash
+    { 250, "Whirlpool", 10,  35,  85, 15,  0, EFF_NONE,   0 },  // whirlpool
+    { 251, "Beat Up", 16,   0, 100, 10,  0, EFF_NONE,   0 },  // beatup
+    { 252, "Fake Out",  0,  40, 100, 10,  3, EFF_NONE,   0 },  // fakeout
+    { 253, "Uproar",  0,  90, 100, 10,  0, EFF_NONE,   0 },  // uproar
+    { 254, "Stockpile",  0,   0,   0, 20,  0, EFF_NONE,   0 },  // stockpile
+    { 255, "Spit Up",  0,   0, 100, 10,  0, EFF_NONE,   0 },  // spitup
+    { 256, "Swallow",  0,   0,   0, 10,  0, EFF_NONE,   0 },  // swallow
+    { 257, "Heat Wave",  9,  95,  90, 10,  0, EFF_NONE,   0 },  // heatwave
+    { 258, "Hail", 14,   0,   0, 10,  0, EFF_NONE,   0 },  // hail
+    { 259, "Torment", 16,   0, 100, 15,  0, EFF_NONE,   0 },  // torment
+    { 260, "Flatter", 16,   0, 100, 15,  0, EFF_NONE,   0 },  // flatter
+    { 261, "Will-O-Wisp",  9,   0,  85, 15,  0, EFF_NONE,   0 },  // willowisp
+    { 262, "Memento", 16,   0, 100, 10,  0, EFF_NONE,   0 },  // memento
+    { 263, "Facade",  0,  70, 100, 20,  0, EFF_NONE,   0 },  // facade
+    { 264, "Focus Punch",  1, 150, 100, 20, -3, EFF_NONE,   0 },  // focuspunch
+    { 265, "Smelling Salts",  0,  70, 100, 10,  0, EFF_NONE,   0 },  // smellingsalts
+    { 266, "Follow Me",  0,   0,   0, 20,  2, EFF_NONE,   0 },  // followme
+    { 267, "Nature Power",  0,   0,   0, 20,  0, EFF_NONE,   0 },  // naturepower
+    { 268, "Charge", 12,   0,   0, 20,  0, EFF_NONE,   0 },  // charge
+    { 269, "Taunt", 16,   0, 100, 20,  0, EFF_NONE,   0 },  // taunt
+    { 270, "Helping Hand",  0,   0,   0, 20,  5, EFF_NONE,   0 },  // helpinghand
+    { 271, "Trick", 13,   0, 100, 10,  0, EFF_NONE,   0 },  // trick
+    { 272, "Role Play", 13,   0,   0, 10,  0, EFF_NONE,   0 },  // roleplay
+    { 273, "Wish",  0,   0,   0, 10,  0, EFF_NONE,   0 },  // wish
+    { 274, "Assist",  0,   0,   0, 20,  0, EFF_NONE,   0 },  // assist
+    { 275, "Ingrain", 11,   0,   0, 20,  0, EFF_NONE,   0 },  // ingrain
+    { 276, "Superpower",  1, 120, 100,  5,  0, EFF_NONE,   0 },  // superpower
+    { 277, "Magic Coat", 13,   0,   0, 15,  4, EFF_NONE,   0 },  // magiccoat
+    { 278, "Recycle",  0,   0,   0, 10,  0, EFF_NONE,   0 },  // recycle
+    { 279, "Revenge",  1,  60, 100, 10, -4, EFF_NONE,   0 },  // revenge
+    { 280, "Brick Break",  1,  75, 100, 15,  0, EFF_NONE,   0 },  // brickbreak
+    { 281, "Yawn",  0,   0,   0, 10,  0, EFF_NONE,   0 },  // yawn
+    { 282, "Knock Off", 16,  65, 100, 20,  0, EFF_NONE,   0 },  // knockoff
+    { 283, "Endeavor",  0,   0, 100,  5,  0, EFF_NONE,   0 },  // endeavor
+    { 284, "Eruption",  9, 150, 100,  5,  0, EFF_NONE,   0 },  // eruption
+    { 285, "Skill Swap", 13,   0,   0, 10,  0, EFF_NONE,   0 },  // skillswap
+    { 286, "Imprison", 13,   0,   0, 10,  0, EFF_NONE,   0 },  // imprison
+    { 287, "Refresh",  0,   0,   0, 20,  0, EFF_NONE,   0 },  // refresh
+    { 288, "Grudge",  8,   0,   0,  5,  0, EFF_NONE,   0 },  // grudge
+    { 289, "Snatch", 16,   0,   0, 10,  4, EFF_NONE,   0 },  // snatch
+    { 290, "Secret Power",  0,  70, 100, 20,  0, EFF_NONE,   0 },  // secretpower
+    { 291, "Dive", 10,  80, 100, 10,  0, EFF_NONE,   0 },  // dive
+    { 292, "Arm Thrust",  1,  15, 100, 20,  0, EFF_NONE,   0 },  // armthrust
+    { 293, "Camouflage",  0,   0,   0, 20,  0, EFF_NONE,   0 },  // camouflage
+    { 294, "Tail Glow",  7,   0,   0, 20,  0, EFF_NONE,   0 },  // tailglow
+    { 295, "Luster Purge", 13,  95, 100,  5,  0, EFF_NONE,   0 },  // lusterpurge
+    { 296, "Mist Ball", 13,  95, 100,  5,  0, EFF_NONE,   0 },  // mistball
+    { 297, "Feather Dance",  2,   0, 100, 15,  0, EFF_NONE,   0 },  // featherdance
+    { 298, "Teeter Dance",  0,   0, 100, 20,  0, EFF_NONE,   0 },  // teeterdance
+    { 299, "Blaze Kick",  9,  85,  90, 10,  0, EFF_NONE,   0 },  // blazekick
+    { 300, "Mud Sport",  4,   0,   0, 15,  0, EFF_NONE,   0 },  // mudsport
+    { 301, "Ice Ball", 14,  30,  90, 20,  0, EFF_NONE,   0 },  // iceball
+    { 302, "Needle Arm", 11,  60, 100, 15,  0, EFF_NONE,   0 },  // needlearm
+    { 303, "Slack Off",  0,   0,   0,  5,  0, EFF_NONE,   0 },  // slackoff
+    { 304, "Hyper Voice",  0,  90, 100, 10,  0, EFF_NONE,   0 },  // hypervoice
+    { 305, "Poison Fang",  3,  50, 100, 15,  0, EFF_NONE,   0 },  // poisonfang
+    { 306, "Crush Claw",  0,  75,  95, 10,  0, EFF_NONE,   0 },  // crushclaw
+    { 307, "Blast Burn",  9, 150,  90,  5,  0, EFF_NONE,   0 },  // blastburn
+    { 308, "Hydro Cannon", 10, 150,  90,  5,  0, EFF_NONE,   0 },  // hydrocannon
+    { 309, "Meteor Mash", 17,  90,  90, 10,  0, EFF_NONE,   0 },  // meteormash
+    { 310, "Astonish",  8,  30, 100, 15,  0, EFF_NONE,   0 },  // astonish
+    { 311, "Weather Ball",  0,  50, 100, 10,  0, EFF_NONE,   0 },  // weatherball
+    { 312, "Aromatherapy", 11,   0,   0,  5,  0, EFF_NONE,   0 },  // aromatherapy
+    { 313, "Fake Tears", 16,   0, 100, 20,  0, EFF_NONE,   0 },  // faketears
+    { 314, "Air Cutter",  2,  60,  95, 25,  0, EFF_NONE,   0 },  // aircutter
+    { 315, "Overheat",  9, 130,  90,  5,  0, EFF_NONE,   0 },  // overheat
+    { 316, "Odor Sleuth",  0,   0,   0, 40,  0, EFF_NONE,   0 },  // odorsleuth
+    { 317, "Rock Tomb",  5,  60,  95, 15,  0, EFF_NONE,   0 },  // rocktomb
+    { 318, "Silver Wind",  7,  60, 100,  5,  0, EFF_NONE,   0 },  // silverwind
+    { 319, "Metal Sound", 17,   0,  85, 40,  0, EFF_NONE,   0 },  // metalsound
+    { 320, "Grass Whistle", 11,   0,  55, 15,  0, EFF_NONE,   0 },  // grasswhistle
+    { 321, "Tickle",  0,   0, 100, 20,  0, EFF_NONE,   0 },  // tickle
+    { 322, "Cosmic Power", 13,   0,   0, 20,  0, EFF_NONE,   0 },  // cosmicpower
+    { 323, "Water Spout", 10, 150, 100,  5,  0, EFF_NONE,   0 },  // waterspout
+    { 324, "Signal Beam",  7,  75, 100, 15,  0, EFF_NONE,   0 },  // signalbeam
+    { 325, "Shadow Punch",  8,  60,   0, 20,  0, EFF_NONE,   0 },  // shadowpunch
+    { 326, "Extrasensory", 13,  80, 100, 20,  0, EFF_NONE,   0 },  // extrasensory
+    { 327, "Sky Uppercut",  1,  85,  90, 15,  0, EFF_NONE,   0 },  // skyuppercut
+    { 328, "Sand Tomb",  4,  35,  85, 15,  0, EFF_NONE,   0 },  // sandtomb
+    { 329, "Sheer Cold", 14,   0,  30,  5,  0, EFF_NONE,   0 },  // sheercold
+    { 330, "Muddy Water", 10,  90,  85, 10,  0, EFF_NONE,   0 },  // muddywater
+    { 331, "Bullet Seed", 11,  25, 100, 30,  0, EFF_NONE,   0 },  // bulletseed
+    { 332, "Aerial Ace",  2,  60,   0, 20,  0, EFF_NONE,   0 },  // aerialace
+    { 333, "Icicle Spear", 14,  25, 100, 30,  0, EFF_NONE,   0 },  // iciclespear
+    { 334, "Iron Defense", 17,   0,   0, 15,  0, EFF_NONE,   0 },  // irondefense
+    { 335, "Block",  0,   0,   0,  5,  0, EFF_NONE,   0 },  // block
+    { 336, "Howl",  0,   0,   0, 40,  0, EFF_NONE,   0 },  // howl
+    { 337, "Dragon Claw", 15,  80, 100, 15,  0, EFF_NONE,   0 },  // dragonclaw
+    { 338, "Frenzy Plant", 11, 150,  90,  5,  0, EFF_NONE,   0 },  // frenzyplant
+    { 339, "Bulk Up",  1,   0,   0, 20,  0, EFF_NONE,   0 },  // bulkup
+    { 340, "Bounce",  2,  85,  85,  5,  0, EFF_NONE,   0 },  // bounce
+    { 341, "Mud Shot",  4,  55,  95, 15,  0, EFF_NONE,   0 },  // mudshot
+    { 342, "Poison Tail",  3,  50, 100, 25,  0, EFF_NONE,   0 },  // poisontail
+    { 343, "Covet",  0,  60, 100, 25,  0, EFF_NONE,   0 },  // covet
+    { 344, "Volt Tackle", 12, 120, 100, 15,  0, EFF_NONE,   0 },  // volttackle
+    { 345, "Magical Leaf", 11,  60,   0, 20,  0, EFF_NONE,   0 },  // magicalleaf
+    { 346, "Water Sport", 10,   0,   0, 15,  0, EFF_NONE,   0 },  // watersport
+    { 347, "Calm Mind", 13,   0,   0, 20,  0, EFF_NONE,   0 },  // calmmind
+    { 348, "Leaf Blade", 11,  90, 100, 15,  0, EFF_NONE,   0 },  // leafblade
+    { 349, "Dragon Dance", 15,   0,   0, 20,  0, EFF_NONE,   0 },  // dragondance
+    { 350, "Rock Blast",  5,  25,  90, 10,  0, EFF_NONE,   0 },  // rockblast
+    { 351, "Shock Wave", 12,  60,   0, 20,  0, EFF_NONE,   0 },  // shockwave
+    { 352, "Water Pulse", 10,  60, 100, 20,  0, EFF_NONE,   0 },  // waterpulse
+    { 353, "Doom Desire", 17, 140, 100,  5,  0, EFF_NONE,   0 },  // doomdesire
+    { 354, "Psycho Boost", 13, 140,  90,  5,  0, EFF_NONE,   0 },  // psychoboost
 };
-static constexpr uint8_t GEN3_MOVE_COUNT = 165;
+static constexpr uint16_t GEN3_MOVE_COUNT = 354;
 
-inline const Gen1MoveData *gen3Move(uint8_t num) {
-    for (uint8_t i = 0; i < GEN3_MOVE_COUNT; ++i)
+inline const Gen1MoveData *gen3Move(uint16_t num) {
+    for (uint16_t i = 0; i < GEN3_MOVE_COUNT; ++i)
         if (GEN3_MOVES[i].num == num) return &GEN3_MOVES[i];
     return nullptr;
 }

@@ -49,9 +49,12 @@ PUFF_C_DST  = ROOT / "src" / "terminal" / "puff.c"
 PUFF_H_DST  = ROOT / "src" / "terminal" / "puff.h"
 
 # ----------------------------------------------------------------- constants -
-FRONT_W = FRONT_H = 56
-BACK_W  = BACK_H  = 48
+# Store sprites at NATIVE Gen-3 resolution (64x64); the Pi scales 2x at render
+# for bit-perfect nearest-neighbour output. Covers the full national dex to Gen 3.
+FRONT_W = FRONT_H = 64
+BACK_W  = BACK_H  = 64
 PAL_SIZE = 4
+MAXDEX = 386
 
 _G3 = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/versions/generation-iii"
 _G2 = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/versions/generation-ii"
@@ -93,6 +96,10 @@ NAMES = [
     "Aerodactyl", "Snorlax", "Articuno", "Zapdos", "Moltres", "Dratini",
     "Dragonair", "Dragonite", "Mewtwo", "Mew",
 ]
+
+def spname(dex: int) -> str:
+    """Species name for bake logs; 152-386 aren't in NAMES, so fall back to #dex."""
+    return NAMES[dex] if 0 <= dex < len(NAMES) else f"#{dex}"
 
 # --------------------------------------------------------------- download ---
 
@@ -232,11 +239,11 @@ def write_header(path: Path,
                  deflates: list[bytes],
                  title: str):
     flat = bytearray()
-    offsets = [0] * 153
-    for dex in range(152):
+    offsets = [0] * (MAXDEX + 2)
+    for dex in range(MAXDEX + 1):
         offsets[dex] = len(flat)
         flat.extend(deflates[dex])
-    offsets[152] = len(flat)
+    offsets[MAXDEX + 1] = len(flat)
 
     lines = []
     lines.append("// SPDX-License-Identifier: MIT")
@@ -262,7 +269,7 @@ def write_header(path: Path,
         lines.append("    " + ", ".join(f"0x{b:02X}" for b in chunk) + ",")
     lines.append("};")
     lines.append("")
-    lines.append(f"static const uint32_t {off_sym}[153] = {{")
+    lines.append(f"static const uint32_t {off_sym}[{MAXDEX + 2}] = {{")
     for i in range(0, len(offsets), 8):
         chunk = offsets[i:i + 8]
         lines.append("    " + ", ".join(str(v) for v in chunk) + ",")
@@ -331,32 +338,32 @@ def main():
     failed_front    = []
     failed_back     = []
 
-    front_blobs    = [b""] * 152
-    back_blobs     = [b""] * 152
+    front_blobs    = [b""] * (MAXDEX + 1)
+    back_blobs     = [b""] * (MAXDEX + 1)
 
-    for dex in range(1, 152):
+    for dex in range(1, MAXDEX + 1):
         # FRONT
         blob, label = process_one(dex, "front", FRONT_W, FRONT_H)
         if blob is None:
-            failed_front.append((dex, NAMES[dex]))
-            print(f"[front] dex {dex:3d} {NAMES[dex]}: FAILED", file=sys.stderr)
+            failed_front.append((dex, spname(dex)))
+            print(f"[front] dex {dex:3d} {spname(dex)}: FAILED", file=sys.stderr)
         else:
             front_blobs[dex] = blob
             if label != "crystal":
-                fallbacks_front.append((dex, NAMES[dex], label))
-            print(f"[front] dex {dex:3d} {NAMES[dex]:14s} src={label:16s} deflate={len(blob):5d} B",
+                fallbacks_front.append((dex, spname(dex), label))
+            print(f"[front] dex {dex:3d} {spname(dex):14s} src={label:16s} deflate={len(blob):5d} B",
                   file=sys.stderr)
 
         # BACK
         blob, label = process_one(dex, "back", BACK_W, BACK_H)
         if blob is None:
-            failed_back.append((dex, NAMES[dex]))
-            print(f"[back ] dex {dex:3d} {NAMES[dex]}: FAILED", file=sys.stderr)
+            failed_back.append((dex, spname(dex)))
+            print(f"[back ] dex {dex:3d} {spname(dex)}: FAILED", file=sys.stderr)
         else:
             back_blobs[dex] = blob
             if label != "crystal":
-                fallbacks_back.append((dex, NAMES[dex], label))
-            print(f"[back ] dex {dex:3d} {NAMES[dex]:14s} src={label:16s} deflate={len(blob):5d} B",
+                fallbacks_back.append((dex, spname(dex), label))
+            print(f"[back ] dex {dex:3d} {spname(dex):14s} src={label:16s} deflate={len(blob):5d} B",
                   file=sys.stderr)
 
     total_front = write_header(

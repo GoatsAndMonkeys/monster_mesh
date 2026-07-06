@@ -227,8 +227,10 @@ void BattleWindow::drawBackground() {
 
 void BattleWindow::drawFoePlatform() {
     // Foe platform: smaller (perspective).  Centered under foe sprite.
+    // cy lowered 165->182 so a 3× (192px) foe fits under the top edge without
+    // clipping while its feet still rest on the ellipse.
     int cx = 470;
-    int cy = 165;
+    int cy = 182;
     drawShadowEllipse(cx, cy, 110, 18, COL_SHADOW);
 }
 
@@ -243,32 +245,37 @@ void BattleWindow::drawYouPlatform() {
 }
 
 // Sprite zoom — integer multiple so every source pixel becomes an N×N
-// output block (bit-perfect, no blending).  3× = 25% smaller than the
-// previous 4× and frees ~115 px of vertical real estate for a taller
-// message log / FIGHT panel.
-static constexpr int SPRITE_SCALE = 3;
+// output block (bit-perfect, no blending).  3× of native 64 = 192px on the
+// 640×480 GPi panel.  The player rises out of the log box (box drawn over its
+// lower body); the foe sits in open space up top, so it's re-anchored (lower
+// foot + shadow) to keep all 192px on-screen without clipping.
+static constexpr int SPRITE_SCALE = 3;  // native 64 -> 192px, bit-perfect
 
 void BattleWindow::drawFoeSprite() {
-    if (state_.foe.species < 1 || state_.foe.species > 151) return;
+    if (state_.foe.species < 1 || state_.foe.species > 386) return;
     int srcW, srcH;
-    Gen2SpriteCache::dims(false, &srcW, &srcH);  // 56x56
+    Gen2SpriteCache::dims(false, &srcW, &srcH);  // 64x64 native
     SDL_Texture *tex = Gen2SpriteCache::get(renderer_, state_.foe.species, false);
     if (!tex) return;
-    // 3× scale → 168×168.  Anchored so the foot of the sprite sits on the
+    // 2× scale → 128×128 (bit-perfect).  Anchored so the foot of the sprite sits on the
     // platform ellipse, centered horizontally over (470, 165).
     int dstW = srcW * SPRITE_SCALE;
     int dstH = srcH * SPRITE_SCALE;
-    SDL_Rect dst = { 470 - dstW / 2, 165 - dstH + 18, dstW, dstH };
+    // Foot rests on the platform ellipse (cy=182); clamp the top so a tall 3×
+    // sprite never clips above the screen edge.
+    int fy = 182 - dstH + 14;
+    if (fy < 2) fy = 2;
+    SDL_Rect dst = { 470 - dstW / 2, fy, dstW, dstH };
     SDL_RenderCopy(renderer_, tex, nullptr, &dst);
 }
 
 void BattleWindow::drawYouSprite() {
-    if (state_.you.species < 1 || state_.you.species > 151) return;
+    if (state_.you.species < 1 || state_.you.species > 386) return;
     int srcW, srcH;
-    Gen2SpriteCache::dims(true, &srcW, &srcH);  // 48x48
+    Gen2SpriteCache::dims(true, &srcW, &srcH);  // 64x64 native
     SDL_Texture *tex = Gen2SpriteCache::get(renderer_, state_.you.species, true);
     if (!tex) return;
-    // 3× scale → 144×144.
+    // 2× scale → 128×128 (bit-perfect).
     int dstW = srcW * SPRITE_SCALE;
     int dstH = srcH * SPRITE_SCALE;
     SDL_Rect dst = { 200 - dstW / 2, 295 - dstH + 22, dstW, dstH };
