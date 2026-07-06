@@ -42,6 +42,13 @@ enum class PktType : uint8_t {
     TEXT_BATTLE_STATE_REQUEST = 0x6A,
     TEXT_BATTLE_FULL_STATE   = 0x6B,
 
+    // Battle protocol V2: CHALLENGE/ACCEPT carrying the neutral cross-gen
+    // WireParty blob (139 B, see WirePartyCodec.h) instead of the Gen-1-only
+    // 109-B partyMin. New types (not new layouts under the old types) so a
+    // V1 device drops V2 packets instead of parsing garbage stats.
+    TEXT_BATTLE_CHALLENGE_V2 = 0x6D,
+    TEXT_BATTLE_ACCEPT_V2    = 0x6E,
+
     BBS_PING  = 0x70,
     BBS_REPLY = 0x71,
     BBS_FIGHT_REQUEST = 0x72,

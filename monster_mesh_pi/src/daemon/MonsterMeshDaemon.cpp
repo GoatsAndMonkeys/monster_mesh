@@ -2,6 +2,7 @@
 
 #include "MonsterMeshDaemon.h"
 #include "../shared/DaycareData.h"
+#include "WirePartyCodec.h"       // protocol-V2 neutral cross-gen party blob
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -382,14 +383,14 @@ void MonsterMeshDaemon::onMeshPacket(const MeshPacketIn &pkt) {
         // Push updated neighbor list to UI so the user sees them appear
         pushNeighbors();
 
-    } else if (pktType == static_cast<uint8_t>(PktType::TEXT_BATTLE_CHALLENGE)) {
+    } else if (pktType == static_cast<uint8_t>(PktType::TEXT_BATTLE_CHALLENGE_V2)) {
         // BattlePacket layout: [0]=type [1]=sessionHi [2]=sessionLo [3]=seq [4..]=payload
         // CHALLENGE payload (T-Deck serverAuthSendChallenge wire format):
         //   BP.payload[0..3] = targetId (4B BE)
         //   BP.payload[4]    = gen
         //   BP.payload[5]    = nameLen
         //   BP.payload[6..]  = name
-        //   BP.payload[6+n..] = partyMin (109B)
+        //   BP.payload[6+n..] = WireParty (139B, protocol V2)
         // pkt.payload offsets = BP.payload offsets + 4 (BattlePacket header: type,sessionHi,sessionLo,seq)
         if (pkt.payloadLen < 10) return;
 
@@ -404,11 +405,11 @@ void MonsterMeshDaemon::onMeshPacket(const MeshPacketIn &pkt) {
         memcpy(challengerName_, pkt.payload + 10, nameLen);
         challengerName_[nameLen] = '\0';
 
-        // Grab partyMin if present
+        // Grab the WireParty blob if present
         size_t partyOffset = 10 + nameLen;
         hasChallengeParty_ = false;
-        if (partyOffset + TB_PARTY_MIN_BYTES <= pkt.payloadLen) {
-            memcpy(challengePartyMin_, pkt.payload + partyOffset, TB_PARTY_MIN_BYTES);
+        if (partyOffset + TB_WIRE_PARTY_BYTES <= pkt.payloadLen) {
+            memcpy(challengePartyMin_, pkt.payload + partyOffset, TB_WIRE_PARTY_BYTES);
             hasChallengeParty_ = true;
         }
 
@@ -534,7 +535,7 @@ void MonsterMeshDaemon::onMeshPacket(const MeshPacketIn &pkt) {
         LOG_INFO("MonsterMeshDaemon: UPDATE turn=%u seq=%u myHp=%u enemyHp=%u result=%u",
                  (unsigned)turn, (unsigned)seq, (unsigned)myHp, (unsigned)enemyHp, (unsigned)result);
 
-    } else if (pktType == static_cast<uint8_t>(PktType::TEXT_BATTLE_ACCEPT)) {
+    } else if (pktType == static_cast<uint8_t>(PktType::TEXT_BATTLE_ACCEPT_V2)) {
         // Server role: we sent the CHALLENGE, the remote node is sending ACCEPT
         if (!pvpServerMode_ || !pvpAwaitingAccept_) return;
         uint16_t sessionId = ((uint16_t)pkt.payload[1] << 8) | pkt.payload[2];
@@ -560,22 +561,22 @@ void MonsterMeshDaemon::onMeshPacket(const MeshPacketIn &pkt) {
         pvpPeerNodeId_     = pkt.fromNode;
         pvpUpdateSeq_      = 0;
 
-        // Collect partyMin
-        uint8_t partyMinBuf[TB_PARTY_MIN_BYTES] = {};
+        // Collect the WireParty blob
+        uint8_t partyMinBuf[TB_WIRE_PARTY_BYTES] = {};
         int hasParty = 0;
         size_t partyOff = 6 + nameLen;
-        if (partyOff + TB_PARTY_MIN_BYTES <= pkt.payloadLen) {
-            memcpy(partyMinBuf, pkt.payload + partyOff, TB_PARTY_MIN_BYTES);
+        if (partyOff + TB_WIRE_PARTY_BYTES <= pkt.payloadLen) {
+            memcpy(partyMinBuf, pkt.payload + partyOff, TB_WIRE_PARTY_BYTES);
             hasParty = 1;
         }
 
-        // Forward to terminal as JSON with partyMin byte array
-        char jsonBuf[768];
+        // Forward to terminal as JSON with the WireParty byte array
+        char jsonBuf[1024];
         int pos = snprintf(jsonBuf, sizeof(jsonBuf),
             "{\"type\":\"PVP_ACCEPT_RECEIVED\",\"accepted\":1,"
             "\"node_id\":%u,\"trainer\":\"%s\",\"has_party\":%d,\"party_min\":[",
             (unsigned)pkt.fromNode, peerName, hasParty);
-        for (int i = 0; i < TB_PARTY_MIN_BYTES; i++) {
+        for (int i = 0; i < TB_WIRE_PARTY_BYTES; i++) {
             if (i > 0) pos += snprintf(jsonBuf + pos, sizeof(jsonBuf) - pos, ",");
             pos += snprintf(jsonBuf + pos, sizeof(jsonBuf) - pos, "%u", (unsigned)partyMinBuf[i]);
         }
@@ -1206,40 +1207,40 @@ void MonsterMeshDaemon::pushNeighbors() {
 
 // ── PvP helpers ───────────────────────────────────────────────────────────────
 
-// Pack Gen1Party into 109-byte partyMin wire format:
-// 1 byte count + count × 18 bytes (species,level,dvs[2],hpExp[2],atkExp[2],defExp[2],spdExp[2],spcExp[2],moves[4])
-size_t MonsterMeshDaemon::packPartyMin(uint8_t out[TB_PARTY_MIN_BYTES], const Gen1Party &party) {
-    uint8_t count = party.count < 6 ? party.count : 6;
-    out[0] = count;
-    size_t pos = 1;
-    for (uint8_t i = 0; i < count; i++) {
-        const Gen1Pokemon &m = party.mons[i];
-        out[pos++] = m.species;
-        out[pos++] = m.level ? m.level : m.boxLevel;
-        out[pos++] = m.dvs[0];
-        out[pos++] = m.dvs[1];
-        // hpExp, atkExp, defExp, spdExp, spcExp (2 bytes each BE)
-        out[pos++] = m.hpExp[0];  out[pos++] = m.hpExp[1];
-        out[pos++] = m.atkExp[0]; out[pos++] = m.atkExp[1];
-        out[pos++] = m.defExp[0]; out[pos++] = m.defExp[1];
-        out[pos++] = m.spdExp[0]; out[pos++] = m.spdExp[1];
-        out[pos++] = m.spcExp[0]; out[pos++] = m.spcExp[1];
-        out[pos++] = m.moves[0];  out[pos++] = m.moves[1];
-        out[pos++] = m.moves[2];  out[pos++] = m.moves[3];
+// Build our neutral WireParty (protocol V2): the SaveWatcher's Gen-1 party
+// converted via the engine's own stat derivation, or the Pikachu fallback.
+// The SAME bytes go on the wire AND (via the terminal's identical conversion
+// of the same sav) seed the engine, so both sides hash identical parties.
+void MonsterMeshDaemon::buildOurWireParty(Gen1BattleEngine::WireParty &out) {
+    Gen1Party ourParty;
+    if (watcher_.hasParty()) {
+        ourParty = watcher_.party();
+    } else {
+        // Fallback: hardcoded Pikachu Lv30 (ThunderShock/TailWhip/QuickAttack/ThunderWave)
+        memset(&ourParty, 0, sizeof(ourParty));
+        ourParty.count = 1;
+        ourParty.species[0] = 0x54;   // internal index for Pikachu
+        ourParty.mons[0].species   = 0x54;
+        ourParty.mons[0].level     = 30;
+        ourParty.mons[0].boxLevel  = 30;
+        ourParty.mons[0].moves[0]  = 84;  // ThunderShock
+        ourParty.mons[0].moves[1]  = 39;  // TailWhip
+        ourParty.mons[0].moves[2]  = 98;  // QuickAttack
+        ourParty.mons[0].moves[3]  = 86;  // ThunderWave
+        ourParty.mons[0].dvs[0]    = 0xFF; // max DVs
+        ourParty.mons[0].dvs[1]    = 0xFF;
     }
-    // Zero-fill remaining slots
-    while (pos < TB_PARTY_MIN_BYTES) out[pos++] = 0;
-    return TB_PARTY_MIN_BYTES;
+    gen1PartyToWireParty(ourParty, out);
 }
 
 void MonsterMeshDaemon::sendBattleAccept(uint32_t peerNodeId, uint16_t sessionId, bool accepted) {
     if (!mesh_.isOpen()) return;
 
     // Build BattlePacket: type(1)+sessionHi(1)+sessionLo(1)+seq(1)+payload
-    // ACCEPT payload: [0]=accepted [1]=nameLen [2..nameLen+1]=name [nameLen+2..]=partyMin
+    // ACCEPT payload: [0]=accepted [1]=nameLen [2..nameLen+1]=name [nameLen+2..]=WireParty
     uint8_t buf[BATTLELINK_MAX_PKT] = {};
     BattlePacket *pkt = (BattlePacket *)buf;
-    pkt->type = (uint8_t)PktType::TEXT_BATTLE_ACCEPT;
+    pkt->type = (uint8_t)PktType::TEXT_BATTLE_ACCEPT_V2;
     pkt->setSessionId(sessionId);
     pkt->seq = 0;
 
@@ -1251,28 +1252,11 @@ void MonsterMeshDaemon::sendBattleAccept(uint32_t peerNodeId, uint16_t sessionId
     w += nlen;
 
     if (accepted) {
-        // Include our party in partyMin format
-        Gen1Party ourParty;
-        bool hasParty = watcher_.hasParty();
-        if (hasParty) {
-            ourParty = watcher_.party();
-        } else {
-            // Fallback: hardcoded Pikachu Lv30 (moves: ThunderShock=84, TailWhip=39, QuickAttack=98, ThunderWave=86)
-            memset(&ourParty, 0, sizeof(ourParty));
-            ourParty.count = 1;
-            ourParty.species[0] = 0x54;   // internal index for Pikachu
-            ourParty.mons[0].species   = 0x54;
-            ourParty.mons[0].level     = 30;
-            ourParty.mons[0].boxLevel  = 30;
-            ourParty.mons[0].moves[0]  = 84;  // ThunderShock
-            ourParty.mons[0].moves[1]  = 39;  // TailWhip
-            ourParty.mons[0].moves[2]  = 98;  // QuickAttack
-            ourParty.mons[0].moves[3]  = 86;  // ThunderWave
-            ourParty.mons[0].dvs[0]    = 0xFF; // max DVs
-            ourParty.mons[0].dvs[1]    = 0xFF;
-        }
-        packPartyMin(pkt->payload + w, ourParty);
-        w += TB_PARTY_MIN_BYTES;
+        // Include our party as the neutral V2 WireParty blob
+        Gen1BattleEngine::WireParty ourWire;
+        buildOurWireParty(ourWire);
+        packWireParty(ourWire, pkt->payload + w);
+        w += TB_WIRE_PARTY_BYTES;
     }
 
     size_t totalLen = BATTLELINK_HDR_SIZE + w;
@@ -1288,7 +1272,7 @@ void MonsterMeshDaemon::sendBattleChallenge(uint32_t targetNodeId) {
     }
     uint8_t buf[BATTLELINK_MAX_PKT] = {};
     BattlePacket *pkt = (BattlePacket *)buf;
-    pkt->type = (uint8_t)PktType::TEXT_BATTLE_CHALLENGE;
+    pkt->type = (uint8_t)PktType::TEXT_BATTLE_CHALLENGE_V2;
 
     uint16_t session = (uint16_t)((millis() ^ (millis() >> 7)) & 0xFFFF);
     pvpSessionId_      = session;
@@ -1301,38 +1285,23 @@ void MonsterMeshDaemon::sendBattleChallenge(uint32_t targetNodeId) {
     pkt->setSessionId(session);
     pkt->seq = 0;
 
-    // CHALLENGE payload: [0..3]=targetId(BE) [4]=gen [5]=nameLen [6..n-1]=name [6+n..]=partyMin
+    // CHALLENGE payload: [0..3]=targetId(BE) [4]=gen [5]=nameLen [6..n-1]=name [6+n..]=WireParty
     size_t w = 0;
     pkt->payload[w++] = (targetNodeId >> 24) & 0xFF;
     pkt->payload[w++] = (targetNodeId >> 16) & 0xFF;
     pkt->payload[w++] = (targetNodeId >>  8) & 0xFF;
     pkt->payload[w++] =  targetNodeId        & 0xFF;
-    pkt->payload[w++] = 1;  // gen 1
+    pkt->payload[w++] = 3;  // gen-3 mechanics (default)
 
     uint8_t nlen = (uint8_t)strnlen(shortName_, TB_MAX_NAME_LEN);
     pkt->payload[w++] = nlen;
     memcpy(pkt->payload + w, shortName_, nlen);
     w += nlen;
 
-    Gen1Party ourParty;
-    if (watcher_.hasParty()) {
-        ourParty = watcher_.party();
-    } else {
-        memset(&ourParty, 0, sizeof(ourParty));
-        ourParty.count        = 1;
-        ourParty.species[0]   = 0x54;  // Pikachu
-        ourParty.mons[0].species  = 0x54;
-        ourParty.mons[0].level    = 30;
-        ourParty.mons[0].boxLevel = 30;
-        ourParty.mons[0].moves[0] = 84;  // ThunderShock
-        ourParty.mons[0].moves[1] = 39;  // TailWhip
-        ourParty.mons[0].moves[2] = 98;  // QuickAttack
-        ourParty.mons[0].moves[3] = 86;  // ThunderWave
-        ourParty.mons[0].dvs[0]   = 0xFF;
-        ourParty.mons[0].dvs[1]   = 0xFF;
-    }
-    packPartyMin(pkt->payload + w, ourParty);
-    w += TB_PARTY_MIN_BYTES;
+    Gen1BattleEngine::WireParty ourWire;
+    buildOurWireParty(ourWire);
+    packWireParty(ourWire, pkt->payload + w);
+    w += TB_WIRE_PARTY_BYTES;
 
     size_t totalLen = BATTLELINK_HDR_SIZE + w;
     mesh_.sendPacket(targetNodeId, MONSTERMESH_CHANNEL, buf, (uint16_t)totalLen);

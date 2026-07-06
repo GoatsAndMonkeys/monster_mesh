@@ -5,6 +5,7 @@
 #include "TerminalUI.h"
 #include "SpriteRender.h"
 #include "../shared/BattlePacket.h"
+#include "../battle/WirePartyCodec.h"      // protocol-V2 neutral cross-gen party
 #include "../battle/showdown_gen1_moves.h"
 #include "../shared/DaycareSavPatcher.h"   // dexToInternal[] table
 #include "../shared/Gen1BaseExp.h"         // gen1XpYield()
@@ -3936,58 +3937,33 @@ void TerminalUI::parsePvpAccept(const std::string &msg) {
     strncpy(pvpEnemyName_, trainer.c_str(), sizeof(pvpEnemyName_) - 1);
     pvpEnemyName_[sizeof(pvpEnemyName_) - 1] = '\0';
 
-    // Decode foe party from partyMin byte array in the JSON
-    Gen1Party foeParty = {};
+    // Decode the foe's neutral WireParty (protocol V2, 139 B) from the JSON
+    // byte array — national dex + final computed stats + uint16 moves.
+    Gen1BattleEngine::WireParty foeWire = {};
     size_t pos = msg.find("\"party_min\":[");
     if (pos != std::string::npos) {
-        uint8_t partyMin[TB_PARTY_MIN_BYTES] = {};
+        uint8_t blob[TB_WIRE_PARTY_BYTES] = {};
         pos += 13;
-        for (int i = 0; i < TB_PARTY_MIN_BYTES; i++) {
+        for (int i = 0; i < TB_WIRE_PARTY_BYTES; i++) {
             while (pos < msg.size() && (msg[pos] == ' ' || msg[pos] == ',')) pos++;
             if (pos >= msg.size() || msg[pos] == ']') break;
-            partyMin[i] = (uint8_t)atoi(msg.c_str() + pos);
+            blob[i] = (uint8_t)atoi(msg.c_str() + pos);
             while (pos < msg.size() && msg[pos] != ',' && msg[pos] != ']') pos++;
         }
-        uint8_t count = partyMin[0];
-        if (count > 6) count = 6;
-        foeParty.count = count;
-        size_t r = 1;
-        for (uint8_t i = 0; i < count; i++) {
-            if (r + 18 > TB_PARTY_MIN_BYTES) break;
-            foeParty.species[i]         = partyMin[r + 0];
-            foeParty.mons[i].species    = partyMin[r + 0];
-            foeParty.mons[i].level      = partyMin[r + 1];
-            foeParty.mons[i].boxLevel   = partyMin[r + 1];
-            foeParty.mons[i].dvs[0]     = partyMin[r + 2];
-            foeParty.mons[i].dvs[1]     = partyMin[r + 3];
-            foeParty.mons[i].hpExp[0]   = partyMin[r + 4];
-            foeParty.mons[i].hpExp[1]   = partyMin[r + 5];
-            foeParty.mons[i].atkExp[0]  = partyMin[r + 6];
-            foeParty.mons[i].atkExp[1]  = partyMin[r + 7];
-            foeParty.mons[i].defExp[0]  = partyMin[r + 8];
-            foeParty.mons[i].defExp[1]  = partyMin[r + 9];
-            foeParty.mons[i].spdExp[0]  = partyMin[r + 10];
-            foeParty.mons[i].spdExp[1]  = partyMin[r + 11];
-            foeParty.mons[i].spcExp[0]  = partyMin[r + 12];
-            foeParty.mons[i].spcExp[1]  = partyMin[r + 13];
-            foeParty.mons[i].moves[0]   = partyMin[r + 14];
-            foeParty.mons[i].moves[1]   = partyMin[r + 15];
-            foeParty.mons[i].moves[2]   = partyMin[r + 16];
-            foeParty.mons[i].moves[3]   = partyMin[r + 17];
-            for (int m = 0; m < 4; m++) {
-                const Gen1MoveData *md = gen1Move(foeParty.mons[i].moves[m]);
-                foeParty.mons[i].pp[m] = md ? md->pp : 0;
-            }
-            r += 18;
-        }
+        unpackWireParty(blob, foeWire);
     }
 
     // Build Pi's own party (populates party_ and sets inBattle_=true, screen_=BATTLE)
     buildPlayerPartyForBattle();
 
-    // Restart engine against the real foe instead of the random CPU
+    // Restart engine against the real foe instead of the random CPU. Our own
+    // party goes through the SAME Gen1Party -> WireParty conversion the daemon
+    // used for the CHALLENGE blob, so our engine matches what the peer's
+    // engine derived from the wire bytes.
+    Gen1BattleEngine::WireParty myWire = {};
+    gen1PartyToWireParty(party_, myWire, battleGen_);
     uint32_t seed = (uint32_t)(millis() ^ (uint32_t)(uintptr_t)this);
-    engine_.start(party_, foeParty, seed, battleGen_);
+    engine_.start(myWire, foeWire, seed, battleGen_);
     resetBattleParticipants();
 
     // Server-mode battle state

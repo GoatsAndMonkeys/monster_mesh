@@ -2,6 +2,7 @@
 #include "../shared/platform.h"
 #include "../shared/DaycareTypes.h"
 #include "../shared/BattlePacket.h"
+#include "../battle/WirePartyCodec.h"   // WireParty + TB_WIRE_PARTY_BYTES (protocol V2)
 #include "../shared/IpcProtocol.h"
 #include "PokemonDaycare.h"
 #include "MeshSerial.h"
@@ -57,8 +58,8 @@ private:
     uint32_t challengeNodeId_     = 0;
     char     challengerName_[13]  = {};
     uint16_t challengeSessionId_  = 0;       // session ID from the CHALLENGE packet
-    // Server's party (received in CHALLENGE, partyMin format decoded)
-    uint8_t  challengePartyMin_[TB_PARTY_MIN_BYTES] = {};
+    // Server's party (received in CHALLENGE, V2 WireParty blob)
+    uint8_t  challengePartyMin_[TB_WIRE_PARTY_BYTES] = {};
     bool     hasChallengeParty_   = false;
 
     // Active PvP battle state (CLIENT role — T-Deck is server)
@@ -74,7 +75,7 @@ private:
     uint8_t  pvpUpdateSeq_      = 0;
 
     // Pack a Gen1Party into 109-byte partyMin wire format
-    static size_t packPartyMin(uint8_t out[TB_PARTY_MIN_BYTES], const Gen1Party &party);
+    void buildOurWireParty(Gen1BattleEngine::WireParty &out);
 
     // Send a proper TEXT_BATTLE_ACCEPT or DECLINE to the peer
     void sendBattleAccept(uint32_t peerNodeId, uint16_t sessionId, bool accepted);
