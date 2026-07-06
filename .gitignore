@@ -41,3 +41,6 @@ src/mesh/raspihttp/private_key.pem
 
 # Ignore logo (set at build time with platformio-custom.py)
 data/boot/logo.*
+
+# PokeAPI sprite download cache
+monster_mesh_pi/tools/.cache_gen3/

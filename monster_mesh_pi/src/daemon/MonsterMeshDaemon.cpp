@@ -124,6 +124,19 @@ bool MonsterMeshDaemon::init(const char *serialPort, const char *saveDir) {
         }
     });
 
+    // Gen 2/3 saves parse to a neutral WireParty (national dex 152-386) and
+    // have no raw Gen-1 SRAM, so they board the daycare via this path instead.
+    // Events/social run the same; there is no XP write-back to a Gen 2/3 sav.
+    watcher_.setWirePartyCallback(
+        [this](const Gen1BattleEngine::WireParty &wire, uint8_t gen,
+               const char *savPath) {
+            daycare_.checkIn(wire, gen, shortName_, gameName_);
+            pushPartyUpdate();
+            onNodeInfo(mesh_.localNodeId(), shortName_);
+            LOG_INFO("MonsterMeshDaemon: checked in %s (GEN %u, %u Pokemon) from %s",
+                     shortName_, (unsigned)gen, (unsigned)wire.count, savPath);
+        });
+
     if (!watcher_.start(saveDir_)) {
         LOG_WARN("MonsterMeshDaemon: SaveWatcher failed to start for %s", saveDir_);
         // Non-fatal — daemon can run without a SAV file initially

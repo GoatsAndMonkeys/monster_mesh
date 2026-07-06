@@ -1339,6 +1339,18 @@ void TerminalUI::handleButton(const ButtonEvent &ev) {
         return;
     }
 
+    // L/R shoulder buttons cycle the player sprite's colour skin on any battle
+    // screen (Regular→Shiny→Rainbow→Dark→Dark-Shiny→Pink→Dark-Pink). Testing
+    // hook; L/R are unused by battle logic. R = next, L = previous.
+    if (ev.pressed && (ev.button == GpiButton::L || ev.button == GpiButton::R)) {
+        bool onBattle = (screen_ == Screen::BATTLE     || screen_ == Screen::BATTLE_END ||
+                         screen_ == Screen::PVP_BATTLE || screen_ == Screen::PVP_BATTLE_END);
+        if (onBattle) {
+            battleWindow_.cyclePlayerVariant(ev.button == GpiButton::R ? +1 : -1);
+            return;
+        }
+    }
+
     switch (screen_) {
         case Screen::MENU:          menuButton(ev);         break;
         case Screen::PARTY:         partyButton(ev);        break;
@@ -1483,6 +1495,7 @@ void TerminalUI::challengeButton(const ButtonEvent &ev) {
                 strncpy(pvpEnemyName_, challengerName_, sizeof(pvpEnemyName_) - 1);
                 pvpMyHp_ = pvpMyMaxHp_ = pvpEnemyHp_ = pvpEnemyMaxHp_ = 0;
                 pvpTurn_ = pvpResult_ = 0;
+                pvpXpAwarded_ = false;    // re-arm the once-per-battle XP award
                 pvpMoveSel_ = 0;
                 pvpLog_.clear();
                 memset(pvpMyPp_, 35, 4);  // default PP until first UPDATE
@@ -2161,6 +2174,42 @@ void TerminalUI::flushBattleXpToDaemon() {
         // The detailed per-slot summary is printed when the daemon replies
         // with SAV_WRITEBACK -- no need to announce anything here.
     }
+}
+
+// Award result-based XP after a mesh (PvP) battle so BOTH sides earn,
+// independent of which device ran the engine.  In server-auth PvP only the
+// engine-running side accrues sessionXp_ via runTurnWithXp(); the client role
+// (this Pi accepted a T-Deck's challenge) never runs turns, so without this it
+// would earn nothing.  Formula: base = opponentAvgLevel * (won ? 6 : 2),
+// clamped >=1, added to each surviving Gen-1 party slot's sessionXp_, then
+// flushed to the daemon for the normal SAV writeback.  Fires once per battle.
+void TerminalUI::awardPvpResultXp() {
+    if (pvpXpAwarded_) return;
+    pvpXpAwarded_ = true;
+
+    const bool won = (pvpResult_ == 1);   // 1=win, 2=lose, 3=draw
+
+    // Opponent average level.  The client role doesn't receive the foe's
+    // per-mon levels over the wire, so use our own party's average level as a
+    // proxy (teams are level-matched in practice).
+    int sum = 0, n = 0;
+    for (int i = 0; i < partyCount_ && i < 6; i++) {
+        uint8_t lv = partySlots_[i].level;
+        if (lv) { sum += lv; n++; }
+    }
+    uint8_t oppLv = n ? (uint8_t)(sum / n) : 10;
+
+    uint32_t base = (uint32_t)oppLv * (won ? 6u : 2u);
+    if (base < 1) base = 1;
+
+    bool any = false;
+    for (int i = 0; i < partyCount_ && i < 6; i++) {
+        uint8_t dex = partySlots_[i].dex;
+        if (dex < 1 || dex > 151) continue;   // Gen-1 species only
+        sessionXp_[i] += base;
+        any = true;
+    }
+    if (any) flushBattleXpToDaemon();
 }
 
 // ── Menu actions ──────────────────────────────────────────────────────────────
@@ -3921,6 +3970,10 @@ void TerminalUI::parseBattleUpdate(const std::string &msg) {
     // Check for battle end
     if (pvpResult_ != 0 && pvpResult_ != 0xFF) {
         screen_ = Screen::PVP_BATTLE_END;
+        // Award result-based XP once, then persist to the SAV.  The client role
+        // never accrued sessionXp_ during the fight, so this is the only place
+        // it earns anything from a mesh battle.
+        awardPvpResultXp();
     }
 }
 

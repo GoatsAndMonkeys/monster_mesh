@@ -247,6 +247,9 @@ bool SaveWatcher::loadSav(const char *path) {
             currentSav_[sizeof(currentSav_) - 1] = '\0';
             LOG_INFO("SaveWatcher: loaded %s as GEN %u save (%u Pokemon, wire party)",
                      path, (unsigned)gen, (unsigned)wcount);
+            // Notify the daemon so a Gen 2/3 team can board the daycare
+            // (national-dex species 152-386). Gen-1 uses cb_ (below).
+            if (cbWire_) cbWire_(wireParty_, gen, path);
             return true;
         }
     }

@@ -8,6 +8,7 @@
 #include "../shared/DaycareEventGen.h"
 #include "../shared/DaycareAchievements.h"
 #include "../shared/DaycareSavPatcher.h"
+#include "../battle/Gen1BattleEngine.h"   // Gen1BattleEngine::WireParty (Gen 2/3 check-in)
 
 // ── Daycare manager ──────────────────────────────────────────────────────────
 
@@ -27,6 +28,14 @@ public:
     // Legacy check-in for tests (no SRAM)
     void checkIn(const uint8_t *partySpeciesDex, const uint8_t *partyLevels,
                  const char nicknames[][11], uint8_t count,
+                 const char *shortName, const char *gameName);
+
+    // Gen 2/3 check-in from a neutral WireParty (national-dex species 1-386,
+    // final stats already computed by the save reader). No nicknames on the
+    // wire, so events fall back to the species name. XP write-back to the Gen
+    // 2/3 save is not supported (no writer yet) — daycare simulates + fires
+    // events, but checkOut() must not patch a Gen 2/3 sav.
+    void checkIn(const Gen1BattleEngine::WireParty &wire, uint8_t gen,
                  const char *shortName, const char *gameName);
 
     // Check out — writes XP/levels back to SRAM and fixes checksum

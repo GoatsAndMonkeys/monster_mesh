@@ -104,6 +104,10 @@ void BattleWindow::close() {
 
 void BattleWindow::setState(const State &s) { state_ = s; }
 
+void BattleWindow::cyclePlayerVariant(int dir) {
+    youVariant_ = (youVariant_ + dir + Gen2SpriteCache::VAR_COUNT) % Gen2SpriteCache::VAR_COUNT;
+}
+
 void BattleWindow::pumpEvents() {
     if (!window_) return;
     SDL_Event ev;
@@ -273,7 +277,8 @@ void BattleWindow::drawYouSprite() {
     if (state_.you.species < 1 || state_.you.species > 386) return;
     int srcW, srcH;
     Gen2SpriteCache::dims(true, &srcW, &srcH);  // 64x64 native
-    SDL_Texture *tex = Gen2SpriteCache::get(renderer_, state_.you.species, true);
+    SDL_Texture *tex = Gen2SpriteCache::get(renderer_, state_.you.species, true,
+                                            youVariant_, animPhase_);
     if (!tex) return;
     // 2× scale → 128×128 (bit-perfect).
     int dstW = srcW * SPRITE_SCALE;
@@ -554,6 +559,15 @@ void BattleWindow::drawEndOverlay() {
 
 void BattleWindow::render() {
     if (!renderer_) return;
+
+    // Advance the Rainbow scroll ~every 90ms (matches the T-Deck cadence), so
+    // the animation speed is independent of the main-loop frame rate.
+    if (youVariant_ == Gen2SpriteCache::VAR_RAINBOW ||
+        youVariant_ == Gen2SpriteCache::VAR_DARK_RAINBOW) {
+        static uint32_t lastPhaseMs = 0;
+        uint32_t now = SDL_GetTicks();
+        if (now - lastPhaseMs >= 90) { animPhase_ = (uint16_t)((animPhase_ + 1) % 360); lastPhaseMs = now; }
+    }
 
     // Letterbox bars (visible when the window's aspect != 4:3 thanks to
     // SDL_RenderSetIntegerScale) paint white too, so the whole window reads

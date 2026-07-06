@@ -10,6 +10,11 @@
 class SaveWatcher {
 public:
     using PartyCallback = std::function<void(const Gen1Party &party, const char *savPath)>;
+    // Fired when the newest save parsed as Gen 2/3 (neutral WireParty form,
+    // national-dex species 1-386). Gen-1 saves use PartyCallback above.
+    using WirePartyCallback =
+        std::function<void(const Gen1BattleEngine::WireParty &wire, uint8_t gen,
+                           const char *savPath)>;
 
     SaveWatcher();
     ~SaveWatcher();
@@ -20,6 +25,7 @@ public:
     void stop();
 
     void setPartyCallback(PartyCallback cb) { cb_ = cb; }
+    void setWirePartyCallback(WirePartyCallback cb) { cbWire_ = cb; }
 
     // Poll for changes. Returns true if party was updated.
     bool poll();
@@ -62,6 +68,7 @@ private:
     bool    hasWireParty_ = false;
     uint8_t savGen_       = 1;
     PartyCallback cb_;
+    WirePartyCallback cbWire_;
 
     bool scanAndLoad();
     bool loadSav(const char *path);

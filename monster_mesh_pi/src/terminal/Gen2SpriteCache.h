@@ -1,34 +1,33 @@
 #pragma once
 // ── Gen2SpriteCache ──────────────────────────────────────────────────────────
-// Lazy on-demand SDL texture cache for the deflate-compressed 4-color Gen 2
-// (Crystal) sprite blobs.  First time a (dex, isBack) pair is requested:
-//   1. puff()-decode the 2bpp packed buffer
-//   2. expand to RGBA32, painting palette index 0 as fully transparent and
-//      indexes 1..3 with the species's RGB565 -> RGB888 entries
-//   3. upload to an SDL_Texture and return it
-// Cache hits skip all of that and just return the cached texture.
+// Lazy on-demand SDL texture cache for the 4bpp-indexed Gen 3 sprite blobs
+// (Gen3Front4bpp.h / Gen3Back4bpp.h), with colour VARIANTS:
+//   Regular, Shiny, Rainbow (animated), Dark, Dark-Shiny, Pink.
+// Regular/Shiny/Dark/Dark-Shiny/Pink pick or recolour a palette and are cached
+// per (dex, isBack, variant). Rainbow scrolls, so it is regenerated per frame
+// into a persistent dynamic texture (front/back) rather than cached.
 //
-// Front sprites are 56x56, back sprites are 48x48.  Caller scales via the
-// destination rect in SDL_RenderCopy.
+// Sprites are 64x64 native. Caller scales via the destination rect.
 
 #include <SDL.h>
 #include <stdint.h>
 
 namespace Gen2SpriteCache {
 
-// Initialise — clears the cache.  Safe to call multiple times.
-void init();
+// Colour variants — order matches the T-Deck firmware's SPR_* enum.
+enum {
+    VAR_NORMAL = 0, VAR_SHINY, VAR_RAINBOW, VAR_DARK, VAR_DARK_SHINY, VAR_PINK,
+    VAR_DARK_PINK, VAR_DARK_RAINBOW,
+    VAR_COUNT
+};
 
-// Throw away every cached texture (call before destroying the renderer).
-void clear();
+void init();                 // clear the cache; safe to call repeatedly
+void clear();                // destroy every cached/dynamic texture
+void dims(bool isBack, int *outW, int *outH);   // 64x64
 
-// Width/height of the texture this dex+isBack pair will produce.
-// (56 front, 48 back.)
-void dims(bool isBack, int *outW, int *outH);
-
-// Fetch a texture for (dex, isBack) — decodes + uploads on first call,
-// caches forever.  Returns nullptr on decode failure or invalid dex.
-// `renderer` is required for first-time creation; cache hits ignore it.
-SDL_Texture *get(SDL_Renderer *renderer, int dex, bool isBack);
+// Fetch a texture for (dex, isBack, variant). `phase` (0..359) animates the
+// Rainbow variant; ignored otherwise. Returns nullptr on failure/invalid dex.
+SDL_Texture *get(SDL_Renderer *renderer, int dex, bool isBack,
+                 int variant = VAR_NORMAL, uint16_t phase = 0);
 
 }  // namespace Gen2SpriteCache

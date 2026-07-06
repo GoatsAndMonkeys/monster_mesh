@@ -243,6 +243,9 @@ private:
     uint8_t  pvpTurn_       = 0;
     uint8_t  pvpResult_     = 0;   // 0=ongoing,1=win,2=lose,3=draw
     bool     pvpNeedSwitch_ = false;
+    // Fires the result-based PvP XP award exactly once per battle. Reset at
+    // PvP battle start; set the first time the battle reaches PVP_BATTLE_END.
+    bool     pvpXpAwarded_  = false;
     char     pvpEnemyName_[13] = {};
     std::vector<std::string> pvpLog_;
     int      pvpMoveSel_    = 0;
@@ -373,6 +376,11 @@ private:
     // CREDIT_XP commands and then ask it to writeback to the SAV file.
     // Resets sessionXp_ so the next run starts from zero.
     void flushBattleXpToDaemon();
+
+    // Result-based PvP XP award (client role). Both mesh-battle sides earn XP
+    // regardless of which one ran the engine: each surviving Gen-1 party mon
+    // gets XP = opponentAvgLevel * (won ? 6 : 2). Idempotent via pvpXpAwarded_.
+    void awardPvpResultXp();
     int         tabItemCount(int tab) const;
     const char **tabItems(int tab) const;
     const char **tabDescs(int tab) const;

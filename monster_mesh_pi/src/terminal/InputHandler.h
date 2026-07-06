@@ -12,6 +12,8 @@ enum class GpiButton : uint8_t {
     Y,      // top face button    (BTN_NORTH) — boss key
     START,  // open command menu
     SELECT, // toggle help
+    L,      // left shoulder  (BTN_TL) — cycle sprite skin (prev)
+    R,      // right shoulder (BTN_TR) — cycle sprite skin (next)
     NONE
 };
 

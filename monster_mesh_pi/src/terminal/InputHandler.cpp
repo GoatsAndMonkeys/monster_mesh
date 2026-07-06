@@ -73,6 +73,12 @@
 #ifndef BTN_NORTH
 #define BTN_NORTH       0x133   // Y face button (top)
 #endif
+#ifndef BTN_TL
+#define BTN_TL          0x136   // left shoulder
+#endif
+#ifndef BTN_TR
+#define BTN_TR          0x137   // right shoulder
+#endif
 #endif  // __linux__
 
 InputHandler::InputHandler() {}
@@ -143,6 +149,8 @@ GpiButton InputHandler::mapKeyCode(int code)
         case KEY_SPACE:     return GpiButton::START;
         case BTN_SELECT:
         case KEY_LEFTSHIFT: return GpiButton::SELECT;
+        case BTN_TL:        return GpiButton::L;   // left shoulder — cycle skin (prev)
+        case BTN_TR:        return GpiButton::R;   // right shoulder — cycle skin (next)
         default:            return GpiButton::NONE;
     }
 #else

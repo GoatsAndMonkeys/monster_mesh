@@ -112,6 +112,54 @@ void PokemonDaycare::checkIn(const uint8_t *partySpeciesDex,
     state_.lastBeaconMs = 0;
 }
 
+// ── Gen 2/3 check-in from a neutral WireParty ───────────────────────────────
+// Species arrive as national dex (1-386); no nicknames on the wire (events
+// fall back to the species name). savExp stays 0 — Gen 2/3 level-ups are
+// tracked via totalXpGained, and the Gen-1 SAV patcher never runs on a Gen
+// 2/3 file (SaveWatcher exposes no raw sav for it), so no XP write-back.
+
+void PokemonDaycare::checkIn(const Gen1BattleEngine::WireParty &wire,
+                              uint8_t gen,
+                              const char *shortName, const char *gameName) {
+    if (!loadState() || state_.magic != DaycareState::MAGIC) {
+        init();
+    }
+
+    uint8_t count = wire.count > 6 ? 6 : wire.count;
+    state_.partyCount = count;
+    for (uint8_t i = 0; i < count; i++) {
+        uint16_t dex = wire.mons[i].species;
+        if (state_.pokemon[i].speciesDex != dex) {
+            state_.pokemon[i] = {};
+            state_.pokemon[i].speciesDex = dex;
+        }
+        state_.pokemon[i].savLevel = wire.mons[i].level;
+        state_.pokemon[i].savExp   = 0;   // no Gen 2/3 exp write-back
+
+        // No nicknames on the wire — getDisplayName() falls back to the
+        // species name from DaycareData.
+        state_.pokemon[i].nickname[0] = '\0';
+
+        // Wire moves are national move ids (1-354); store the low byte so the
+        // Gen-1 move table stays valid for Gen-1 mons and Gen 2/3 mons just
+        // display generically.
+        for (uint8_t m = 0; m < 4; m++)
+            state_.pokemon[i].moves[m] = (uint8_t)wire.mons[i].moves[m];
+
+        state_.pokemon[i].mood = MOOD_CONTENT;
+    }
+
+    strncpy(shortName_, shortName, 4);
+    shortName_[4] = '\0';
+    strncpy(gameName_, gameName, 7);
+    gameName_[7] = '\0';
+
+    active_ = true;
+    state_.lastEventMs = millis();
+    state_.lastBeaconMs = 0;
+    (void)gen;
+}
+
 // ── Check out — write XP back to SRAM ───────────────────────────────────────
 
 void PokemonDaycare::checkOut(uint8_t *sram) {
@@ -179,6 +227,7 @@ void PokemonDaycare::runEventCycle(uint32_t nowMs) {
         state_.pokemon[i].totalHours++;
     }
 
+    DaycareEventGen::setLocalTrainer(shortName_, gameName_);
     DaycareEvent evt = DaycareEventGen::generate(
         state_.pokemon, state_.partyCount,
         neighbors_, neighborCount_,

@@ -84,7 +84,14 @@ public:
         const char *localShortName = "",
         const char *localGameName  = "");
 
+    // Local trainer identity for retagging social-event remoteMessage from the
+    // partner's perspective (our mon gets our tag, theirs becomes "your X").
+    static void setLocalTrainer(const char *shortName, const char *gameName);
+
 private:
+    static char s_localShort[8];
+    static char s_localGame[8];
+
     static bool tryEscape(DaycareEvent &out,
         const DaycarePokemonState *localParty, uint8_t localPartyCount);
     static void generateWeatherEvent(DaycareEvent &out,
