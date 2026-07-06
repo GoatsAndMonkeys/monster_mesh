@@ -152,7 +152,7 @@ void Gen1BattleEngine::initBattlePokeFromSave(BattlePoke &dst,
     dst.hp    = be16(src.hp);
     if (dst.hp == 0 || dst.hp > dst.maxHp) dst.hp = dst.maxHp;
 
-    memcpy(dst.moves, src.moves, 4);
+    for (int _k = 0; _k < 4; ++_k) dst.moves[_k] = src.moves[_k];
     memcpy(dst.pp,    src.pp,    4);
     dst.status = src.status;
 }
@@ -186,7 +186,7 @@ void Gen1BattleEngine::initBattlePokeFromBase(BattlePoke &dst,
         dst.spc   = calcStat(b.spc, 8, 0, level, false);
     }
     dst.hp    = dst.maxHp;
-    memcpy(dst.moves, moves, 4);
+    for (int _k = 0; _k < 4; ++_k) dst.moves[_k] = moves[_k];
     for (int i = 0; i < 4; ++i) {
         const Gen1MoveData *m = (gen >= 3 ? gen3Move(moves[i]) : gen1Move(moves[i]));
         dst.pp[i] = m ? m->pp : 0;
@@ -220,6 +220,77 @@ void Gen1BattleEngine::start(const Gen1Party &p1, const Gen1Party &p2,
     };
     initSide(0, p1);
     initSide(1, p2);
+}
+
+void Gen1BattleEngine::start(const WireParty &p1, const WireParty &p2,
+                             uint32_t rngSeed, uint8_t gen)
+{
+    rng_ = rngSeed; gen_ = gen; turn_ = 0; result_ = Result::ONGOING;
+    pendAction_[0] = pendAction_[1] = 0xFF;
+
+    s_[0] = rngSeed ? rngSeed : 0xDEADBEEFu;
+    s_[1] = rotl32(s_[0], 7)  ^ 0x9E3779B9u;
+    s_[2] = rotl32(s_[1], 13) ^ 0x85EBCA77u;
+    s_[3] = rotl32(s_[2], 17) ^ 0xC2B2AE3Du;
+
+    auto initSide = [&](uint8_t side, const WireParty &pty) {
+        BattleParty &bp = p_[side];
+        memset(&bp, 0, sizeof(bp));
+        bp.count = pty.count > MAX_PARTY ? MAX_PARTY : pty.count;
+        for (uint8_t i = 0; i < bp.count; ++i)
+            initBattlePokeFromWire(bp.mons[i], pty.mons[i], gen_);
+        bp.active = 0;
+    };
+    initSide(0, p1);
+    initSide(1, p2);
+}
+
+void Gen1BattleEngine::initBattlePokeFromWire(BattlePoke &dst, const WireMon &src,
+                                              uint8_t gen)
+{
+    memset(&dst, 0, sizeof(dst));
+    initSentinelFields(dst);
+    dst.species = src.species;
+    dst.level   = src.level;
+    // Final stats verbatim — each save reader computed them for its own gen.
+    dst.maxHp = src.maxHp;
+    dst.hp    = src.maxHp;
+    dst.atk = src.atk; dst.def = src.def; dst.spd = src.spe;
+    dst.spaG3 = src.spa; dst.spdG3 = src.spd;
+    dst.spc   = src.spa;   // gen-1 mode uses spc for both specials
+    if (gen >= 3) {
+        const Gen3BaseStats &g = GEN3_BASE_STATS[src.species < 387 ? src.species : 0];
+        dst.type1 = g.type1; dst.type2 = g.type2;
+    } else {
+        const Gen1BaseStats &b = GEN1_BASE_STATS[src.species < 152 ? src.species : 0];
+        dst.type1 = b.type1; dst.type2 = b.type2;
+    }
+    for (int i = 0; i < 4; ++i) {
+        dst.moves[i] = src.moves[i];
+        const Gen1MoveData *m = (gen >= 3 ? gen3Move(src.moves[i]) : gen1Move(src.moves[i]));
+        dst.pp[i] = m ? m->pp : 0;
+    }
+    // Nickname = species name (Gen-1 table covers 1-151; else "#dex").
+    uint8_t internal = (dst.species < 152) ? dexToInternal[dst.species] : 0;
+    const char *sp = internal ? gen1SpeciesName(internal) : nullptr;
+    if (sp) {
+        uint8_t w = 0;
+        while (sp[w] && w < 10) { dst.nickname[w] = sp[w]; ++w; }
+        dst.nickname[w] = 0;
+    } else {
+        snprintf(dst.nickname, sizeof(dst.nickname), "#%u", (unsigned)dst.species);
+    }
+}
+
+void Gen1BattleEngine::battlePokeToWireMon(const BattlePoke &src, WireMon &out)
+{
+    out.species = src.species;
+    out.level   = src.level;
+    out.maxHp = src.maxHp;
+    out.atk = src.atk; out.def = src.def; out.spe = src.spd;  // engine spd = Speed
+    out.spa = src.spaG3 ? src.spaG3 : src.spc;
+    out.spd = src.spdG3 ? src.spdG3 : src.spc;
+    for (int i = 0; i < 4; ++i) out.moves[i] = src.moves[i];
 }
 
 void Gen1BattleEngine::replaceOpponent(const Gen1Party &p)
@@ -694,14 +765,14 @@ void Gen1BattleEngine::useMove(uint8_t side, uint8_t moveSlot, LogSink log, void
         user.origType2   = user.type2;
         user.origAtk = user.atk; user.origDef = user.def;
         user.origSpd = user.spd; user.origSpc = user.spc;
-        memcpy(user.origMoves, user.moves, 4);
+        memcpy(user.origMoves, user.moves, sizeof(user.moves));
         memcpy(user.origPp,    user.pp,    4);
         // Copy.
         user.species = t.species;
         user.type1   = t.type1;
         user.type2   = t.type2;
         user.atk = t.atk; user.def = t.def; user.spd = t.spd; user.spc = t.spc;
-        memcpy(user.moves, t.moves, 4);
+        memcpy(user.moves, t.moves, sizeof(user.moves));
         for (uint8_t i = 0; i < 4; ++i) user.pp[i] = 5;
         emit(log, ctx, "[POKEMON] transformed!", user.nickname);
     }
@@ -1017,7 +1088,7 @@ static void clearVolatile(Gen1BattleEngine::BattlePoke &m)
         m.type1   = m.origType1;
         m.type2   = m.origType2;
         m.atk = m.origAtk; m.def = m.origDef; m.spd = m.origSpd; m.spc = m.origSpc;
-        memcpy(m.moves, m.origMoves, 4);
+        memcpy(m.moves, m.origMoves, sizeof(m.moves));
         memcpy(m.pp,    m.origPp,    4);
         m.transformed = false;
     }
@@ -1153,11 +1224,11 @@ void Gen1BattleEngine::hashState(uint8_t out[8]) const
         for (int i = 0; i < p_[s].count; ++i) {
             const BattlePoke &m = p_[s].mons[i];
             // Permanent-but-mutable stats (level-up + Transform rewrite these).
-            mix(&m.species, 1); mix(&m.level, 1);
+            mix(&m.species, 2); mix(&m.level, 1);
             mix(&m.type1, 1);   mix(&m.type2, 1);
             mix(&m.maxHp, 2);
             mix(&m.atk, 2); mix(&m.def, 2); mix(&m.spd, 2); mix(&m.spc, 2);
-            mix(m.moves, 4);
+            mix(m.moves, 8);
             // Live combat state.
             mix(&m.hp, 2); mix(&m.status, 1);
             mix(&m.sleepTurns, 1); mix(&m.confuseTurns, 1);
@@ -1183,7 +1254,7 @@ void Gen1BattleEngine::hashState(uint8_t out[8]) const
             mix(&m.substituteHp, 2);
             mix(&m.lastDamageTaken, 2);
             mix(&m.mimicSlot, 1);
-            mix(&m.mimicOrigMove, 1);
+            mix(&m.mimicOrigMove, 2);
             mix(&m.mimicOrigPp, 1);
             mix(m.pp, 4);
         }
