@@ -4,6 +4,7 @@
 
 #include "TerminalUI.h"
 #include "SpriteRender.h"
+#include "Gen2SpriteCache.h"              // VAR_* colour skin enum (rare-catch rolls)
 #include "../shared/BattlePacket.h"
 #include "../battle/WirePartyCodec.h"      // protocol-V2 neutral cross-gen party
 #include "../battle/showdown_gen1_moves.h"
@@ -399,6 +400,9 @@ void TerminalUI::pentestAutoTick() {
     if (!inBattle_ || screen_ != Screen::BATTLE) return;
     if (now - lastPentestTurnMs_ < PENTEST_TURN_MS) return;
     lastPentestTurnMs_ = now;
+
+    // Rare-colour foe: throw Poke Balls instead of attacking once it's weakened.
+    if (pentestTryCatchTick()) return;
 
     switchMode_ = false;
     uint8_t pa, pi, ca, ci;
@@ -2686,7 +2690,7 @@ void TerminalUI::pentestScanNetworks() {
         for (auto &d : pentestDoneSsids_) if (d == displaySsid) { skip = true; break; }
         for (auto &n : pentestNets_)      if (n.ssid == displaySsid) { skip = true; break; }
         if (skip) continue;
-        pentestNets_.push_back({ displaySsid, vuln });
+        pentestNets_.push_back({ displaySsid, vuln, bssid ? bssid : "" });
     }
     pclose(f);
     // Supplement WiFi results with BLE advertisement detections.  Non-fatal
@@ -2715,15 +2719,17 @@ void TerminalUI::pentestBleScan() {
         if (strstr(line, "4c 00") || strstr(line, "4C 00")) appleHits++;
     }
     pclose(f);
+    // BLE detections have no BSSID — leave it empty so pentestPickTarget()
+    // synthesises a stable seed from the label instead.
     if (advLines >= BLE_FLOOD_THRESH)
         pentestNets_.push_back({ "BLE_Flood",
-            "BLE advertisement flood (Flipper/spammer)" });
+            "BLE advertisement flood (Flipper/spammer)", "" });
     if (appleHits >= APPLE_PROX_THRESH)
         pentestNets_.push_back({ "BLE_AppleProx",
-            "Apple BLE proximity spam (AirDrop/Handoff)" });
+            "Apple BLE proximity spam (AirDrop/Handoff)", "" });
     else if (appleHits >= 1)
         pentestNets_.push_back({ "BLE_AppleiBeacon",
-            "Apple BLE adv detected (iBeacon/device nearby)" });
+            "Apple BLE adv detected (iBeacon/device nearby)", "" });
 #endif
 }
 
@@ -3274,6 +3280,11 @@ bool TerminalUI::pentestPickTarget() {
         int pick = rand() % (int)pentestNets_.size();
         snprintf(pentestSsid_, sizeof(pentestSsid_), "%s", pentestNets_[pick].ssid.c_str());
         snprintf(pentestVuln_, sizeof(pentestVuln_), "%s", pentestNets_[pick].vuln.c_str());
+        // Seed the colour roll with the real MAC when we have one; otherwise
+        // fall back to the SSID so the network still maps to a stable colour.
+        snprintf(pentestBssid_, sizeof(pentestBssid_), "%s",
+                 pentestNets_[pick].bssid.empty() ? pentestNets_[pick].ssid.c_str()
+                                                  : pentestNets_[pick].bssid.c_str());
         pentestDoneSsids_.push_back(pentestNets_[pick].ssid);   // don't refight this sweep
         pentestNets_.erase(pentestNets_.begin() + pick);
         return true;
@@ -3311,6 +3322,16 @@ bool TerminalUI::pentestPickTarget() {
     snprintf(pentestSsid_, sizeof(pentestSsid_), "%s", SSIDS[pick]);
     snprintf(pentestVuln_, sizeof(pentestVuln_), "%s",
              VULNS[rand() % (int)(sizeof(VULNS)/sizeof(VULNS[0]))]);
+    // Demo mode has no real MAC — synthesise a stable pseudo-BSSID from the
+    // SSID so each demo network still maps deterministically to a colour.
+    {
+        uint32_t h = 2166136261u;
+        for (const char *s = SSIDS[pick]; *s; ++s) { h ^= (uint8_t)*s; h *= 16777619u; }
+        snprintf(pentestBssid_, sizeof(pentestBssid_),
+                 "%02X:%02X:%02X:%02X:%02X:%02X",
+                 (h >> 0) & 0xFF, (h >> 8) & 0xFF, (h >> 16) & 0xFF,
+                 (h >> 24) & 0xFF, (h >> 4) & 0xFF, (h >> 12) & 0xFF);
+    }
     return true;
 }
 
@@ -3327,6 +3348,118 @@ void TerminalUI::pentestEnterStandby() {
 // Pentest Pikachu ROM: a self-contained Pikachu-vs-zone battle that doesn't
 // depend on a loaded SAV.  Pikachu starts at L5 and climbs through the Kanto
 // zones, fighting the Pokemon of the area it's currently in.
+// ── Rare-colour roll ─────────────────────────────────────────────────────────
+// Colour roll out of 16384: Shiny 4 (1/4096), Pink 3, Rainbow 1; Dark is a
+// separate 1/1024 draw that stacks with the colour (Dark-Shiny / Pink / Rainbow).
+int TerminalUI::rollRareColor(const char *bssid, uint8_t species) {
+    using namespace Gen2SpriteCache;
+    // Deterministic: the colour is decided by a 64-bit FNV-1a hash of the
+    // network's MAC address mixed with the species.  A given AP therefore
+    // always produces the same colour for the same mon — the network's own
+    // identity is what makes it shiny/pink/rainbow/dark, not chance.  Two
+    // disjoint slices of the hash give the (independent) colour and dark rolls.
+    uint64_t h = 1469598103934665603ull;               // FNV-1a offset basis
+    for (const char *s = bssid ? bssid : ""; *s; ++s) { // mix the MAC
+        h ^= (uint8_t)*s; h *= 1099511628211ull;
+    }
+    h ^= species; h *= 1099511628211ull;               // mix the species
+    h ^= (h >> 33);                                     // final avalanche
+
+#ifdef PENTEST_RARE_TEST
+    // TEST ONLY: make rares common so the catch flow is observable.  Still
+    // deterministic per (MAC, species) — just with far wider rare buckets.
+    static const int kTest[] = { VAR_SHINY, VAR_PINK, VAR_RAINBOW, VAR_DARK,
+                                 VAR_DARK_SHINY, VAR_DARK_PINK, VAR_DARK_RAINBOW };
+    if ((h & 1) == 0) return kTest[(h >> 1) % 7];       // ~50% a rare colour
+    return VAR_NORMAL;
+#endif
+    uint32_t c = (uint32_t)(h % 16384);                 // colour roll
+    int color = VAR_NORMAL;
+    if      (c < 4) color = VAR_SHINY;      // 4/16384 = 1/4096
+    else if (c < 7) color = VAR_PINK;       // 3/16384
+    else if (c < 8) color = VAR_RAINBOW;    // 1/16384
+    if (((h >> 20) % 1024) == 0) {          // independent Dark draw ~1/1024
+        switch (color) {
+            case VAR_SHINY:   return VAR_DARK_SHINY;
+            case VAR_PINK:    return VAR_DARK_PINK;
+            case VAR_RAINBOW: return VAR_DARK_RAINBOW;
+            default:          return VAR_DARK;
+        }
+    }
+    return color;
+}
+
+static const char *rareColorName(int v) {
+    using namespace Gen2SpriteCache;
+    switch (v) {
+        case VAR_SHINY:        return "Shiny";
+        case VAR_PINK:         return "Pink";
+        case VAR_RAINBOW:      return "Rainbow";
+        case VAR_DARK:         return "Dark";
+        case VAR_DARK_SHINY:   return "Dark Shiny";
+        case VAR_DARK_PINK:    return "Dark Pink";
+        case VAR_DARK_RAINBOW: return "Dark Rainbow";
+        default:              return "";
+    }
+}
+
+static const char *pentestRarePath() {
+#ifdef __APPLE__
+    return "/tmp/monstermesh/rare_catches.dat";
+#else
+    return "/var/lib/monstermesh/rare_catches.dat";
+#endif
+}
+
+// Persist one caught rare (dex, colour variant, level) by appending to a file.
+void TerminalUI::pentestSaveRareCatch(uint8_t dex, uint8_t variant, uint8_t level) {
+    FILE *f = fopen(pentestRarePath(), "ab");
+    if (!f) return;
+    uint8_t rec[3] = { dex, variant, level };
+    fwrite(rec, 1, sizeof(rec), f);
+    fclose(f);
+}
+
+// Auto-tick hook: if the foe is a rare colour, Pikachu fights it down to <=60%
+// HP then throws Poke Balls (skipping the attack) until it's caught. Returns
+// true when it handled the tick.
+bool TerminalUI::pentestTryCatchTick() {
+    if (!inPentestBattle_ || pentestFoeVariant_ == Gen2SpriteCache::VAR_NORMAL) return false;
+    Gen1BattleEngine::BattleParty &ep = engine_.party(1 - localSide_);
+    if (ep.count == 0 || ep.active >= ep.count) return false;
+    Gen1BattleEngine::BattlePoke &foe = ep.mons[ep.active];
+    if (foe.hp == 0 || foe.maxHp == 0) return false;
+
+    if (!pentestCatching_) {
+        if ((uint32_t)foe.hp * 5 > (uint32_t)foe.maxHp * 3) return false;   // >60% HP: keep fighting
+        pentestCatching_ = true;
+        char line[80];
+        snprintf(line, sizeof(line), "A %s %s! Pikachu throws a Poke Ball!",
+                 rareColorName(pentestFoeVariant_), dexName(foe.species));
+        battleLog_.push_back(line);
+    }
+
+    // Catch chance rises as HP drops (45%% at 60%% HP up to 92%% near 0). We stop
+    // attacking once catching, so a rare is always caught eventually — no KO.
+    int hpPct  = (int)((uint32_t)foe.hp * 100 / foe.maxHp);
+    int chance = 100 - hpPct;
+    if (chance < 45) chance = 45;
+    if (chance > 92) chance = 92;
+    if ((rand() % 100) < chance) {
+        char line[80];
+        snprintf(line, sizeof(line), "Gotcha! The %s %s was caught!",
+                 rareColorName(pentestFoeVariant_), dexName(foe.species));
+        battleLog_.push_back(line);
+        pentestRareCaught_++;
+        pentestSaveRareCatch(foe.species, (uint8_t)pentestFoeVariant_, foe.level);
+        battleResult_ = Gen1BattleEngine::Result::P1_WIN;   // reuse the end/linger flow
+        screen_ = Screen::BATTLE;
+    } else {
+        battleLog_.push_back("Aww! It broke free!");
+    }
+    return true;
+}
+
 void TerminalUI::startPentestBattle() {
     if (inPentestBattle_) {
         // Carry the Pikachu's level + partial XP forward from the just-ended
@@ -3512,6 +3645,12 @@ void TerminalUI::startPentestBattle() {
         pentestBattleGym_ = isLeader ? gIdx : 255;
     }
     pentestMarkSeen(wildDex);                          // log to the Pokedex
+
+    // Roll this encounter's colour skin. Rare colours (non-Regular) get caught
+    // with a Poke Ball once Pikachu weakens them, not just defeated.  Seeded by
+    // the target's MAC + species, so this AP always shows the same colour here.
+    pentestFoeVariant_ = rollRareColor(pentestBssid_, wildDex);
+    pentestCatching_   = false;
 
     uint8_t wildInternal = dexToInternal[wildDex];
     Gen1Party wild = {};
@@ -4829,6 +4968,8 @@ void TerminalUI::syncBattleWindow() {
     s.foe.maxHp   = em.maxHp;
     s.foe.status  = em.status;
     s.foe.confused = (em.confuseTurns > 0);
+    // Rare-coloured foe (pentest encounters roll a colour skin).
+    s.foe.variant = (inPentestBattle_ || pentestStandby_) ? (uint8_t)pentestFoeVariant_ : 0;
     snprintf(s.foe.nickname, sizeof(s.foe.nickname), "%s", em.nickname);
 
     s.you.species = pm.species;

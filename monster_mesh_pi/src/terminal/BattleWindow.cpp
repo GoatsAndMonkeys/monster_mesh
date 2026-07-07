@@ -259,7 +259,8 @@ void BattleWindow::drawFoeSprite() {
     if (state_.foe.species < 1 || state_.foe.species > 386) return;
     int srcW, srcH;
     Gen2SpriteCache::dims(false, &srcW, &srcH);  // 64x64 native
-    SDL_Texture *tex = Gen2SpriteCache::get(renderer_, state_.foe.species, false);
+    SDL_Texture *tex = Gen2SpriteCache::get(renderer_, state_.foe.species, false,
+                                            state_.foe.variant, animPhase_);
     if (!tex) return;
     // 2× scale → 128×128 (bit-perfect).  Anchored so the foot of the sprite sits on the
     // platform ellipse, centered horizontally over (470, 165).
@@ -569,8 +570,9 @@ void BattleWindow::render() {
 
     // Advance the Rainbow scroll ~every 90ms (matches the T-Deck cadence), so
     // the animation speed is independent of the main-loop frame rate.
-    if (youVariant_ == Gen2SpriteCache::VAR_RAINBOW ||
-        youVariant_ == Gen2SpriteCache::VAR_DARK_RAINBOW) {
+    auto animatedV = [](int v) { return v == Gen2SpriteCache::VAR_RAINBOW ||
+                                        v == Gen2SpriteCache::VAR_DARK_RAINBOW; };
+    if (animatedV(youVariant_) || animatedV(state_.foe.variant)) {
         static uint32_t lastPhaseMs = 0;
         uint32_t now = SDL_GetTicks();
         if (now - lastPhaseMs >= 90) { animPhase_ = (uint16_t)((animPhase_ + 1) % 360); lastPhaseMs = now; }

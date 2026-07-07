@@ -413,6 +413,18 @@ private:
     uint32_t pentestWins_       = 0;      // lifetime W/L tally (persisted)
     uint32_t pentestLosses_     = 0;
     bool     pentestTallied_    = false;  // guard: count each battle's W/L once
+    // Rare-colour catching: each pentest foe rolls a colour skin; if it's a
+    // rare (non-Regular) colour, Pikachu throws Poke Balls once it's weakened.
+    int      pentestFoeVariant_ = 0;      // Gen2SpriteCache::VAR_* of the current foe
+    bool     pentestCatching_   = false;  // switched from fighting to ball-throwing
+    uint32_t pentestRareCaught_ = 0;      // lifetime rare catches (persisted)
+    char     pentestBssid_[18]  = {};     // MAC of the current target (seeds the roll)
+    // Deterministic colour: hash(MAC + species) picks the skin, so a given AP
+    // always yields the same colour for the same species — the network's own
+    // "identity" decides whether it's shiny/pink/rainbow/dark.
+    int      rollRareColor(const char *bssid, uint8_t species);
+    bool     pentestTryCatchTick();       // returns true if it handled the tick
+    void     pentestSaveRareCatch(uint8_t dex, uint8_t variant, uint8_t level);
     uint8_t  pentestGymBeaten_  = 0;      // bitset of gym leaders defeated
                                           // (drives zone unlock + next leader)
     uint8_t  pentestBattleGym_  = 255;    // gym idx of the current fight (255=wild)
@@ -425,7 +437,7 @@ private:
     bool     pentestExitStartFirst_ = false; // true = START was pressed first
     void     pentestResetProgress();      // wipe save + restart a fresh L5 run
     // ── Real WiFi targeting (Pikachu only fights vulnerable networks) ──
-    struct PentestNet { std::string ssid; std::string vuln; };
+    struct PentestNet { std::string ssid; std::string vuln; std::string bssid; };
     std::vector<PentestNet>  pentestNets_;       // vulnerable APs in range, not yet cracked
     std::vector<std::string> pentestDoneSsids_;  // SSIDs already cracked this session
     bool     pentestStandby_       = false;  // waiting for a vulnerable network

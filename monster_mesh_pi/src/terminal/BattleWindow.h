@@ -32,6 +32,7 @@ public:
         char     nickname[12] = {};
         uint8_t  status   = 0;   // Gen-1 status byte (SLP/PSN/BRN/FRZ/PAR)
         bool     confused = false;  // volatile confusion (not in the status byte)
+        uint8_t  variant  = 0;   // Gen2SpriteCache::VAR_* — colour skin (rare foes)
     };
 
     struct MoveView {
