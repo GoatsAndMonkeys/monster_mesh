@@ -111,6 +111,15 @@ Your team's genetics are an open book; a wild sighting gives nothing away.
 | **Rainbow** (incomplete dominance) | `Rr` = **Pink** | **Visible** — the carrier just *is* Pink |
 | **Dark** (dosage) | `Dd` = **Dark** | **Visible** — one allele already shows as Dark |
 
+### Bred mons come with a genetic report
+
+Any Pokémon you **breed** is blood-sampled at hatch and ships with a **full genetic
+report** automatically — every allele known (colors, defect carriers, provenance).
+You bred it, so its genotype is on file. **Wild** catches are the unknowns: they
+show only their visible phenotype until you run a **blood test** on them. So a
+breeder always knows exactly what their bred stock carries, and blood-tests wild
+imports before pairing them in.
+
 ## Breeding
 
 Wild odds are the *starting* population; once you have rares, breeding is Mendelian.
@@ -141,6 +150,64 @@ Wild odds are the *starting* population; once you have rares, breeding is Mendel
 To reach **Blackout-Rainbow**, breed a Rainbow line *and* a Blackout line together
 and stack both — the rarest genotype in the game.
 
+## Birth defects & breeding stock (recessive defects)
+
+Separate from the cosmetic genes, mons carry hidden **defect genes** — recessive
+alleles that only bite when homozygous. Managing clean stock (not just stacking
+rares) is what makes a careful breeder.
+
+**Three defects**, each its own locus, healthy allele dominant. Each defect allele
+sits at ~**1/4** frequency, so a mon is homozygous ("double defect") for a given
+one at **(1/4)² = 1/16**:
+
+| Defect | Gene | `xx` (double) effect | Alive? | Can fight? | Can breed? |
+|---|---|---|---|---|---|
+| **Sterile** | `B/b` | can't breed | ✅ | ✅ | ❌ |
+| **Can't-fight** | `F/f` | can't battle | ✅ | ❌ | ✅ *(unless also `bb`)* |
+| **No-hatch** | `H/h` | egg never hatches | ❌ | — | — |
+
+Heterozygous carriers (`Bb`/`Ff`/`Hh`) are **healthy and common** — they hide the
+defect and pass it on. A mon can carry all three.
+
+### What you actually see in the wild
+
+Because a wild encounter *is a battle*, each defect self-selects who can show up:
+
+- **No-hatch (`hh`)** — never hatched → **never alive**, so never in the wild.
+- **Can't-fight (`ff`)** — alive but can't battle → **never in an encounter**; you
+  can't catch one wild, only breed one.
+- **Sterile (`bb`)** — lives and fights fine → **CAN appear wild**, at ~**1/16**.
+  Rare but possible: you *can* catch a sterile mon, it just can't breed.
+
+That last one is the heartbreak: catch a **Wild Rainbow**, blood-test it, and it's
+`bb` — **sterile**. Battle-ready and gorgeous, but a genetic dead-end.
+
+Roles fall out of the combos: `ff` alone = **breeding-only** stock (daycare use,
+useless in battle); `bb` alone = **battle/display only** (a dead-end line); `ff bb`
+= alive but good for nothing.
+
+### The breeding hazard
+
+A double defect appears when **both parents carry the same one** (`xX × xX`):
+
+| Cross (one defect) | Offspring |
+|---|---|
+| `Bb × Bb` | 25% affected · 50% carrier · 25% clean |
+| `Bb × BB` | 0% affected — all healthy (half carriers) |
+| `BB × BB` | 0% affected — clean line |
+
+So the breeder's job is to pair mons that **don't share a carried defect**, read off
+the **genetics blood test** (`Bb` — Sterile carrier, etc.). Share `Hh` and 25% of
+eggs simply won't hatch; share `Ff` and a quarter of the clutch can't fight.
+
+### Why this is the real trap for IBL
+
+Driving a line to **true-breeding (IBL)** to lock in a rare color also risks
+homozygosing any defect that hitched along. The master breeder builds a line that
+is **homozygous for its rare trait AND clean of every defect** — genuine
+inbreeding-depression management. A deep bred line is powerful, but only as clean as
+the breeder was careful.
+
 ## The real biology it teaches
 
 | Concept | In MonsterMesh | Real-world example |
@@ -151,9 +218,54 @@ and stack both — the rarest genotype in the game.
 | **Carrier frequency** | ~1/32 carriers vs ~1/4096 visible shiny (`2pq ≫ q²`) | sickle-cell / CF carriers |
 | **Epistasis** | the rainbow gene *masks* Shiny (only shows on `RR`) | albino `cc` hiding coat color |
 | **Hardy-Weinberg** | wild odds derived from allele frequencies | any population at equilibrium |
+| **Lethal recessive** | no-hatch `hh` egg never hatches; wild carriers only | yellow mouse `A^y`, Manx `M` |
+| **Selection filter** | `ff`/`hh` never appear wild; `bb` sterile can | why affected genotypes vanish from a population |
+| **Inbreeding depression** | IBL lines surface hidden defects | purebred dogs, royal hemophilia |
 
-### Future lessons (planned)
+## Provenance tag (display-only)
+
+Every mon carries a small **provenance tag** shown in two places — the **terminal
+Pokémon view** and the **breeding screen** — so you can tell a *natural* rare from
+a *bred* one at a glance. It's purely informational (no gameplay effect); it just
+records how the mon came to be, using real breeding notation:
+
+| Tag | Meaning |
+|---|---|
+| **Wild** | Caught in the wild / from Pentest Pikachu — the RNG/MAC-hash gave it to you (luck) |
+| **F1, F2, F3…** | Bred (filial) — Fn = n generations of crosses. Rainbow first appears in **F2** |
+| **S1, S2…** | Bred by **selfing** a single mon (drives toward true-breeding) |
+| **BX1…BXn** | **Backcross** — a rare trait dragged onto a line; `BX4` ≈ 97% one parent line |
+| **IBL** | True-breeding line (homozygous for its rare trait — breeds 100% true) |
+
+**How it's derived** (when breeding lands): `Wild` = generation 0. Offspring of
+A × B tag as `F(max(gen)+1)` for sibling-type crosses, `S(n+1)` when a mon is bred
+with itself, and `BX(n+1)` when crossing back to a parent's own lineage. `IBL`
+shows once a mon is confirmed homozygous for its rare allele.
+
+The point: a **Wild Rainbow** (a 1-in-4-million fluke) and a **BX4 Rainbow** (you
+*engineered* a line that pumps them out) look identical but flex differently — one
+is luck, the other is skill.
+
+## What makes a mon valuable
+
+There's no single "best" mon — value splits across **independent axes**, and they
+often conflict. That's the whole collecting/trading meta:
+
+| Axis | Prized because | Example |
+|---|---|---|
+| **Flashy** | cosmetic rarity | Wild Rainbow, Blackout, Shiny |
+| **Lucky** | natural `Wild` provenance — found, not built | a 1-in-4M Wild Rainbow |
+| **Clean stock** | blood-tests free of all defects (`BB FF HH`) | plain mon, but prime foundation |
+| **Breeding workhorse** | fertile + clean + homozygous for a rare | an `IBL` Rainbow that breeds true |
+| **Pedigree piece** | a valuable step in a program | a `BX1`/`S1` carrying the right genes |
+| **Battle-grade** | can fight (`not ff`) + good stats | a battle-ready line member |
+
+The conflicts are the point: a gorgeous **Wild Rainbow** may be `bb` **sterile** —
+perfect to flex, useless to breed. Your ugliest plain wild catch may be the
+**cleanest foundation stock** you own. A `ff` mon is battle-trash but fine breeding
+stock. A trader weighs **what a mon is *for*** — not just how rare it looks.
+
+## Future lessons (planned)
 
 - **Codominance** on Shiny — both alleles show *at once* (not blended). Like blood type AB.
 - **Sex-linkage** on a color — expresses differently by gender. Like calico cats.
-- **Lethal allele** on Rainbow — `rr × rr` occasionally fails to hatch. Like yellow mice / Manx cats.
