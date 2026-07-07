@@ -28,20 +28,51 @@ three levels — none, **Dark** (one dark allele), **Blackout** (two):
 
 | Gene | Alleles | Mode | Rare allele `q` |
 |---|---|---|---|
-| **Rainbow** | `R` / `r` | incomplete dominance (`Rr` = **Pink**) | `r` = 1/2048 |
+| **Rainbow** | `R` / `r` (**X-linked**) | incomplete dominance (`Rr` = **Pink**), expressed **♀ only** | `r` = 1/1024 |
 | **Shiny** | `S` / `s` | recessive (hidden carrier) | `s` = 1/64 |
 | **Dark** | `d` / `D` | **dosage** (`Dd` = Dark, `DD` = Blackout) | `D` = ~1/8192 |
 
-### Rainbow gene — Pink is the *visible* carrier
+The Rainbow gene sits on the **X chromosome** (calico-style), so only **females**
+can *show* Pink or Rainbow. Shiny and Dark are autosomal (either sex).
 
-Incomplete dominance: one rainbow allele already shows, as **Pink**. Two makes
-**Rainbow**. So Pink literally *is* the rainbow carrier — nothing hidden here.
+### Rainbow gene — X-linked, females only
+
+On the X chromosome, incomplete dominance. **Females (XX)** carry two copies and
+express it; **males (XY)** carry one and never *show* it — they're silent carriers.
+With `r` = 1/1024:
+
+**Females** (per-female rates):
 
 | Genotype | Frequency | Phenotype |
 |---|---|---|
-| `r r` | (1/2048)² ≈ **1/4,194,304** | **Rainbow** |
-| `R r` | 2·(2047/2048)·(1/2048) ≈ **1/1,024** | **Pink** (visible carrier) |
-| `R R` | ≈ 99.9% | not pink/rainbow → Shiny gene decides |
+| `Xʳ Xʳ` | (1/1024)² ≈ **1/1,048,576** | **Rainbow** |
+| `Xᴿ Xʳ` | ≈ **1/512** | **Pink** (visible carrier) |
+| `Xᴿ Xᴿ` | ≈ 99.8% | not pink/rainbow → Shiny gene decides |
+
+**Males** — `Xᴿ Y` = Regular, `Xʳ Y` = **hidden carrier** (looks Regular, ~1/1024
+of males, passes `r` to every daughter). Across the whole population (half female),
+that works out to **Pink ≈ 1/1024** and **Rainbow ≈ 1/2.1M**.
+
+This is **criss-cross inheritance**: a Rainbow mother's `r` hides in her sons and
+resurfaces as Pink/Rainbow in her granddaughters — exactly how calico coats and
+hemophilia travel.
+
+#### Why only half the clutch can be Pink/Rainbow
+
+Just like **calico cats are almost always female**, Pink and Rainbow live on the X
+chromosome — so a **male can only ever *carry* the color, never show it.** That
+puts a hard ceiling on breeding:
+
+- Every **son** comes out Regular-looking (a hidden carrier at best), no matter how
+  you pair the parents.
+- Only **daughters** can be Pink or Rainbow.
+- Since roughly **half of any clutch is male**, **at most half your offspring can be
+  Pink/Rainbow** — the male half is simply off the table.
+
+So even the "best" cross (a Rainbow mother × a carrier father) yields **100% of
+*daughters* Rainbow but 0% of sons** — meaning ~50% of the *whole* clutch. To build
+a Rainbow line you're always breeding *through* those invisible carrier sons to get
+back to showable daughters — the classic calico headache.
 
 ### Shiny gene — the *hidden* carrier
 
@@ -73,21 +104,22 @@ color. Dark itself stays ~1/4096, same as Shiny.
 
 | Skin | ≈ 1 in |
 |---|---|
-| **Pink** | **1,024** |
+| **Pink** ♀ | **1,024** |
 | Shiny | 4,096 |
 | Dark | 4,096 |
-| Rainbow | 4,194,304 |
-| Dark-Pink | 4,194,304 |
+| Rainbow ♀ | ~2,097,152 (~2.1M) |
+| Dark-Pink ♀ | 4,194,304 |
 | Dark-Shiny | 16,777,216 |
 | **Blackout** | **67,108,864** (~67M) |
-| Blackout-Pink | ~6.9 × 10¹⁰ (~69 billion) |
-| Dark-Rainbow | ~1.7 × 10¹⁰ (~17 billion) |
+| Blackout-Pink ♀ | ~6.9 × 10¹⁰ (~69 billion) |
+| Dark-Rainbow ♀ | ~8.6 × 10⁹ (~8.6 billion) |
 | Blackout-Shiny | ~2.7 × 10¹¹ (~275 billion) |
-| **Blackout-Rainbow** | **~2.8 × 10¹⁴** (~281 trillion — the crown) |
+| **Blackout-Rainbow** ♀ | **~1.4 × 10¹⁴** (~140 trillion — the crown) |
 
-Pink is the common gateway. Everything from Rainbow / Blackout down is a
-multi-million-to-one wild fluke — **you breed for them**, you don't find them.
-Blackout-Rainbow (double-dark + double-rainbow) is effectively breeding-only.
+♀ = Pink/Rainbow only appear on **females** (X-linked); rates shown are
+population-wide (≈2× that among females). Pink is the common gateway. Everything
+from Rainbow / Blackout down is a multi-million-to-one wild fluke — **you breed for
+them**. Blackout-Rainbow is effectively breeding-only.
 
 > In Pentest Pikachu the color isn't a per-encounter roll — it's a deterministic
 > hash of the **network's MAC address + species**, so a given AP always shows the
@@ -108,7 +140,8 @@ Your team's genetics are an open book; a wild sighting gives nothing away.
 | Gene | Carrier | In the wild |
 |---|---|---|
 | **Shiny** (recessive) | `Ss`, ~1/32 | **Hidden** — looks Regular; only the blood test reveals it |
-| **Rainbow** (incomplete dominance) | `Rr` = **Pink** | **Visible** — the carrier just *is* Pink |
+| **Rainbow** ♀ (X-linked) | `Xᴿ Xʳ` = **Pink** | **Visible** — a female carrier just *is* Pink |
+| **Rainbow** ♂ (X-linked) | `Xʳ Y` | **Hidden** — a male carrier looks Regular; blood-test to find |
 | **Dark** (dosage) | `Dd` = **Dark** | **Visible** — one allele already shows as Dark |
 
 ### Bred mons come with a genetic report
@@ -124,13 +157,19 @@ imports before pairing them in.
 
 Wild odds are the *starting* population; once you have rares, breeding is Mendelian.
 
-**Rainbow** — pair visibly-Pink carriers to reveal the recessive `rr`:
+**Rainbow** — X-linked, so only **daughters** can be Pink/Rainbow, and you need a
+carrier **father** (hidden — blood-test males to find one):
 
-| Cross | Offspring |
-|---|---|
-| Pink × Pink (`Rr × Rr`) | 25% (Reg/Shiny) · **50% Pink** · **25% Rainbow** |
-| Rainbow × Regular (`rr × RR`) | **100% Pink** |
-| Rainbow × Rainbow (`rr × rr`) | **100% Rainbow** |
+| Cross | Daughters | Sons |
+|---|---|---|
+| Pink♀ × carrier♂ (`XᴿXʳ × XʳY`) | 50% Pink · **50% Rainbow** | ½ hidden carrier |
+| Pink♀ × Regular♂ (`XᴿXʳ × XᴿY`) | 50% Pink · 50% Regular | ½ hidden carrier |
+| Rainbow♀ × carrier♂ (`XʳXʳ × XʳY`) | **100% Rainbow** | all carriers |
+| Rainbow♀ × Regular♂ (`XʳXʳ × XᴿY`) | **100% Pink** | all carriers |
+
+The catch: a Rainbow father is impossible (males never express it), so the `r` you
+need always rides in on a **hidden male carrier** — the reason blood-testing your
+studs matters.
 
 **Shiny** — pair two hidden carriers for the classic surprise:
 
@@ -221,6 +260,7 @@ the breeder was careful.
 | **Lethal recessive** | no-hatch `hh` egg never hatches; wild carriers only | yellow mouse `A^y`, Manx `M` |
 | **Selection filter** | `ff`/`hh` never appear wild; `bb` sterile can | why affected genotypes vanish from a population |
 | **Inbreeding depression** | IBL lines surface hidden defects | purebred dogs, royal hemophilia |
+| **X-linkage** | Pink/Rainbow show on ♀ only; ♂ carry silently | calico cats, hemophilia |
 
 ## Provenance tag (display-only)
 
@@ -275,4 +315,4 @@ breeding stock. Prestige tracks **what a mon can *do***, not just how rare it lo
 ## Future lessons (planned)
 
 - **Codominance** on Shiny — both alleles show *at once* (not blended). Like blood type AB.
-- **Sex-linkage** on a color — expresses differently by gender. Like calico cats.
+- **Lethal dominant** or **maternal (mitochondrial) inheritance** — a trait passed only from the mother.
