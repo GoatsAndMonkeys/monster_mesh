@@ -249,21 +249,28 @@ is luck, the other is skill.
 ## What makes a mon valuable
 
 There's no single "best" mon — value splits across **independent axes**, and they
-often conflict. That's the whole collecting/trading meta:
+often conflict. Cosmetic rarity is only one axis, and **on its own it's the
+*lowest* rung**: a **fancy** mon that can't fight or breed is a **display piece** —
+think **fancy goldfish**, bred purely for looks with none of the hardiness. It
+still has a use (collection, showing off), just not much prestige. Real value comes
+from **viability**; the true trophies are the ones that are cosmetically rare *and*
+battle- or breeding-viable.
 
 | Axis | Prized because | Example |
 |---|---|---|
-| **Flashy** | cosmetic rarity | Wild Rainbow, Blackout, Shiny |
+| **Fancy (display)** | rare look, but a collectible only if it can't fight/breed | a sterile `ff` Wild Rainbow (a "fancy goldfish") |
 | **Lucky** | natural `Wild` provenance — found, not built | a 1-in-4M Wild Rainbow |
 | **Clean stock** | blood-tests free of all defects (`BB FF HH`) | plain mon, but prime foundation |
 | **Breeding workhorse** | fertile + clean + homozygous for a rare | an `IBL` Rainbow that breeds true |
 | **Pedigree piece** | a valuable step in a program | a `BX1`/`S1` carrying the right genes |
 | **Battle-grade** | can fight (`not ff`) + good stats | a battle-ready line member |
+| **The whole package** | cosmetically rare **and** viable | a fertile, battle-ready **IBL Rainbow** |
 
-The conflicts are the point: a gorgeous **Wild Rainbow** may be `bb` **sterile** —
-perfect to flex, useless to breed. Your ugliest plain wild catch may be the
-**cleanest foundation stock** you own. A `ff` mon is battle-trash but fine breeding
-stock. A trader weighs **what a mon is *for*** — not just how rare it looks.
+The conflicts are the point: a gorgeous **Wild Rainbow** that's `bb` **sterile** is
+*just* a display piece — pretty, but a dead-end. Your ugliest plain wild catch may
+be the **cleanest foundation stock** you own. A `ff` mon is battle-trash but fine
+breeding stock. Prestige tracks **what a mon can *do***, not just how rare it looks
+— and the crown jewel is the rare skin that's *also* a viable fighter or breeder.
 
 ## Future lessons (planned)
 
