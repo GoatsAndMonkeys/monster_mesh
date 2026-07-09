@@ -1,0 +1,143 @@
+COLOR VARIANTS — DISCORD POST (terminal-wrapped, ~120 cols)
+Post the three code blocks below back-to-back; they read as one continuous document. Each is under Discord's 2000-char
+limit. Copy everything between the ``` fences (including the fences) for each part. NOTE: at ~120 wide these will scroll
+horizontally on the Discord mobile app; they look best on desktop.
+
+============================================================================================================================
+PART 1
+============================================================================================================================
+```
+🧬 COLOR VARIANTS — ODDS & GENETICS
+
+MonsterMesh Pokémon come in 12 color skins + a hidden Shiny Carrier (13 genotypes). Shiny stays game-authentic (1/4096);
+the rest is derived from three genes.
+
+🎨 THE 12 SKINS  (4 colors × 3 dark-dosage levels)
+
+          Normal    Dark(Dd)       Blackout(DD)
+Regular   Regular   Dark           Blackout
+Shiny     Shiny     Dark-Shiny     Blackout-Shiny
+Pink      Pink      Dark-Pink      Blackout-Pink
+Rainbow   Rainbow   Dark-Rainbow   Blackout-Rainbow
+
+Dark = greyscale body, accent kept. Blackout = black "Who's-That-Pokémon" silhouette. Rainbow = animated diagonal rainbow.
+
+🔬 THE THREE GENES
+
+Gene     Alleles          Mode
+Rainbow  R/r (X-linked)   incomplete dominance, ♀-ONLY
+Shiny    S/s              recessive (hidden carrier)
+Dark     D/d              dosage (Dd=Dark, DD=Blackout)
+
+Rainbow - Rr shows as Pink, rr = Rainbow 🌈
+Shiny   - ss = Shiny; Ss = hidden carrier (~1/32)
+Dark    - Dd = Dark, DD = Blackout 🖤
+
+🐈 PINK & RAINBOW ARE CALICO — FEMALES ONLY
+
+The Rainbow gene sits on the X chromosome, so only females can show Pink or Rainbow:
+- Males can only CARRY the color, never show it — every son comes out Regular-looking.
+- Only daughters can be Pink or Rainbow.
+- Since ~half a clutch is male, at most half the clutch can be Pink/Rainbow.
+
+It's criss-cross inheritance: a Rainbow mom's r hides in her sons and resurfaces as Pink/Rainbow in her granddaughters.
+A Rainbow father is impossible — the r always rides in on an invisible male carrier, so you must blood-test your studs. 🩸
+
+🎲 WILD ODDS (population-wide)
+
+Pink ♀            1 in 1,024
+Shiny             1 in 4,096
+Dark              1 in 4,096
+Rainbow ♀         1 in 2.1 million
+Dark-Pink ♀       1 in 4.2 million
+Dark-Shiny        1 in 16.8 million
+Blackout          1 in 67 million
+Dark-Rainbow ♀    1 in ~8.6 billion
+Blackout-Rainbow  1 in ~140 trillion  👑
+
+♀ = females only (≈2× that rate among females). Rainbow and Blackout are so rare you breed for them, not find them.
+
+In Pentest Pikachu the color is a deterministic hash of the network's MAC + species — a given AP always shows the same
+color for the same mon.
+```
+
+============================================================================================================================
+PART 2
+============================================================================================================================
+```
+🥚 BREEDING
+
+Bred mons ship a full genetic report automatically; you blood-test wild catches yourself.
+
+Ss × Ss              carriers → 25% Shiny
+Dd × Dd              → 50% Dark · 25% Blackout
+Rainbow♀ × carrier♂  → 100% of DAUGHTERS Rainbow
+
+Rainbow needs a Pink/Rainbow mother AND a carrier father. Blackout-Rainbow = stack a Rainbow line + a Blackout line —
+the rarest genotype in the game.
+
+⚠️ HIDDEN DEFECTS (this is what makes breeding hard)
+
+Every mon secretly carries recessive defect genes:
+
+Defect       Gene  xx effect          Alive?
+Sterile      B/b   can't breed          ✅
+Can't-fight  F/f   can't battle         ✅
+No-hatch     H/h   egg never hatches    ❌
+*ff can still breed unless also bb.
+
+What shows up wild (an encounter is a battle):
+- hh → never alive → never wild
+- ff → never in an encounter → can't catch one wild
+- bb sterile → fights fine → CAN appear wild (~1/16)
+
+💔 Catch a Wild Rainbow, blood-test it → bb sterile. Battle-ready and gorgeous, but a genetic dead-end.
+
+🏷️ PROVENANCE TAG
+
+Wild     caught, not bred — pure luck
+F1,F2..  filial (Rainbow first appears F2)
+S1,S2..  selfing (toward true-breeding)
+BX1..n   backcross (BX4 ≈ 97% one line)
+IBL      true-breeding line
+```
+
+============================================================================================================================
+PART 3
+============================================================================================================================
+```
+🏆 WHAT MAKES A MON VALUABLE
+
+A "fancy" mon is any with a cosmetic (Shiny, Pink, Rainbow, Dark, Blackout). But cosmetic rarity alone is the LOWEST
+rung — a fancy mon that can't fight or breed is an ORNAMENTAL: a fancy goldfish, bred for looks, none of the hardiness.
+Real value = viability.
+
+Ornamental   rare skin but bb/ff → collectible only
+Clean stock  BB FF HH → prime breeding foundation
+Workhorse    IBL line that breeds a rare true
+Crown jewel  rare AND viable — a fertile, battle-ready mon
+
+🔍 BREEDERS vs BUYERS — WHO WANTS WHAT
+
+Value splits across axes that pull against each other. Where you sit depends on whether you're a BREEDER building a program
+or a CUSTOMER who wants one good mon right now.
+
+A BREEDER thinks in LINES, not individuals:
+- Clean genetics. Blood-test everything; pair mons that DON'T share a defect, or you homozygose it.
+- Fertility above all. A sterile (bb) rare is a dead-end, however gorgeous.
+- True-breeding rares (IBL). Lock a rare color homozygous so it breeds 100% true — AND clean of every defect.
+- Carriers as tools. Rainbow is X-linked, so breeders hunt hidden carrier STUDS to funnel the color into daughters. Your
+  ugliest plain catch may be your best foundation stock.
+
+A CUSTOMER isn't running a program — they want one great mon:
+- Battle-grade. Can actually fight, good stats. For most players this is the whole point.
+- A fancy look to flex. Any cosmetic — Shiny, Pink, Rainbow, Dark, Blackout.
+- Provenance / the story. A WILD Rainbow (luck) vs a BX4 Rainbow (engineered) look identical but flex differently.
+- Ornamentals. A fancy mon that can't fight or breed is fun to show off, but the lowest prestige rung alone.
+
+👑 THE OVERLAP = THE TROPHIES
+The crown jewels are fancy AND viable — a fertile, battle-ready IBL Rainbow is the whole package. Breeders build them;
+customers pay for them.
+
+TL;DR: breeders buy potential, customers buy performance.
+```

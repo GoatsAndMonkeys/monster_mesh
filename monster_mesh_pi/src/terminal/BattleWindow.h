@@ -87,6 +87,24 @@ public:
         // When true, drawMessageLog skips its own "> " prefix — callers embed
         // their own selector arrow in each log line (used for in-log menus).
         bool menuMode         = false;
+        // Bill's PC browser: when true, render the caught-mon detail page —
+        // front + back sprites (animated for Rainbow skins) + the blood-test
+        // text in `log` + the "Bill's PC  n/N" title in `header` — instead of
+        // the battle layout. boxSpecies == 0 means the box is empty.
+        bool     boxView      = false;
+        uint16_t boxSpecies   = 0;   // national dex of the shown mon
+        uint8_t  boxVariant   = 0;   // Gen2SpriteCache::VAR_* skin
+        // Bill's PC category tabs: current index + per-category counts, drawn as
+        // highlighted chips (All/Shiny/Pink/Rnbw/Dark/Blkout/Reg).
+        uint8_t  boxTabCur    = 0;
+        uint16_t boxTabCnt[7] = {0};
+        int8_t   boxAction    = -1;    // Bill's PC action menu cursor (-1 = closed)
+        bool     boxIsActive  = false; // the shown mon is the current battler
+        // Poke Ball catch animation: TerminalUI bumps catchSeq on each ball
+        // throw; catchOutcome is 1 (caught) or 2 (broke free). BattleWindow
+        // edge-detects a new catchSeq and plays throw → wobble → result.
+        uint32_t catchSeq     = 0;
+        uint8_t  catchOutcome = 0;
     };
 
     BattleWindow();
@@ -123,6 +141,11 @@ private:
     bool          initOk_   = false;
     int           youVariant_ = 0;   // Gen2SpriteCache::VAR_* for the player sprite
     uint16_t      animPhase_  = 0;    // advances each frame; animates Rainbow
+    // Catch-animation runtime (edge-triggered by State::catchSeq).
+    uint32_t      catchLastSeq_    = 0;
+    uint32_t      catchAnimStart_  = 0;
+    uint8_t       catchAnimOutcome_ = 0;
+    bool          catchAnimOn_     = false;
 
     // Layout helpers
     void drawBackground();
@@ -135,6 +158,9 @@ private:
     void drawMessageLog();
     void drawBottomPanel();
     void drawEndOverlay();
+    void drawBoxView();     // Bill's PC caught-mon detail (sprites + blood test)
+    void drawPokeball(int cx, int cy, int r);       // two-tone ball via primitives
+    void drawCatchAnim(uint32_t elapsedMs);         // throw/wobble/result timeline
 
     // Rounded-corner box with optional title chip.  Inner area starts at
     // (x+border, y+border) so callers can fill / write text inside.

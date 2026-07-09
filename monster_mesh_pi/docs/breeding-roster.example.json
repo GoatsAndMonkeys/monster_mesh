@@ -1,0 +1,13 @@
+{
+  "roster": [
+    { "dex": 25, "nick": "Bolt",  "level": 18, "female": false,
+      "rainbow": 1, "shiny": 0, "dark": 0,
+      "sterile": 0, "cantFight": 0, "noHatch": 0, "provenance": "Wild" },
+    { "dex": 25, "nick": "Petal", "level": 16, "female": true,
+      "rainbow": 1, "shiny": 1, "dark": 0,
+      "sterile": 0, "cantFight": 0, "noHatch": 1, "provenance": "F1" },
+    { "dex": 94, "nick": "Void",  "level": 40, "female": true,
+      "rainbow": 0, "shiny": 0, "dark": 2,
+      "sterile": 1, "cantFight": 0, "noHatch": 0, "provenance": "IBL" }
+  ]
+}

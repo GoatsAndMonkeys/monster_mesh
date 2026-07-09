@@ -19,6 +19,9 @@ namespace Gen2SpriteCache {
 enum {
     VAR_NORMAL = 0, VAR_SHINY, VAR_PINK, VAR_RAINBOW, VAR_DARK, VAR_DARK_SHINY,
     VAR_DARK_PINK, VAR_DARK_RAINBOW,
+    // Blackout = "double dark" (DD): darker than Dark. Order matches
+    // breeding::Skin 8..11 so a genotype skin maps 1:1 to a VAR_.
+    VAR_BLACKOUT, VAR_BLACKOUT_SHINY, VAR_BLACKOUT_PINK, VAR_BLACKOUT_RAINBOW,
     VAR_COUNT
 };
 

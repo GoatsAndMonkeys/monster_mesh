@@ -350,7 +350,8 @@ void BattleWindow::drawYouBox() {
 
     // Active colour skin name (so the player can tell which of the 8 is showing).
     static const char *const kSkinNames[Gen2SpriteCache::VAR_COUNT] = {
-        "", "Shiny", "Pink", "Rainbow", "Dark", "Dark Shiny", "Dark Pink", "Dark Rainbow"
+        "", "Shiny", "Pink", "Rainbow", "Dark", "Dark Shiny", "Dark Pink", "Dark Rainbow",
+        "Blackout", "Blackout Shiny", "Blackout Pink", "Blackout Rainbow"
     };
     if (youVariant_ > 0 && youVariant_ < Gen2SpriteCache::VAR_COUNT)
         BitmapFont::drawString(renderer_, bx + 8, by + 40, kSkinNames[youVariant_], COL_DIMINK, 1);
@@ -571,11 +572,22 @@ void BattleWindow::render() {
     // Advance the Rainbow scroll ~every 90ms (matches the T-Deck cadence), so
     // the animation speed is independent of the main-loop frame rate.
     auto animatedV = [](int v) { return v == Gen2SpriteCache::VAR_RAINBOW ||
-                                        v == Gen2SpriteCache::VAR_DARK_RAINBOW; };
-    if (animatedV(youVariant_) || animatedV(state_.foe.variant)) {
+                                        v == Gen2SpriteCache::VAR_DARK_RAINBOW ||
+                                        v == Gen2SpriteCache::VAR_BLACKOUT_RAINBOW; };
+    if (animatedV(youVariant_) || animatedV(state_.foe.variant) ||
+        (state_.boxView && animatedV(state_.boxVariant))) {
         static uint32_t lastPhaseMs = 0;
         uint32_t now = SDL_GetTicks();
         if (now - lastPhaseMs >= 90) { animPhase_ = (uint16_t)((animPhase_ + 1) % 360); lastPhaseMs = now; }
+    }
+
+    // Bill's PC caught-mon browser owns the whole screen when active.
+    if (state_.boxView) {
+        SDL_SetRenderDrawColor(renderer_, 255, 255, 255, 255);
+        SDL_RenderClear(renderer_);
+        drawBoxView();
+        SDL_RenderPresent(renderer_);
+        return;
     }
 
     // Letterbox bars (visible when the window's aspect != 4:3 thanks to
@@ -592,7 +604,23 @@ void BattleWindow::render() {
     // gray shadow ellipse showed through every transparent pixel inside
     // the sprite body and looked terrible.  Sprites float on white now,
     // which matches the Gen 1 battle look anyway.
-    drawFoeSprite();
+    // Edge-detect a new ball throw → (re)start the catch animation.
+    if (state_.catchSeq != catchLastSeq_) {
+        catchLastSeq_ = state_.catchSeq;
+        if (state_.catchSeq != 0) {
+            catchAnimOn_      = true;
+            catchAnimStart_   = SDL_GetTicks();
+            catchAnimOutcome_ = state_.catchOutcome;
+        }
+    }
+    uint32_t catchElapsed = 0;
+    if (catchAnimOn_) {
+        catchElapsed = SDL_GetTicks() - catchAnimStart_;
+        if (catchElapsed > 900) catchAnimOn_ = false;   // animation length
+    }
+
+    if (catchAnimOn_) drawCatchAnim(catchElapsed);   // ball replaces the foe sprite
+    else              drawFoeSprite();
     drawYouSprite();
 
     drawFoeBox();
@@ -604,4 +632,162 @@ void BattleWindow::render() {
     drawEndOverlay();
 
     SDL_RenderPresent(renderer_);
+}
+
+// ── Bill's PC — caught-mon detail browser ─────────────────────────────────────
+// Front sprite (left) + back sprite (right), both 3× (192 px, animated for the
+// Rainbow skins), the "Bill's PC  n/N" title up top, and the full blood-test
+// readout (species/skin/provenance + every locus allele + the status roll-up)
+// beneath. Text is pre-sanitised to ASCII by the caller (the 5×7 font is
+// ASCII-only). Empty box shows a friendly prompt.
+void BattleWindow::drawBoxView() {
+    drawBackground();
+
+    // ── Category tabs, drawn as chips (current highlighted) ──────────────────
+    static const char *const TABS[7] = { "All", "Shiny", "Pink", "Rnbw", "Dark", "Blkout", "Reg" };
+    int chipX = 6;
+    for (int t = 0; t < 7; ++t) {
+        char lbl[16];
+        snprintf(lbl, sizeof(lbl), "%s %d", TABS[t], (int)state_.boxTabCnt[t]);
+        int w = BitmapFont::stringWidth(lbl, 1);
+        if (t == state_.boxTabCur) {                    // highlighted chip
+            SDL_SetRenderDrawColor(renderer_, COL_INK.r, COL_INK.g, COL_INK.b, 255);
+            SDL_Rect chip = { chipX - 3, 5, w + 6, 15 };
+            SDL_RenderFillRect(renderer_, &chip);
+            BitmapFont::drawString(renderer_, chipX, 9, lbl, COL_WHITE, 1);
+        } else {
+            BitmapFont::drawString(renderer_, chipX, 9, lbl, COL_DIMINK, 1);
+        }
+        chipX += w + 12;
+    }
+    BitmapFont::drawString(renderer_, 8, 26,
+                           "L/R: category   U/D: scan   A: menu   B: back", COL_DIMINK, 1);
+
+    if (state_.boxSpecies < 1 || state_.boxSpecies > 386) {
+        BitmapFont::drawString(renderer_, 40, 150, "(no mons in this category)", COL_INK, 2);
+        return;
+    }
+
+    // ── Big front (right) + back (left) sprites, 4× = 256 px (bit-perfect) ────
+    const int DIM = 256;
+    SDL_Texture *fr = Gen2SpriteCache::get(renderer_, state_.boxSpecies, false,
+                                           state_.boxVariant, animPhase_);
+    SDL_Texture *bk = Gen2SpriteCache::get(renderer_, state_.boxSpecies, true,
+                                           state_.boxVariant, animPhase_);
+    const int spriteY = 40;
+    if (fr) { SDL_Rect d = { LOGICAL_W - 8 - DIM, spriteY, DIM, DIM };
+              SDL_RenderCopy(renderer_, fr, nullptr, &d); }
+    if (bk) { SDL_Rect d = { 8, spriteY, DIM, DIM };
+              SDL_RenderCopy(renderer_, bk, nullptr, &d); }
+    BitmapFont::drawString(renderer_, 8 + DIM / 2 - 25, spriteY + DIM + 2, "BACK",  COL_DIMINK, 2);
+    BitmapFont::drawString(renderer_, LOGICAL_W - 8 - DIM / 2 - 30, spriteY + DIM + 2, "FRONT", COL_DIMINK, 2);
+
+    // ── Genetics text box (bottom), like the battle message box ──────────────
+    // log[0] = name/Lv/skin, log[1] = genome code (both inked); the rest = the
+    // two-column word list (COSMETIC left, MARKERS right).
+    int bx = 8, by = spriteY + DIM + 22, bw = LOGICAL_W - 16, bh = LOGICAL_H - by - 6;
+    drawBox(bx, by, bw, bh, COL_WHITE, COL_INK);
+    int tx = bx + 12, ty = by + 10;
+    const int lineH = BitmapFont::GLYPH_H * 2 + 5;   // 19 px at scale 2
+    for (size_t i = 0; i < state_.log.size(); ++i) {
+        if (ty > by + bh - lineH) break;
+        BitmapFont::drawString(renderer_, tx, ty, state_.log[i].c_str(),
+                               (i <= 1) ? COL_INK : COL_DIMINK, 2);
+        ty += lineH;
+    }
+
+    // "ACTIVE" badge on the current battler.
+    if (state_.boxIsActive)
+        BitmapFont::drawString(renderer_, LOGICAL_W / 2 - 40, spriteY + DIM / 2 - 6,
+                               "\x10 ACTIVE", COL_INK, 2);
+
+    // ── Action menu overlay (A opened it): Set Active / Dedup / Cancel ───────
+    if (state_.boxAction >= 0) {
+        static const char *const ACT[3] = { "Set as Active (swap)",
+                                            "Dedup (1 per species+colour)",
+                                            "Cancel" };
+        int mw = 340, mh = 3 * 22 + 16, mx = (LOGICAL_W - mw) / 2, my = 150;
+        drawBox(mx, my, mw, mh, COL_WHITE, COL_INK);
+        for (int i = 0; i < 3; ++i) {
+            int ry = my + 10 + i * 22;
+            if (i == state_.boxAction) {
+                SDL_SetRenderDrawColor(renderer_, COL_INK.r, COL_INK.g, COL_INK.b, 255);
+                SDL_Rect hl = { mx + 4, ry - 2, mw - 8, 20 };
+                SDL_RenderFillRect(renderer_, &hl);
+                BitmapFont::drawString(renderer_, mx + 12, ry, ACT[i], COL_WHITE, 2);
+            } else {
+                BitmapFont::drawString(renderer_, mx + 12, ry, ACT[i], COL_INK, 2);
+            }
+        }
+    }
+}
+
+// ── Poke Ball + catch animation ───────────────────────────────────────────────
+// A two-tone Poke Ball drawn from primitives (red top / white bottom / black
+// band + centre button), using the scanline-filled "ellipse" as a circle.
+void BattleWindow::drawPokeball(int cx, int cy, int r) {
+    SDL_Color red = { 224, 40, 40, 255 }, white = { 248, 248, 248, 255 },
+              blk = { 24, 24, 24, 255 };
+    drawShadowEllipse(cx, cy, r, r, blk);                 // black outline base
+    SDL_Rect top = { cx - r, cy - r, 2 * r + 1, r };      // clip to top half
+    SDL_RenderSetClipRect(renderer_, &top);
+    drawShadowEllipse(cx, cy, r - 2, r - 2, red);
+    SDL_Rect bot = { cx - r, cy, 2 * r + 1, r + 1 };      // clip to bottom half
+    SDL_RenderSetClipRect(renderer_, &bot);
+    drawShadowEllipse(cx, cy, r - 2, r - 2, white);
+    SDL_RenderSetClipRect(renderer_, nullptr);
+    SDL_SetRenderDrawColor(renderer_, blk.r, blk.g, blk.b, 255);
+    SDL_Rect band = { cx - r, cy - 3, 2 * r + 1, 6 };     // equator band
+    SDL_RenderFillRect(renderer_, &band);
+    drawShadowEllipse(cx, cy, r / 3 + 2, r / 3 + 2, blk); // centre button ring
+    drawShadowEllipse(cx, cy, r / 3,     r / 3,     white);
+}
+
+// Timeline (ms):  0–230 throw arc · 230–360 flash+capture · 360–470 drop ·
+// 470–760 wobble ×3 · 760–900 result (caught sparkles / break-out returns foe).
+void BattleWindow::drawCatchAnim(uint32_t ce) {
+    const int fx = 470, fy = 118, gy = 210;   // foe centre + ground for the ball
+    const int R = 15;
+
+    if (ce < 230) {                            // THROW — foe still visible
+        drawFoeSprite();
+        double p = ce / 230.0;
+        int bx = (int)(180 + (fx - 180) * p);
+        int by = (int)(360 + (fy - 360) * p - 80.0 * sin(3.14159 * p));
+        drawPokeball(bx, by, R);
+        return;
+    }
+    if (ce < 360) {                            // FLASH — foe sucked in
+        drawPokeball(fx, fy, R);
+        double p = (ce - 230) / 130.0;
+        int rr = (int)(10 + 60 * p);
+        SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
+        SDL_Color fl = { 255, 255, 255, (Uint8)(180 * (1.0 - p)) };
+        drawShadowEllipse(fx, fy, rr, rr, fl);            // expanding white burst
+        return;
+    }
+    if (ce < 470) {                            // DROP to the ground
+        double p = (ce - 360) / 110.0;
+        drawPokeball(fx, (int)(fy + (gy - fy) * p), R);
+        return;
+    }
+    if (ce < 760) {                            // WOBBLE — rock left/right, decaying
+        double t = (ce - 470) / 290.0;
+        int dx = (int)(14.0 * sin(t * 3.14159 * 6.0) * (1.0 - t));
+        drawPokeball(fx + dx, gy, R);
+        return;
+    }
+    // RESULT
+    if (catchAnimOutcome_ == 1) {              // CAUGHT — ball settles + sparkles
+        drawPokeball(fx, gy, R);
+        SDL_SetRenderDrawColor(renderer_, 255, 236, 120, 255);
+        for (int k = 0; k < 3; ++k) {
+            int sx = fx - 26 + k * 26, sy = gy - 30 - (k & 1) * 8;
+            SDL_Rect h = { sx - 5, sy, 11, 2 }, v = { sx, sy - 5, 2, 11 };
+            SDL_RenderFillRect(renderer_, &h);
+            SDL_RenderFillRect(renderer_, &v);
+        }
+    } else {                                   // BROKE FREE — foe pops back out
+        drawFoeSprite();
+    }
 }

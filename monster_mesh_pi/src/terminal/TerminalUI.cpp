@@ -13,6 +13,9 @@
 #include "../shared/LordE4.h"              // Indigo Plateau rosters
 #include "../shared/LordLogic.h"           // NG+ tier state + scaling
 #include "../shared/KantoZones.h"          // Pentest Pikachu zone encounters
+#include "../shared/Gen1Learnsets.h"       // per-species level-up moves (swapped battler)
+#include "../shared/BreedingApp.h"         // roster + Mendelian breeding (Breed tab)
+#include "../shared/PentestCatch.h"        // deterministic wild genotype from BSSID
 #include <ncurses.h>
 #include <locale.h>
 #include <stdarg.h>
@@ -26,6 +29,25 @@
 #include <algorithm>
 
 // ── Local helpers ─────────────────────────────────────────────────────────────
+
+// Bill's PC skin-category tabs. A mon matches every category its skin belongs to
+// (a Dark-Pink shows in both Pink and Dark), so counts can overlap — it's a
+// filter view, not a partition.
+static const char *const kBoxTabNames[] = { "All", "Shy", "Pnk", "Rnw", "Drk", "Ddk", "Reg" };
+static constexpr int kBoxTabCount = 7;
+static bool boxTabMatch(breeding::Skin s, int tab) {
+    using namespace breeding;
+    switch (tab) {
+        case 0: return true;                                                   // All
+        case 1: return s == SKIN_SHINY || s == SKIN_DARK_SHINY || s == SKIN_BLACKOUT_SHINY;
+        case 2: return s == SKIN_PINK  || s == SKIN_DARK_PINK  || s == SKIN_BLACKOUT_PINK;
+        case 3: return s == SKIN_RAINBOW || s == SKIN_DARK_RAINBOW || s == SKIN_BLACKOUT_RAINBOW;
+        case 4: return s == SKIN_DARK || s == SKIN_DARK_SHINY || s == SKIN_DARK_PINK || s == SKIN_DARK_RAINBOW;
+        case 5: return s == SKIN_BLACKOUT || s == SKIN_BLACKOUT_SHINY || s == SKIN_BLACKOUT_PINK || s == SKIN_BLACKOUT_RAINBOW;
+        case 6: return s == SKIN_REGULAR;
+    }
+    return false;
+}
 
 static const char *typeName(uint8_t t) {
     static const char *N[] = {
@@ -431,7 +453,10 @@ void TerminalUI::applyMenuRowsForScreen() {
                    screen_ == Screen::BATTLE_END ||
                    screen_ == Screen::PVP_BATTLE ||
                    screen_ == Screen::PVP_BATTLE_END);
-    int want = battle ? MENU_ROWS_BATTLE : MENU_ROWS_DEFAULT;
+    // The Breed screen has no use for the MESH/LOCAL/SYSTEM tab bar — give it
+    // (nearly) the whole panel so the mon list + rooms + odds have room.
+    bool breedFull = (screen_ == Screen::BREEDING);
+    int want = breedFull ? 1 : (battle ? MENU_ROWS_BATTLE : MENU_ROWS_DEFAULT);
     if (want == menuRows_) return;
     menuRows_ = want;
     int infoRows = rows_ - STATUS_ROWS - menuRows_;
@@ -502,6 +527,7 @@ void TerminalUI::render() {
         case Screen::BATTLE_END:    renderBattleEnd();                       break;
         case Screen::MOVE_LEARN:    renderMoveLearn();                       break;
         case Screen::GYM_SELECT:    renderGymSelect();                       break;
+        case Screen::BREEDING:      renderBreeding();                        break;
         case Screen::PVP_BATTLE:    renderPvpBattle();                       break;
         case Screen::PVP_BATTLE_END:renderPvpBattleEnd();                    break;
         case Screen::HELP:            renderHelp();                            break;
@@ -1337,8 +1363,10 @@ void TerminalUI::handleButton(const ButtonEvent &ev) {
         screen_ = (screen_ == Screen::HELP) ? Screen::MENU : Screen::HELP;
         return;
     }
-    // Start always returns to menu
-    if (ev.button == GpiButton::START && screen_ != Screen::BATTLE) {
+    // Start always returns to menu — except on the Breeding screen, where START
+    // is the "open the breeder-rooms menu" button (handled in breedingButton).
+    if (ev.button == GpiButton::START && screen_ != Screen::BATTLE &&
+        screen_ != Screen::BREEDING) {
         screen_ = Screen::MENU;
         return;
     }
@@ -1364,6 +1392,7 @@ void TerminalUI::handleButton(const ButtonEvent &ev) {
         case Screen::BATTLE_END:    battleEndButton(ev);    break;
         case Screen::MOVE_LEARN:    moveLearnButton(ev);    break;
         case Screen::GYM_SELECT:    gymSelectButton(ev);    break;
+        case Screen::BREEDING:      breedingButton(ev);     break;
         case Screen::PVP_BATTLE:    pvpBattleButton(ev);    break;
         case Screen::PVP_BATTLE_END:pvpBattleEndButton(ev); break;
         case Screen::HELP:            helpButton(ev);              break;
@@ -1542,6 +1571,42 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
     //   3: Deauth Log  → SIGINT_DEAUTHS
     //   4: Captures    → SIGINT_CAPTURES
     //   5: Reset Pikachu → confirm step (nOpts shrinks to 2)
+
+    // ── START is the universal "menu" button: it opens/closes the status &
+    //    SIGINT overlay. START+SELECT (either order, within 1 s) still saves &
+    //    exits pentest (the emulator-style hotkey). SELECT alone just arms the
+    //    combo. Handled here, ahead of everything, so START works from any view.
+    if (ev.pressed && (ev.button == GpiButton::START || ev.button == GpiButton::SELECT)) {
+        uint64_t now = millis();
+        bool combo = false;
+        if (pentestExitPressMs_ != 0 && now - pentestExitPressMs_ < 1000)
+            combo = pentestExitStartFirst_ ? (ev.button == GpiButton::SELECT)
+                                           : (ev.button == GpiButton::START);
+        if (combo) {
+            const Gen1BattleEngine::BattleParty &pp = engine_.party(0);
+            if (pp.count > 0 && pp.mons[0].level > 0) {
+                pentestLevel_ = pp.mons[0].level;
+                pentestXp_    = slotLevelXp_[0];
+            }
+            pentestSaveProgress();
+            inPentestBattle_ = false;
+            inBattle_        = false;
+            requestQuit();
+            return;
+        }
+        pentestExitPressMs_    = now;
+        pentestExitStartFirst_ = (ev.button == GpiButton::START);
+        // START alone toggles the overlay (never while manually boss-fighting).
+        if (ev.button == GpiButton::START && !pentestBossMode_) {
+            pentestShowStatus_ = !pentestShowStatus_;
+            pentestSubView_    = 0;
+            pentestStatusSel_  = 0;
+            if (pentestShowStatus_) pentestConfirmReset_ = false;
+        }
+        return;   // SELECT alone: swallow, armed for the exit combo.
+    }
+    if (ev.pressed) pentestExitPressMs_ = 0;   // other button breaks the combo
+
     if (pentestShowStatus_) {
         // ── Status detail sub-page (subView 1): B returns to menu ────────────
         if (pentestSubView_ == 1) {
@@ -1550,6 +1615,64 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
                 pentestStatusSel_ = 1;   // leave cursor on Status
             }
             return;
+        }
+
+        // ── Bill's PC browser (subView 6): L/R = tab, U/D = scan, A = menu ────
+        if (pentestSubView_ == 6) {
+            if (!ev.pressed) return;
+            const auto &box = breedApp_.roster();
+            // Build the current tab's filtered index list (for scan + actions).
+            std::vector<int> filt;
+            for (int i = 0; i < (int)box.size(); ++i)
+                if (boxTabMatch(breeding::skinOf(box[i].geno), pentestBoxTab_)) filt.push_back(i);
+            int fn = (int)filt.size();
+
+            // Action menu open (A opened it): 0=Set Active, 1=Dedup, 2=Cancel.
+            if (pentestBoxAction_ >= 0) {
+                switch (ev.button) {
+                    case GpiButton::UP:   pentestBoxAction_ = (pentestBoxAction_ + 2) % 3; return;
+                    case GpiButton::DOWN: pentestBoxAction_ = (pentestBoxAction_ + 1) % 3; return;
+                    case GpiButton::A:
+                        if (pentestBoxAction_ == 0 && fn > 0) {          // Set Active
+                            const breeding::BreedMon &m = box[filt[pentestBoxSel_ % fn]];
+                            pentestActiveDex_ = m.dex;
+                            pentestSaveProgress();
+                            breedMsg_ = std::string(dexName(m.dex)) + " is now your battler!";
+                        } else if (pentestBoxAction_ == 1) {            // Dedup
+                            pentestDedupBox();
+                            breedMsg_ = "Deduped: one per species+colour.";
+                        }
+                        pentestBoxAction_ = -1;
+                        return;
+                    case GpiButton::B: pentestBoxAction_ = -1; return;
+                    default: return;
+                }
+            }
+
+            switch (ev.button) {
+                case GpiButton::LEFT:
+                    pentestBoxTab_ = (pentestBoxTab_ + kBoxTabCount - 1) % kBoxTabCount;
+                    pentestBoxSel_ = 0;
+                    return;
+                case GpiButton::RIGHT:
+                    pentestBoxTab_ = (pentestBoxTab_ + 1) % kBoxTabCount;
+                    pentestBoxSel_ = 0;
+                    return;
+                case GpiButton::UP:
+                    if (fn) pentestBoxSel_ = (pentestBoxSel_ + fn - 1) % fn;
+                    return;
+                case GpiButton::DOWN:
+                    if (fn) pentestBoxSel_ = (pentestBoxSel_ + 1) % fn;
+                    return;
+                case GpiButton::A:
+                    pentestBoxAction_ = 0;   // open the action menu
+                    return;
+                case GpiButton::B:
+                    pentestSubView_   = 0;
+                    pentestStatusSel_ = 6;   // leave cursor on Bill's PC
+                    return;
+                default: return;
+            }
         }
 
         // ── SIGINT sub-views (2=scanner 3=probes 4=deauths 5=captures) ────────
@@ -1602,19 +1725,19 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
                     return;
                 case GpiButton::A:
                     if (pentestStatusSel_ == 0) pentestResetProgress();
-                    else { pentestConfirmReset_ = false; pentestStatusSel_ = 6; }
+                    else { pentestConfirmReset_ = false; pentestStatusSel_ = 7; }
                     return;
                 case GpiButton::B:
-                    if (ev.pressed) { pentestConfirmReset_ = false; pentestStatusSel_ = 6; }
+                    if (ev.pressed) { pentestConfirmReset_ = false; pentestStatusSel_ = 7; }
                     return;
                 default: return;
             }
         }
 
-        // ── Main in-log menu (7 items) ────────────────────────────────────────
+        // ── Main in-log menu (8 items) ────────────────────────────────────────
         //   0 Back  1 Status  2 AP Scanner  3 Probe Sniffer
-        //   4 Deauth Log  5 Captures  6 Reset Pikachu
-        const int nOpts = 7;
+        //   4 Deauth Log  5 Captures  6 Bill's PC  7 Reset Pikachu
+        const int nOpts = 8;
         switch (ev.button) {
             case GpiButton::UP:   case GpiButton::LEFT:
                 pentestStatusSel_ = (pentestStatusSel_ + nOpts - 1) % nOpts;
@@ -1651,7 +1774,11 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
                         sigintCapSel_ = sigintCapScroll_ = 0;
                         pentestSubView_ = 5;
                         break;
-                    case 6:  // Reset Pikachu
+                    case 6:  // Bill's PC — caught-mon browser
+                        pentestBoxSel_  = 0;
+                        pentestSubView_ = 6;
+                        break;
+                    case 7:  // Reset Pikachu
                         pentestConfirmReset_ = true;
                         pentestStatusSel_    = 0;
                         break;
@@ -1738,41 +1865,8 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
         }
     }
 
-    // START+SELECT within 1 s = exit (mirrors emulator hotkey; B alone does nothing).
-    if (ev.button == GpiButton::START || ev.button == GpiButton::SELECT) {
-        uint64_t now = millis();
-        if (!ev.pressed) return;
-        if (pentestExitPressMs_ == 0) {
-            // First of the pair pressed.
-            pentestExitPressMs_     = now;
-            pentestExitStartFirst_  = (ev.button == GpiButton::START);
-        } else {
-            // Second press — check it's the other button and within 1 second.
-            bool otherBtn = (pentestExitStartFirst_)
-                                ? (ev.button == GpiButton::SELECT)
-                                : (ev.button == GpiButton::START);
-            bool inWindow = (now - pentestExitPressMs_ < 1000);
-            if (otherBtn && inWindow) {
-                // Capture the live level/XP, persist, then exit to the system menu.
-                const Gen1BattleEngine::BattleParty &pp = engine_.party(0);
-                if (pp.count > 0 && pp.mons[0].level > 0) {
-                    pentestLevel_ = pp.mons[0].level;
-                    pentestXp_    = slotLevelXp_[0];
-                }
-                pentestSaveProgress();
-                inPentestBattle_ = false;
-                inBattle_        = false;
-                requestQuit();
-                return;
-            }
-            // Mismatch or timeout: reset and treat this press as the new first.
-            pentestExitPressMs_    = now;
-            pentestExitStartFirst_ = (ev.button == GpiButton::START);
-        }
-        return;
-    }
-    // Any other button resets the exit combo.
-    pentestExitPressMs_ = 0;
+    // (START / SELECT — menu toggle and the START+SELECT exit combo — are handled
+    //  at the top of this function, ahead of every other view.)
 }
 
 // Wipe all pentest progress back to a fresh Level-5 Pikachu, kick a fresh
@@ -1927,9 +2021,10 @@ void TerminalUI::pentestBuildMenuLog(std::vector<std::string> &out) {
     // ── Main menu (subView 0) ─────────────────────────────────────────────────
     static const char *items[] = {
         "Back", "Status", "AP Scanner",
-        "Probe Sniffer", "Deauth Log", "Captures", "Reset Pikachu",
+        "Probe Sniffer", "Deauth Log", "Captures", "Bill's PC", "Reset Pikachu",
     };
-    for (int i = 0; i < 7; i++) {
+    const int nItems = (int)(sizeof(items) / sizeof(items[0]));
+    for (int i = 0; i < nItems; i++) {
         snprintf(ln, sizeof(ln), "%s %s",
                  (i == pentestStatusSel_) ? ">" : " ", items[i]);
         out.push_back(ln);
@@ -1942,8 +2037,8 @@ void TerminalUI::pentestBuildStatus(std::vector<std::string> &out) {
     if (pentestStandby_) {
         out.push_back("== STANDBY ==");
         out.push_back("Waiting for a vulnerable network...");
-        snprintf(line, sizeof(line), "APs in range: %d   Cracked: %d",
-                 pentestNetsSeen_, (int)pentestDoneSsids_.size());
+        snprintf(line, sizeof(line), "APs in range: %d   Caught: %d",
+                 pentestNetsSeen_, (int)breedApp_.size());
         out.push_back(line);
         out.push_back("");
     }
@@ -1965,6 +2060,33 @@ void TerminalUI::pentestBuildStatus(std::vector<std::string> &out) {
     }
     snprintf(line, sizeof(line), "Pokedex seen:   %d/151", seen);   out.push_back(line);
     snprintf(line, sizeof(line), "Pokedex beaten: %d/151", beaten); out.push_back(line);
+    out.push_back("");
+
+    // ── Bill's PC — the mons you've CAUGHT (full genotype, breedable) ──────────
+    // Loaded from the box file at pentest init + appended live on each catch.
+    if (!breedLoaded_) { pentestLoadBox(); breedLoaded_ = true; }
+    const auto &box = breedApp_.roster();
+    snprintf(line, sizeof(line), "Bill's PC (caught): %d", (int)box.size());
+    out.push_back(line);
+    if (box.empty()) {
+        out.push_back("  (none yet - catch a rare colour!)");
+    } else {
+        // Newest first, cap the list so the status view stays readable.
+        int shown = 0;
+        for (int i = (int)box.size() - 1; i >= 0 && shown < 12; --i, ++shown) {
+            const breeding::BreedMon &m = box[i];
+            snprintf(line, sizeof(line), "  L%-3d %-10.10s %-8.8s %s%s",
+                     m.level, m.nick[0] ? m.nick : dexName(m.dex),
+                     breeding::skinName(breeding::skinOf(m.geno)),
+                     m.geno.female ? "\xE2\x99\x80" : "\xE2\x99\x82",
+                     breeding::isSterile(m.geno) ? " bb" : "");
+            out.push_back(line);
+        }
+        if ((int)box.size() > 12) {
+            snprintf(line, sizeof(line), "  ...and %d more", (int)box.size() - 12);
+            out.push_back(line);
+        }
+    }
     out.push_back("");
 
     // "Pokemon in current gym" = the next leader you have to beat (Brock until
@@ -1994,6 +2116,126 @@ void TerminalUI::pentestBuildStatus(std::vector<std::string> &out) {
         if (!row.empty()) out.push_back("  " + row);
     }
 
+}
+
+// Down-convert the blood-test UTF-8 (♀ ♂ — “ ”) to plain ASCII so the SDL 5×7
+// bitmap font (ASCII-only) renders the box view cleanly.
+static std::string pentestAsciiSanitize(const std::string &in) {
+    std::string out;
+    for (size_t i = 0; i < in.size(); ) {
+        unsigned char c = (unsigned char)in[i];
+        if (c < 0x80) { out += (char)c; ++i; continue; }
+        // 3-byte sequences we care about.
+        if (i + 2 < in.size() && c == 0xE2) {
+            unsigned char b1 = (unsigned char)in[i+1], b2 = (unsigned char)in[i+2];
+            if (b1 == 0x99 && b2 == 0x80)      { out += "(F)"; i += 3; continue; } // ♀
+            if (b1 == 0x99 && b2 == 0x82)      { out += "(M)"; i += 3; continue; } // ♂
+            if (b1 == 0x80 && b2 == 0x94)      { out += "-";   i += 3; continue; } // — em dash
+            if (b1 == 0x80 && (b2 == 0x9C || b2 == 0x9D)) { out += '"'; i += 3; continue; } // “ ”
+        }
+        // Unknown multibyte: skip its continuation bytes, emit '?'.
+        out += '?'; ++i;
+        while (i < in.size() && ((unsigned char)in[i] & 0xC0) == 0x80) ++i;
+    }
+    return out;
+}
+
+// Fill `s` for the Bill's PC caught-mon browser (sub-view 6). Front+back sprites
+// come from boxSpecies/boxVariant; the blood test goes into s.log (ASCII). The
+// selected mon is pentestBoxSel_ (wrapped by the input handler).
+bool TerminalUI::pentestSyncBoxView(BattleWindow::State &s) {
+    if (!(pentestShowStatus_ && pentestSubView_ == 6)) return false;
+    if (!breedLoaded_) { pentestLoadBox(); breedLoaded_ = true; }
+    const auto &box = breedApp_.roster();
+    int n = (int)box.size();
+
+    s.boxView  = true;
+    s.menuMode = false;
+    s.log.clear();
+
+    if (n == 0) {
+        s.boxSpecies = 0;
+        snprintf(s.header, sizeof(s.header), "Bill's PC  (empty)");
+        return true;
+    }
+
+    // Per-tab counts + the tab-bar header (current tab bracketed).
+    int cnt[kBoxTabCount] = {0};
+    for (const auto &mm : box) {
+        breeding::Skin s2 = breeding::skinOf(mm.geno);
+        for (int t = 0; t < kBoxTabCount; ++t) if (boxTabMatch(s2, t)) cnt[t]++;
+    }
+    if (pentestBoxTab_ < 0) pentestBoxTab_ = kBoxTabCount - 1;
+    if (pentestBoxTab_ >= kBoxTabCount) pentestBoxTab_ = 0;
+    // Tab chips are drawn by BattleWindow from these fields.
+    s.boxTabCur = (uint8_t)pentestBoxTab_;
+    for (int t = 0; t < kBoxTabCount; ++t) s.boxTabCnt[t] = (uint16_t)cnt[t];
+    s.header[0] = '\0';
+
+    // Filtered list for the current tab (LEFT/RIGHT switch tabs, U/D scan within).
+    std::vector<int> filt;
+    for (int i = 0; i < n; ++i)
+        if (boxTabMatch(breeding::skinOf(box[i].geno), pentestBoxTab_)) filt.push_back(i);
+    int fn = (int)filt.size();
+    if (fn == 0) { s.boxSpecies = 0; return true; }   // this category is empty
+    if (pentestBoxSel_ < 0)  pentestBoxSel_ = fn - 1;
+    if (pentestBoxSel_ >= fn) pentestBoxSel_ = 0;
+
+    const breeding::BreedMon &m = box[filt[pentestBoxSel_]];
+    const breeding::Genotype &g = m.geno;
+    breeding::Skin sk = breeding::skinOf(g);
+    s.boxSpecies = m.dex;
+    s.boxVariant = (uint8_t)(int)sk;   // Skin 0..11 maps 1:1 to VAR_ (incl. Blackout)
+    s.boxAction   = (int8_t)pentestBoxAction_;
+    s.boxIsActive = (pentestActiveDex_ != 0 && m.dex == pentestActiveDex_);
+
+    // Status box (battle FOE-box) fields: name, level, skin.
+    s.foe.species = m.dex;
+    s.foe.level   = m.level;
+    snprintf(s.foe.nickname, sizeof(s.foe.nickname), "%s",
+             m.nick[0] ? m.nick : breeding::BreedingApp::dexName(m.dex));
+    snprintf(s.foeTag, sizeof(s.foeTag), "%s", breeding::skinName(sk));
+
+    // ── Genome code line + two-column word list (cosmetic | markers) ──────────
+    auto AP = [](uint8_t d, const char *a, const char *b, const char *c) {
+        return d == 0 ? a : (d == 1 ? b : c);
+    };
+    char title[80];
+    snprintf(title, sizeof(title), "%s  Lv%d  %s %s",
+             m.nick[0] ? m.nick : breeding::BreedingApp::dexName(m.dex),
+             m.level, breeding::skinName(sk), g.female ? "(F)" : "(M)");
+    s.log.push_back(title);
+    char gl[96];
+    snprintf(gl, sizeof(gl), "Genome  %s %s %s | %s %s %s",
+             AP(g.rainbow, "RR", "Rr", "rr"), AP(g.shiny, "SS", "Ss", "ss"),
+             AP(g.dark, "dd", "Dd", "DD"),    AP(g.sterile, "BB", "Bb", "bb"),
+             AP(g.cantFight, "FF", "Ff", "ff"), AP(g.noHatch, "HH", "Hh", "hh"));
+    s.log.push_back(gl);
+
+    // Per-locus meaning words. Rainbow/Pink display on females only; a male
+    // carrier is shown as "hidden".
+    const char *rW = g.rainbow == 0 ? "--"
+                   : (g.female ? (g.rainbow == 2 ? "Rainbow" : "Pink")
+                               : (g.rainbow == 2 ? "rr hidden" : "Rr hidden"));
+    const char *sW = g.shiny == 2 ? (g.rainbow == 0 ? "SHINY" : "masked")
+                                  : (g.shiny == 1 ? "carrier" : "--");
+    const char *dW = g.dark == 2 ? "Blackout" : (g.dark == 1 ? "Dark" : "--");
+    const char *bW = g.sterile == 2 ? "STERILE" : (g.sterile == 1 ? "carrier" : "ok");
+    const char *fW = g.cantFight == 2 ? "CANT FIGHT" : (g.cantFight == 1 ? "carrier" : "ok");
+    const char *hW = g.noHatch == 2 ? "NO HATCH" : (g.noHatch == 1 ? "carrier" : "ok");
+
+    auto twoCol = [&](const char *ll, const char *lv, const char *lw,
+                      const char *rl, const char *rv, const char *rw) {
+        char left[40], row[96];
+        snprintf(left, sizeof(left), "%-8s%s %s", ll, lv, lw);
+        snprintf(row, sizeof(row), "%-24s%-8s%s %s", left, rl, rv, rw);
+        s.log.push_back(row);
+    };
+    s.log.push_back("COSMETIC (looks)      MARKERS (health)");
+    twoCol("Rainbow", AP(g.rainbow, "RR", "Rr", "rr"),  rW, "Sterile", AP(g.sterile, "BB", "Bb", "bb"),  bW);
+    twoCol("Shiny",   AP(g.shiny, "SS", "Ss", "ss"),    sW, "CantFgt", AP(g.cantFight, "FF", "Ff", "ff"), fW);
+    twoCol("Dark",    AP(g.dark, "dd", "Dd", "DD"),     dW, "NoHatch", AP(g.noHatch, "HH", "Hh", "hh"),  hW);
+    return true;
 }
 
 void TerminalUI::battleEndButton(const ButtonEvent &ev) {
@@ -2223,6 +2465,7 @@ void TerminalUI::activateItem(int item) {
         case 0: activateMeshItem(item);   break;
         case 1: activateLocalItem(item);  break;
         case 2: activateSystemItem(item); break;
+        case 3: activateBreedItem(item);  break;
     }
 }
 
@@ -2305,6 +2548,14 @@ void TerminalUI::activateLocalItem(int item) {
             gymSel_ = 0;
             screen_ = Screen::GYM_SELECT;
             break;
+        case 3: // Breed — Bill's PC box
+            if (!breedLoaded_) { pentestLoadBox(); breedLoaded_ = true; }
+            breedCursorA_ = 0;
+            breedCursorB_ = -1;
+            breedScroll_  = 0;
+            breedMsg_.clear();
+            screen_ = Screen::BREEDING;
+            break;
     }
 }
 
@@ -2315,11 +2566,23 @@ void TerminalUI::activateSystemItem(int item) {
     }
 }
 
+void TerminalUI::activateBreedItem(int item) {
+    if (item == 0) {                       // Breeder Rooms
+        if (!breedLoaded_) { pentestLoadBox(); breedLoaded_ = true; }
+        breedCursorA_ = 0;
+        breedCursorB_ = -1;
+        breedScroll_  = 0;
+        breedMsg_.clear();
+        screen_ = Screen::BREEDING;
+    }
+}
+
 int TerminalUI::tabItemCount(int tab) const {
     switch (tab) {
         case 0: return MESH_COUNT;
         case 1: return LOCAL_COUNT;
         case 2: return SYSTEM_COUNT;
+        case 3: return BREED_COUNT;
         default: return 0;
     }
 }
@@ -2329,6 +2592,7 @@ const char **TerminalUI::tabItems(int tab) const {
         case 0: return (const char **)MESH_ITEMS;
         case 1: return (const char **)LOCAL_ITEMS;
         case 2: return (const char **)SYSTEM_ITEMS;
+        case 3: return (const char **)BREED_ITEMS;
         default: return nullptr;
     }
 }
@@ -2338,6 +2602,7 @@ const char **TerminalUI::tabDescs(int tab) const {
         case 0: return (const char **)MESH_DESC;
         case 1: return (const char **)LOCAL_DESC;
         case 2: return (const char **)SYSTEM_DESC;
+        case 3: return (const char **)BREED_DESC;
         default: return nullptr;
     }
 }
@@ -2561,6 +2826,9 @@ void TerminalUI::pentestLoadProgress() {
         fread(&pentestLosses_, sizeof(pentestLosses_), 1, f);
         // Gym-beaten bitset (optional — older saves predate gym progression).
         fread(&pentestGymBeaten_, sizeof(pentestGymBeaten_), 1, f);
+        // Active battler dex (optional — 0/absent = default Pikachu).
+        pentestActiveDex_ = 0;
+        fread(&pentestActiveDex_, sizeof(pentestActiveDex_), 1, f);
     }
     fclose(f);
 }
@@ -2578,6 +2846,7 @@ void TerminalUI::pentestSaveProgress() {
     fwrite(&pentestWins_,   sizeof(pentestWins_),   1, f);
     fwrite(&pentestLosses_, sizeof(pentestLosses_), 1, f);
     fwrite(&pentestGymBeaten_, sizeof(pentestGymBeaten_), 1, f);
+    fwrite(&pentestActiveDex_, sizeof(pentestActiveDex_), 1, f);
     fclose(f);
 }
 
@@ -2632,14 +2901,19 @@ static void pikaMovesForLevel(uint8_t level, uint8_t out[4]) {
 static bool pentestVulnForFlags(const char *flags, std::string &out) {
     std::string f = flags ? flags : "";
     auto has = [&](const char *s) { return f.find(s) != std::string::npos; };
-    if (has("WEP"))  { out = "WEP IV collision / key reuse";     return true; }
-    if (has("WPS"))  { out = "WPS PIN attack (Pixie Dust)";      return true; }
-    if (has("TKIP")) { out = "WPA-TKIP (BEAST/RC4 brute)";       return true; }
-    if (!has("WPA") && !has("RSN")) {           // no WPA/WPA2/WPA3 => open AP
+    // Every network in range is a wild encounter — the "vulnerability" is just
+    // flavour text on the mon you meet there. Pick the most interesting real
+    // attack the flags allow, most-severe first.
+    if (has("WEP"))  { out = "WEP IV collision / key reuse";        return true; }
+    if (has("WPS"))  { out = "WPS PIN attack (Pixie Dust)";         return true; }
+    if (has("TKIP")) { out = "WPA-TKIP (BEAST/RC4 brute)";          return true; }
+    if (!has("WPA") && !has("RSN")) {            // no WPA/WPA2/WPA3 => open AP
         out = "Open network - cleartext sniffing";
         return true;
     }
-    return false;                               // WPA/WPA2/WPA3 secured, no WPS
+    if (has("SAE"))  { out = "WPA3 SAE downgrade (Dragonblood)";    return true; }
+    out = "WPA2 PMKID hashcat -m 16800";         // WPA2-PSK — still an encounter
+    return true;
 }
 
 // Scan nearby WiFi via wpa_cli and refresh pentestNets_ with the VULNERABLE
@@ -2653,11 +2927,19 @@ void TerminalUI::pentestScanNetworks() {
     pentestNetsSeen_      = 0;
     pentestScanAvailable_ = false;
 #ifndef __APPLE__
-    // Read the supplicant's CACHED scan results — do NOT trigger an active
-    // `wpa_cli scan`.  An active scan briefly drops the WiFi association, and
-    // firing one every standby tick knocks the Pi off the network (and kills
-    // SSH).  wpa_supplicant scans on its own (frequently when unassociated), so
-    // cached results stay fresh enough for the game without disrupting WiFi.
+    // Kick a THROTTLED active scan so the cache holds every AP in range — not
+    // just the one we're associated to. wpa_supplicant does NOT background-scan
+    // while associated, so without this the game only ever sees the connected
+    // network. The scan is async (results land within a couple seconds and are
+    // read on the next call) and throttled to ~10 s so it barely disturbs the
+    // association. This is a warwalking game — finding networks is the point.
+    uint64_t now = millis();
+    if (now - pentestLastScanKickMs_ > 10000) {
+        pentestLastScanKickMs_ = now;
+        int rc = system("sudo -n wpa_cli -i wlan0 scan >/dev/null 2>&1");
+        (void)rc;
+    }
+    // Read the supplicant's cached scan results (freshly repopulated above).
     FILE *f = popen("sudo -n wpa_cli -i wlan0 scan_results 2>/dev/null", "r");
     if (!f) { pentestBleScan(); return; }
     char buf[256];
@@ -2686,9 +2968,11 @@ void TerminalUI::pentestScanNetworks() {
         } else {
             snprintf(displaySsid, sizeof(displaySsid), "%.39s", ssid);
         }
+        // Only de-dup WITHIN the current in-range list (the same AP can show up
+        // twice per scan). Networks are NOT retired across encounters anymore —
+        // every nearby network stays a repeatable catch attempt.
         bool skip = false;
-        for (auto &d : pentestDoneSsids_) if (d == displaySsid) { skip = true; break; }
-        for (auto &n : pentestNets_)      if (n.ssid == displaySsid) { skip = true; break; }
+        for (auto &n : pentestNets_) if (n.ssid == displaySsid) { skip = true; break; }
         if (skip) continue;
         pentestNets_.push_back({ displaySsid, vuln, bssid ? bssid : "" });
     }
@@ -3273,7 +3557,11 @@ void TerminalUI::sigintCapturesButton(const ButtonEvent &ev) {
 // caller drops to standby).  With no scanner at all, falls back to the fictional
 // demo list so the ROM still plays off-device.
 bool TerminalUI::pentestPickTarget() {
-    if (pentestNets_.empty()) pentestScanNetworks();
+    // Refresh the in-range list every pick so encounters keep coming from ALL
+    // nearby networks — revisiting an AP is another CATCH ATTEMPT (deterministic
+    // species per BSSID), not a one-and-done. (Reads cached wpa_cli results, no
+    // active scan.)
+    pentestScanNetworks();
 
     if (pentestScanAvailable_) {
         if (pentestNets_.empty()) return false;          // nothing vulnerable nearby
@@ -3285,8 +3573,8 @@ bool TerminalUI::pentestPickTarget() {
         snprintf(pentestBssid_, sizeof(pentestBssid_), "%s",
                  pentestNets_[pick].bssid.empty() ? pentestNets_[pick].ssid.c_str()
                                                   : pentestNets_[pick].bssid.c_str());
-        pentestDoneSsids_.push_back(pentestNets_[pick].ssid);   // don't refight this sweep
-        pentestNets_.erase(pentestNets_.begin() + pick);
+        // NOTE: intentionally do NOT retire the network — it stays a repeatable
+        // encounter so you can keep trying for a catch / farm its fixed mon.
         return true;
     }
 
@@ -3312,13 +3600,9 @@ bool TerminalUI::pentestPickTarget() {
         "Apple BLE proximity spam (SourApple/Handoff)",
     };
     const int NUM_SSID = (int)(sizeof(SSIDS)/sizeof(SSIDS[0]));
-    if (pentestUsedSsid_ == (uint16_t)((1u << NUM_SSID) - 1))
-        pentestUsedSsid_ = 0;
-    int unused[NUM_SSID], nUnused = 0;
-    for (int i = 0; i < NUM_SSID; i++)
-        if (!(pentestUsedSsid_ & (1u << i))) unused[nUnused++] = i;
-    int pick = unused[rand() % nUnused];
-    pentestUsedSsid_ |= (uint16_t)(1u << pick);
+    // Repeatable encounters: pick any demo network each time (no no-repeat mask),
+    // so the same fixed-mon networks keep coming up for more catch attempts.
+    int pick = rand() % NUM_SSID;
     snprintf(pentestSsid_, sizeof(pentestSsid_), "%s", SSIDS[pick]);
     snprintf(pentestVuln_, sizeof(pentestVuln_), "%s",
              VULNS[rand() % (int)(sizeof(VULNS)/sizeof(VULNS[0]))]);
@@ -3351,42 +3635,49 @@ void TerminalUI::pentestEnterStandby() {
 // ── Rare-colour roll ─────────────────────────────────────────────────────────
 // Colour roll out of 16384: Shiny 4 (1/4096), Pink 3, Rainbow 1; Dark is a
 // separate 1/1024 draw that stacks with the colour (Dark-Shiny / Pink / Rainbow).
-int TerminalUI::rollRareColor(const char *bssid, uint8_t species) {
-    using namespace Gen2SpriteCache;
-    // Deterministic: the colour is decided by a 64-bit FNV-1a hash of the
-    // network's MAC address mixed with the species.  A given AP therefore
-    // always produces the same colour for the same mon — the network's own
-    // identity is what makes it shiny/pink/rainbow/dark, not chance.  Two
-    // disjoint slices of the hash give the (independent) colour and dark rolls.
-    uint64_t h = 1469598103934665603ull;               // FNV-1a offset basis
-    for (const char *s = bssid ? bssid : ""; *s; ++s) { // mix the MAC
-        h ^= (uint8_t)*s; h *= 1099511628211ull;
+// Parse an AP MAC string ("AA:BB:CC:DD:EE:FF") into 6 raw bytes so the genotype
+// roll hashes the SAME 6 bytes the firmware / mmpoke do — keeping a network's
+// mon+skin identical across the ESP32, mmpoke, and this terminal.
+static void parseMacBytes(const char *s, uint8_t out[6]) {
+    for (int i = 0; i < 6; ++i) out[i] = 0;
+    if (!s) return;
+    int n = 0;
+    for (size_t i = 0; s[i] && n < 6; ++i) {
+        if (s[i] == ':') continue;
+        auto hx = [](char c) -> uint8_t {
+            if (c >= '0' && c <= '9') return (uint8_t)(c - '0');
+            if (c >= 'a' && c <= 'f') return (uint8_t)(c - 'a' + 10);
+            if (c >= 'A' && c <= 'F') return (uint8_t)(c - 'A' + 10);
+            return 0;
+        };
+        if (!s[i + 1]) break;
+        out[n++] = (uint8_t)((hx(s[i]) << 4) | hx(s[i + 1]));
+        ++i;
     }
-    h ^= species; h *= 1099511628211ull;               // mix the species
-    h ^= (h >> 33);                                     // final avalanche
+}
+
+// Roll the wild foe's FULL cosmetic + defect genotype deterministically from the
+// AP MAC + species (canonical PentestCatch model — matches firmware & mmpoke).
+// Stashes it in pentestFoeGeno_ so a catch keeps the whole genotype for breeding,
+// and returns the Gen2SpriteCache VAR_* used to tint the sprite (Blackout skins,
+// which have no dedicated sprite yet, fold onto their Dark equivalents).
+int TerminalUI::rollRareColor(const char *bssid, uint8_t species) {
+    uint8_t mac[6];
+    parseMacBytes(bssid, mac);
+    breeding::Genotype g = pentest::rollWildGenotype(mac, species);
 
 #ifdef PENTEST_RARE_TEST
-    // TEST ONLY: make rares common so the catch flow is observable.  Still
-    // deterministic per (MAC, species) — just with far wider rare buckets.
-    static const int kTest[] = { VAR_SHINY, VAR_PINK, VAR_RAINBOW, VAR_DARK,
-                                 VAR_DARK_SHINY, VAR_DARK_PINK, VAR_DARK_RAINBOW };
-    if ((h & 1) == 0) return kTest[(h >> 1) % 7];       // ~50% a rare colour
-    return VAR_NORMAL;
-#endif
-    uint32_t c = (uint32_t)(h % 16384);                 // colour roll
-    int color = VAR_NORMAL;
-    if      (c < 4) color = VAR_SHINY;      // 4/16384 = 1/4096
-    else if (c < 7) color = VAR_PINK;       // 3/16384
-    else if (c < 8) color = VAR_RAINBOW;    // 1/16384
-    if (((h >> 20) % 1024) == 0) {          // independent Dark draw ~1/1024
-        switch (color) {
-            case VAR_SHINY:   return VAR_DARK_SHINY;
-            case VAR_PINK:    return VAR_DARK_PINK;
-            case VAR_RAINBOW: return VAR_DARK_RAINBOW;
-            default:          return VAR_DARK;
-        }
+    // TEST ONLY: force a visible cosmetic far more often so the catch flow is
+    // observable. Still deterministic per (MAC, species).
+    if (breeding::skinOf(g) == breeding::SKIN_REGULAR) {
+        uint32_t h = pentest::geneHash(mac, species, 0xEE);
+        if ((h & 3u) != 0u) { g.female = 1; g.rainbow = 1; }   // ~75% forced ♀ Pink
     }
-    return color;
+#endif
+
+    pentestFoeGeno_ = g;
+    // breeding::Skin 0..11 maps 1:1 to Gen2SpriteCache VAR_* (incl. Blackout).
+    return (int)breeding::skinOf(g);
 }
 
 static const char *rareColorName(int v) {
@@ -3420,6 +3711,162 @@ void TerminalUI::pentestSaveRareCatch(uint8_t dex, uint8_t variant, uint8_t leve
     fclose(f);
 }
 
+// ── Breeding box (Bill's PC) — full-genotype catches for the Breed tab ─────────
+// Stored as the canonical 22-byte CaughtMon wire record so it is byte-compatible
+// with the firmware transfer + BreedingApp::importCaughtMonBlob(): dex, level,
+// geno[7] (rainbow,shiny,dark,sterile,cantFight,noHatch,female), caughtSec u32,
+// provenance (0=Wild), nick[8]. Same file feeds the future LoRa social transfer.
+static const char *pentestBoxPath() {
+#ifdef __APPLE__
+    return "/tmp/monstermesh/breeding_box.dat";
+#else
+    return "/var/lib/monstermesh/breeding_box.dat";
+#endif
+}
+
+// Serialize one caught mon to the canonical 22-byte wire record.
+static void pentestSerializeMon(const breeding::BreedMon &m, uint8_t rec[22]) {
+    memset(rec, 0, 22);
+    rec[0] = m.dex;
+    rec[1] = m.level;
+    rec[2] = m.geno.rainbow;   rec[3] = m.geno.shiny;    rec[4] = m.geno.dark;
+    rec[5] = m.geno.sterile;   rec[6] = m.geno.cantFight; rec[7] = m.geno.noHatch;
+    rec[8] = m.geno.female;
+    // rec[9..12] caughtSec — leave 0 (clock not needed for the roster)
+    // provenance byte: 0 = Wild catch; else the Fn generation number (bred).
+    rec[13] = (m.prov == breeding::PROV_WILD) ? 0
+                                              : (m.provGen ? m.provGen : 1);
+    memcpy(rec + 14, m.nick, 8);
+}
+
+void TerminalUI::pentestAppendBox(const breeding::BreedMon &m) {
+    FILE *f = fopen(pentestBoxPath(), "ab");
+    if (!f) return;
+    uint8_t rec[22];
+    pentestSerializeMon(m, rec);
+    fwrite(rec, 1, sizeof(rec), f);
+    fclose(f);
+}
+
+// Persist the 3 breeder rooms as a same-device binary blob (magic + version +
+// per-build room size guard so a layout change discards cleanly).
+static const char *pentestRoomsPath() {
+#ifdef __APPLE__
+    return "/tmp/monstermesh/breeder_rooms.dat";
+#else
+    return "/var/lib/monstermesh/breeder_rooms.dat";
+#endif
+}
+void TerminalUI::pentestSaveRooms() {
+    FILE *f = fopen(pentestRoomsPath(), "wb");
+    if (!f) return;
+    uint32_t magic = 0x424D5252;                    // "RRMB"
+    uint8_t  ver   = 1;
+    uint16_t rsz   = (uint16_t)sizeof(breeding::BreederRoom);
+    fwrite(&magic, 4, 1, f); fwrite(&ver, 1, 1, f); fwrite(&rsz, 2, 1, f);
+    fwrite(breederMgr_.rawRooms(), sizeof(breeding::BreederRoom),
+           breeding::NUM_BREEDER_ROOMS, f);
+    fclose(f);
+}
+void TerminalUI::pentestLoadRooms() {
+    FILE *f = fopen(pentestRoomsPath(), "rb");
+    if (!f) return;
+    uint32_t magic = 0; uint8_t ver = 0; uint16_t rsz = 0;
+    if (fread(&magic, 4, 1, f) == 1 && fread(&ver, 1, 1, f) == 1 &&
+        fread(&rsz, 2, 1, f) == 1 && magic == 0x424D5252 && ver == 1 &&
+        rsz == (uint16_t)sizeof(breeding::BreederRoom)) {
+        breeding::BreederRoom tmp[breeding::NUM_BREEDER_ROOMS];
+        if (fread(tmp, sizeof(breeding::BreederRoom),
+                  breeding::NUM_BREEDER_ROOMS, f) == breeding::NUM_BREEDER_ROOMS)
+            breederMgr_.restoreRooms(tmp);
+    }
+    fclose(f);
+}
+
+// Overwrite the box file with exactly the current roster (used after dedup).
+void TerminalUI::pentestRewriteBox() {
+    FILE *f = fopen(pentestBoxPath(), "wb");
+    if (!f) return;
+    uint8_t rec[22];
+    for (const auto &m : breedApp_.roster()) {
+        pentestSerializeMon(m, rec);
+        fwrite(rec, 1, sizeof(rec), f);
+    }
+    fclose(f);
+}
+
+// Collapse the box to ONE mon per (SPECIES + COLORATION) — so you keep e.g. a
+// Pink Jigglypuff AND a Pink Pidgey, just not duplicate copies of the same
+// species+colour — keeping the one with the fewest birth defects (lowest
+// sterile+cantFight+noHatch dosage sum). User-triggered from the Bill's PC menu.
+// Rewrites the file if anything changed (backing up the pre-dedup box once).
+void TerminalUI::pentestDedupBox() {
+    const auto &roster = breedApp_.roster();
+    if (roster.size() <= 1) return;
+    auto defectScore = [](const breeding::Genotype &g) {
+        return (int)g.sterile + (int)g.cantFight + (int)g.noHatch;   // 0..6, lower=better
+    };
+    std::vector<breeding::BreedMon> keep;
+    keep.reserve(roster.size());
+    for (const auto &m : roster) {
+        int sk = (int)breeding::skinOf(m.geno);
+        int found = -1;
+        for (size_t i = 0; i < keep.size(); ++i)
+            if (keep[i].dex == m.dex && (int)breeding::skinOf(keep[i].geno) == sk) {
+                found = (int)i; break;
+            }
+        if (found < 0) keep.push_back(m);
+        else if (defectScore(m.geno) < defectScore(keep[(size_t)found].geno))
+            keep[(size_t)found] = m;
+    }
+    if (keep.size() == roster.size()) return;   // nothing to collapse
+    breedApp_.clear();
+    for (auto &m : keep) breedApp_.add(m);
+    // One-time safety backup of the pre-dedup box, then rewrite.
+    std::string bak = std::string(pentestBoxPath()) + ".predupe";
+    FILE *chk = fopen(bak.c_str(), "rb");
+    if (chk) { fclose(chk); }                  // backup already exists — don't clobber
+    else     { rename(pentestBoxPath(), bak.c_str()); }
+    pentestRewriteBox();
+}
+
+void TerminalUI::pentestLoadBox() {
+    FILE *f = fopen(pentestBoxPath(), "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len > 0 && len < 1 << 20) {
+        std::vector<uint8_t> buf((size_t)len);
+        if (fread(buf.data(), 1, (size_t)len, f) == (size_t)len)
+            breedApp_.importCaughtMonBlob(buf.data(), buf.size());
+    }
+    fclose(f);
+    // Sort the box by Pokedex number so mons are always in a findable order
+    // (within any colour tab they appear in dex order, not random catch order).
+    auto &ros = breedApp_.mutableRoster();
+    std::sort(ros.begin(), ros.end(),
+              [](const breeding::BreedMon &a, const breeding::BreedMon &b) {
+                  if (a.dex != b.dex) return a.dex < b.dex;
+                  return (int)breeding::skinOf(a.geno) < (int)breeding::skinOf(b.geno);
+              });
+    pentestLoadRooms();   // restore any occupied breeder rooms (survives relaunch)
+}
+
+// Cheap signature of the breeder-room state — changes whenever a room is placed,
+// lays an egg, hatches, or is emptied, so we only rewrite the file on change.
+static uint64_t breederRoomsSig(const breeding::BreederManager &m) {
+    uint64_t h = 1469598103934665603ull;
+    for (int i = 0; i < m.roomCount(); ++i) {
+        const auto &r = m.room(i);
+        uint64_t v = (uint64_t)r.state ^ ((uint64_t)r.idA << 8) ^ ((uint64_t)r.idB << 20)
+                   ^ ((uint64_t)r.eggHatchAt << 3) ^ ((uint64_t)r.rolled << 40)
+                   ^ ((uint64_t)r.pendingChild.dex << 44);
+        h = (h ^ v) * 1099511628211ull;
+    }
+    return h;
+}
+
 // Auto-tick hook: if the foe is a rare colour, Pikachu fights it down to <=60%
 // HP then throws Poke Balls (skipping the attack) until it's caught. Returns
 // true when it handled the tick.
@@ -3431,7 +3878,17 @@ bool TerminalUI::pentestTryCatchTick() {
     if (foe.hp == 0 || foe.maxHp == 0) return false;
 
     if (!pentestCatching_) {
-        if ((uint32_t)foe.hp * 5 > (uint32_t)foe.maxHp * 3) return false;   // >60% HP: keep fighting
+        // Don't re-catch the EXACT same species+colour you already own (stops the
+        // box refilling with duplicates of the same repeatable network). Collapsing
+        // colours to one-of-each is a manual action in the Bill's PC menu.
+        if (!breedLoaded_) { pentestLoadBox(); breedLoaded_ = true; }
+        breeding::Skin foeSkin = breeding::skinOf(pentestFoeGeno_);
+        for (const auto &owned : breedApp_.roster())
+            if (owned.dex == pentestFoeDex_ && breeding::skinOf(owned.geno) == foeSkin)
+                return false;
+        // Like the real games: it has to be WORN DOWN first. Keep fighting until
+        // the foe is into the red (~25% HP) before switching to Poke Balls.
+        if ((uint32_t)foe.hp * 4 > (uint32_t)foe.maxHp) return false;   // >25% HP: keep fighting
         pentestCatching_ = true;
         char line[80];
         snprintf(line, sizeof(line), "A %s %s! Pikachu throws a Poke Ball!",
@@ -3439,19 +3896,33 @@ bool TerminalUI::pentestTryCatchTick() {
         battleLog_.push_back(line);
     }
 
-    // Catch chance rises as HP drops (45%% at 60%% HP up to 92%% near 0). We stop
-    // attacking once catching, so a rare is always caught eventually — no KO.
-    int hpPct  = (int)((uint32_t)foe.hp * 100 / foe.maxHp);
-    int chance = 100 - hpPct;
-    if (chance < 45) chance = 45;
-    if (chance > 92) chance = 92;
-    if ((rand() % 100) < chance) {
+    // Gen-1-style catch odds: low even when weakened (no bait/status in the
+    // auto-battle), so it takes several balls and isn't a guaranteed grab.
+    // 40permille at full HP → ~600permille at 1 HP. We stop attacking once
+    // catching so the foe is never KO'd — you just keep throwing.
+    uint16_t p = pentest::catchPermille(foe.hp, foe.maxHp, false, false);
+    bool caught = ((uint32_t)(rand() % 1000) < p);
+    // Trigger the SDL Poke Ball throw/wobble/result animation for this throw.
+    pentestCatchSeq_++;
+    pentestCatchOutcome_ = caught ? 1 : 2;
+    if (caught) {
         char line[80];
         snprintf(line, sizeof(line), "Gotcha! The %s %s was caught!",
                  rareColorName(pentestFoeVariant_), dexName(foe.species));
         battleLog_.push_back(line);
         pentestRareCaught_++;
         pentestSaveRareCatch(foe.species, (uint8_t)pentestFoeVariant_, foe.level);
+        // New genetics: keep the FULL genotype so this catch can breed. Add it to
+        // the live roster AND persist it to the box file (Bill's PC / Breed tab).
+        breeding::BreedMon caught{};
+        caught.dex   = pentestFoeDex_;
+        caught.level = foe.level;
+        caught.geno  = pentestFoeGeno_;
+        caught.prov  = breeding::PROV_WILD;
+        strncpy(caught.nick, breeding::BreedingApp::dexName(pentestFoeDex_),
+                sizeof(caught.nick) - 1);
+        breedApp_.add(caught);
+        pentestAppendBox(caught);
         battleResult_ = Gen1BattleEngine::Result::P1_WIN;   // reuse the end/linger flow
         screen_ = Screen::BATTLE;
     } else {
@@ -3472,6 +3943,8 @@ void TerminalUI::startPentestBattle() {
     } else if (!pentestLoaded_) {
         // First scan this launch — load remembered progress (defaults to L5).
         pentestLoadProgress();
+        pentestLoadBox();          // Bill's PC — caught mons for the Breed tab
+        breedLoaded_ = true;
         pentestLoaded_ = true;
     }
 
@@ -3508,28 +3981,48 @@ void TerminalUI::startPentestBattle() {
     // Species + moveset track the Pikachu's level: it evolves into Raichu at
     // L30, and carries the 4 most-recently-learned moves from the Gen-1
     // learnset (recomputed each scan, so leveling up brings new moves online).
+    // Active battler: default Pikachu/Raichu, OR a caught mon promoted via the
+    // Bill's PC "Set as Active" menu (pentestActiveDex_ != 0).
     bool    evolved      = (pentestLevel_ >= PIKACHU_EVOLVE_LEVEL);
-    uint8_t pikaDex      = evolved ? 26 : 25;       // Raichu : Pikachu
-    uint8_t pikaInternal = dexToInternal[pikaDex];
-    uint8_t pikaMoves[4];
-    pikaMovesForLevel(pentestLevel_, pikaMoves);
+    uint8_t battlerDex   = (pentestActiveDex_ != 0) ? pentestActiveDex_
+                                                    : (uint8_t)(evolved ? 26 : 25);
+    uint8_t battlerInt   = dexToInternal[battlerDex];
+    uint8_t battlerMoves[4];
+    char    battlerName[12];
+    if (pentestActiveDex_ != 0) {
+        // This species' REAL level-up learnset — the 4 most-recently-learned
+        // moves at the trainer's level, just like the games (and the Pikachu path).
+        uint8_t all[32];
+        uint8_t na = gen1MovesLearnedBetween(pentestActiveDex_, 0, pentestLevel_, all, 32);
+        battlerMoves[0] = battlerMoves[1] = battlerMoves[2] = battlerMoves[3] = 0;
+        int start = (na > 4) ? na - 4 : 0, j = 0;
+        for (int i = start; i < (int)na; i++) battlerMoves[j++] = all[i];
+        if (battlerMoves[0] == 0) battlerMoves[0] = 33;       // Tackle fallback (no learnset)
+        snprintf(battlerName, sizeof(battlerName), "%s", dexName(battlerDex));
+    } else {
+        pikaMovesForLevel(pentestLevel_, battlerMoves);
+        snprintf(battlerName, sizeof(battlerName), "%s", evolved ? "RAICHU" : "PIKACHU");
+    }
     memset(&party_, 0, sizeof(party_));
     party_.count            = 1;
-    party_.species[0]       = pikaInternal;
-    party_.mons[0].species  = pikaInternal;
+    party_.species[0]       = battlerInt;
+    party_.mons[0].species  = battlerInt;
     party_.mons[0].level    = pentestLevel_;
     party_.mons[0].boxLevel = pentestLevel_;
     party_.mons[0].dvs[0]   = 0x88;
     party_.mons[0].dvs[1]   = 0x88;
-    memcpy(party_.mons[0].moves, pikaMoves, 4);
+    memcpy(party_.mons[0].moves, battlerMoves, 4);
     for (int m = 0; m < 4; m++) {
-        const Gen1MoveData *md = gen1Move(pikaMoves[m]);
+        const Gen1MoveData *md = gen1Move(battlerMoves[m]);
         party_.mons[0].pp[m] = md ? md->pp : 0;
     }
     memset(party_.nicknames[0], 0x50, 11);          // 0x50 = Gen1 string term
-    const char *nk = evolved ? "RAICHU" : "PIKACHU";
-    for (int j = 0; nk[j] && j < 10; j++)
-        party_.nicknames[0][j] = (uint8_t)(0x80 + (nk[j] - 'A'));
+    for (int j = 0; battlerName[j] && j < 10; j++) {
+        char c = battlerName[j];
+        if (c >= 'a' && c <= 'z') c = (char)(c - 32);   // uppercase
+        if (c >= 'A' && c <= 'Z') party_.nicknames[0][j] = (uint8_t)(0x80 + (c - 'A'));
+        else                      party_.nicknames[0][j] = 0x7F;   // space for non-letters
+    }
 
     // Resume partial XP toward the next level; never bank it to the SAV.
     slotLevelXp_[0] = pentestXp_;
@@ -3649,7 +4142,8 @@ void TerminalUI::startPentestBattle() {
     // Roll this encounter's colour skin. Rare colours (non-Regular) get caught
     // with a Poke Ball once Pikachu weakens them, not just defeated.  Seeded by
     // the target's MAC + species, so this AP always shows the same colour here.
-    pentestFoeVariant_ = rollRareColor(pentestBssid_, wildDex);
+    pentestFoeVariant_ = rollRareColor(pentestBssid_, wildDex);  // sets pentestFoeGeno_
+    pentestFoeDex_     = wildDex;                                 // national dex for a catch
     pentestCatching_   = false;
 
     uint8_t wildInternal = dexToInternal[wildDex];
@@ -4851,6 +5345,333 @@ void TerminalUI::gymSelectButton(const ButtonEvent &ev)
     }
 }
 
+// ── Breed tab (Bill's PC) ─────────────────────────────────────────────────────
+// A scrollable list of every caught mon. Move the cursor with UP/DOWN; press A
+// to lock the first parent, move, press A again to breed the pair. B cancels a
+// pending selection, or leaves the tab. Uses the same Mendelian engine as
+// mmbreed (breeding::BreedingApp) so the offspring inherits exactly per the
+// genetics doc; a kept child is added to the box and persisted.
+// Exact Mendelian child-outcome distribution for a pairing (per-locus
+// independent). skin[] sums the 12 visible skins over the 50/50 sex coin;
+// defAff/defCar are per-defect P(affected)/P(carrier).
+struct ChildOdds {
+    double skin[12] = {0};
+    double defAff[3] = {0}, defCar[3] = {0};   // sterile, cantFight, noHatch
+    // Hidden ♂ carriers: a male with a rainbow allele shows Regular but carries
+    // the pink (1 dose) or rainbow (2 dose) gene — invisible until bred to a ♀.
+    double malePink = 0, maleRnbw = 0;
+};
+static ChildOdds computeChildOdds(const breeding::Genotype &a, const breeding::Genotype &b) {
+    auto locus = [](uint8_t da, uint8_t db, double out[3]) {
+        double pa = da / 2.0, pb = db / 2.0;    // prob each parent passes the rare allele
+        out[0] = (1 - pa) * (1 - pb);           // dosage 0 (clean)
+        out[2] = pa * pb;                       // dosage 2 (homozygous rare)
+        out[1] = 1.0 - out[0] - out[2];         // dosage 1 (carrier)
+    };
+    double R[3], S[3], D[3], B[3], F[3], H[3];
+    locus(a.rainbow, b.rainbow, R);   locus(a.shiny, b.shiny, S);
+    locus(a.dark, b.dark, D);         locus(a.sterile, b.sterile, B);
+    locus(a.cantFight, b.cantFight, F); locus(a.noHatch, b.noHatch, H);
+    ChildOdds o;
+    for (int rb = 0; rb < 3; rb++)
+      for (int sh = 0; sh < 3; sh++)
+        for (int dk = 0; dk < 3; dk++)
+          for (int fem = 0; fem < 2; fem++) {
+              breeding::Genotype g{};
+              g.rainbow = (uint8_t)rb; g.shiny = (uint8_t)sh; g.dark = (uint8_t)dk;
+              g.female = (uint8_t)fem;
+              double p = R[rb] * S[sh] * D[dk] * 0.5;
+              o.skin[(int)breeding::skinOf(g)] += p;
+              if (fem == 0 && rb == 1) o.malePink += p;   // hidden pink carrier
+              if (fem == 0 && rb == 2) o.maleRnbw += p;   // hidden rainbow carrier
+          }
+    o.defAff[0] = B[2]; o.defCar[0] = B[1];
+    o.defAff[1] = F[2]; o.defCar[1] = F[1];
+    o.defAff[2] = H[2]; o.defCar[2] = H[1];
+    return o;
+}
+
+void TerminalUI::renderBreeding()
+{
+    werase(winInfo_);
+
+    // Advance the overnight cycle: eggs APPEAR at 6 AM, HATCH at 6 PM. Any mon
+    // that hatches is added to the roster by tick(); persist it to the box.
+    long now = time(nullptr);
+    {
+        breeding::Rng rng((uint64_t)now ^ ((uint64_t)breedApp_.size() << 8));
+        for (auto &e : breederMgr_.tick(breedApp_, now, rng)) {
+            if (e.result.status == breeding::BREED_OK)
+                pentestAppendBox(e.result.child);
+            breedMsg_ = e.result.message;
+        }
+    }
+    // Persist the breeder rooms whenever their state changed (place / egg / hatch
+    // / cancel), so they survive the terminal relaunching between ROM opens.
+    { uint64_t sig = breederRoomsSig(breederMgr_);
+      if (sig != breederSig_) { pentestSaveRooms(); breederSig_ = sig; } }
+
+    int rows = getmaxy(winInfo_);
+
+    // ── Rooms browser (Y toggles): view/kick pairs + see this pair's child odds ─
+    if (breedRoomsView_) {
+        int rc = breederMgr_.roomCount();
+        if (breedRoomSel_ < 0)   breedRoomSel_ = rc - 1;
+        if (breedRoomSel_ >= rc) breedRoomSel_ = 0;
+        wattron(winInfo_, A_BOLD);
+        mvwprintw(winInfo_, 0, 1, "BREEDER ROOMS   [START: back to mons]");
+        wattroff(winInfo_, A_BOLD);
+        for (int i = 0; i < rc; ++i) {
+            const breeding::BreederRoom &rm = breederMgr_.room(i);
+            bool sel = (i == breedRoomSel_);
+            if (sel) wattron(winInfo_, A_REVERSE | COLOR_PAIR(3));
+            if (rm.state == breeding::ROOM_EMPTY) {
+                mvwprintw(winInfo_, 2 + i, 0, "%cRoom %d: (empty)", sel ? '>' : ' ', i + 1);
+            } else {
+                const char *na = rm.parentA.nick[0] ? rm.parentA.nick : breeding::BreedingApp::dexName(rm.parentA.dex);
+                const char *nb = rm.parentB.nick[0] ? rm.parentB.nick : breeding::BreedingApp::dexName(rm.parentB.dex);
+                mvwprintw(winInfo_, 2 + i, 0, "%cRoom %d: %.7s x %.7s  %s",
+                          sel ? '>' : ' ', i + 1, na, nb,
+                          rm.state == breeding::ROOM_EGG ? "EGG->6PM" : "->egg 6AM");
+            }
+            if (sel) wattroff(winInfo_, A_REVERSE | COLOR_PAIR(3));
+        }
+        const breeding::BreederRoom &srm = breederMgr_.room(breedRoomSel_);
+        int ry = 3 + rc;
+        if (srm.state != breeding::ROOM_EMPTY) {
+            ChildOdds o = computeChildOdds(srm.parentA.geno, srm.parentB.geno);
+            int order[12]; for (int i = 0; i < 12; i++) order[i] = i;
+            std::sort(order, order + 12, [&](int x, int y) { return o.skin[x] > o.skin[y]; });
+            mvwprintw(winInfo_, ry++, 0, "Child colors:");
+            std::string col;
+            for (int k = 0; k < 12; k++) {
+                int sk = order[k]; if (o.skin[sk] < 0.005) break;
+                char c[28]; snprintf(c, sizeof(c), "%s %.0f%%  ",
+                                     breeding::skinName((breeding::Skin)sk), o.skin[sk] * 100);
+                if ((int)(col.size() + strlen(c)) > getmaxx(winInfo_) - 1 && ry < rows - 1) {
+                    mvwprintw(winInfo_, ry++, 0, "%s", col.c_str()); col.clear();
+                }
+                col += c;
+            }
+            if (!col.empty() && ry < rows - 1) mvwprintw(winInfo_, ry++, 0, "%s", col.c_str());
+            if (ry < rows - 1)
+                mvwprintw(winInfo_, ry++, 0, "Hidden male carrier: pink %.0f%%  rnbw %.0f%%",
+                          o.malePink * 100, o.maleRnbw * 100);
+            if (ry < rows - 1)
+                mvwprintw(winInfo_, ry++, 0, "Defects: Ster %.0f%% Cant %.0f%% Hatch %.0f%%",
+                          o.defAff[0] * 100, o.defAff[1] * 100, o.defAff[2] * 100);
+        }
+        mvwprintw(winInfo_, rows - 1, 1, "%.*s", getmaxx(winInfo_) - 2,
+                  srm.state != breeding::ROOM_EMPTY ? "A: kick out   U/D: room   START: mons   B: back"
+                                                    : "U/D: room   START: mons   B: back");
+        return;
+    }
+
+    const auto &r = breedApp_.roster();
+
+    if (r.empty()) {
+        wattron(winInfo_, A_BOLD);
+        mvwprintw(winInfo_, 0, 1, "Breeder Rooms  (0)");
+        wattroff(winInfo_, A_BOLD);
+        mvwprintw(winInfo_, 2, 1, "No caught mons yet.");
+        mvwprintw(winInfo_, 3, 1, "Catch mons in the Pentest ROM first.");
+        return;
+    }
+
+    // Per-category counts + build the filtered list for the current tab.
+    int cnt[kBoxTabCount] = {0};
+    for (const auto &m : r) {
+        breeding::Skin s2 = breeding::skinOf(m.geno);
+        for (int t = 0; t < kBoxTabCount; ++t) if (boxTabMatch(s2, t)) cnt[t]++;
+    }
+    if (breedTab_ < 0) breedTab_ = kBoxTabCount - 1;
+    if (breedTab_ >= kBoxTabCount) breedTab_ = 0;
+    std::vector<int> filt;
+    for (int i = 0; i < (int)r.size(); ++i)
+        if (boxTabMatch(breeding::skinOf(r[i].geno), breedTab_)) filt.push_back(i);
+    int fn = (int)filt.size();
+    if (breedCursorA_ < 0)  breedCursorA_ = fn ? fn - 1 : 0;
+    if (breedCursorA_ >= fn) breedCursorA_ = 0;
+
+    // Row 0: title. Row 1: category tab bar (L/R filters), current highlighted.
+    wattron(winInfo_, A_BOLD);
+    mvwprintw(winInfo_, 0, 1, "Breeder Rooms  \xE2\x97\x84 %s %d \xE2\x96\xB6%s",
+              kBoxTabNames[breedTab_], fn,
+              breedApp_.breedingUnlocked() ? "" : "  [locked]");
+    wattroff(winInfo_, A_BOLD);
+    { int cx = 1;
+      for (int t = 0; t < kBoxTabCount; ++t) {
+          char chip[16]; snprintf(chip, sizeof(chip), "%s%d", kBoxTabNames[t], cnt[t]);
+          if (t == breedTab_) wattron(winInfo_, A_REVERSE | COLOR_PAIR(3));
+          mvwprintw(winInfo_, 1, cx, " %s ", chip);
+          if (t == breedTab_) wattroff(winInfo_, A_REVERSE | COLOR_PAIR(3));
+          cx += (int)strlen(chip) + 3;
+      } }
+
+    // Reserve the bottom rows for the 3 breeder rooms + a prompt. List starts row 2.
+    int roomRows = breeding::NUM_BREEDER_ROOMS + 1;
+    int listRows = rows - roomRows - 3;
+    if (listRows < 1) listRows = 1;
+    if (breedCursorA_ < breedScroll_)             breedScroll_ = breedCursorA_;
+    if (breedCursorA_ >= breedScroll_ + listRows) breedScroll_ = breedCursorA_ - listRows + 1;
+    if (breedScroll_ < 0) breedScroll_ = 0;
+
+    for (int i = 0; i < listRows && (breedScroll_ + i) < fn; ++i) {
+        int fi  = breedScroll_ + i;
+        int idx = filt[fi];
+        const breeding::BreedMon &m = r[idx];
+        bool sel    = (fi == breedCursorA_);
+        bool locked = (idx == breedCursorB_);
+        bool busy   = breederMgr_.inAnyRoom(m.id);
+        long cd     = breeding::BreederManager::cooldownRemaining(m, now);
+        char mark   = locked ? '*' : (sel ? '>' : (busy ? '~' : ' '));
+        breeding::Skin sk = breeding::skinOf(m.geno);
+        if (sel) wattron(winInfo_, A_REVERSE | COLOR_PAIR(3));
+        mvwprintw(winInfo_, 2 + i, 0, "%cL%-3d %-9.9s %-8.8s %s%s",
+                  mark, m.level,
+                  m.nick[0] ? m.nick : breeding::BreedingApp::dexName(m.dex),
+                  breeding::skinName(sk),
+                  m.geno.female ? "\xE2\x99\x80" : "\xE2\x99\x82",
+                  breeding::isSterile(m.geno) ? " bb"
+                    : busy ? " ~room"
+                    : cd > 0 ? " ~cd" : "");
+        if (sel) wattroff(winInfo_, A_REVERSE | COLOR_PAIR(3));
+    }
+
+    int ry = 2 + listRows;
+    if (breedCursorB_ >= 0 && breedCursorB_ < (int)r.size() && fn > 0) {
+        // ── Cross preview: child coloration + defect odds (mate1 x cursor) ──
+        const breeding::BreedMon &mA = r[breedCursorB_];
+        const breeding::BreedMon &mB = r[filt[breedCursorA_]];
+        ChildOdds o = computeChildOdds(mA.geno, mB.geno);
+        int order[12]; for (int i = 0; i < 12; i++) order[i] = i;
+        std::sort(order, order + 12, [&](int x, int y) { return o.skin[x] > o.skin[y]; });
+        mvwprintw(winInfo_, ry++, 0, "Child colors (%.5s x %.5s):",
+                  mA.nick[0] ? mA.nick : breeding::BreedingApp::dexName(mA.dex),
+                  mB.nick[0] ? mB.nick : breeding::BreedingApp::dexName(mB.dex));
+        std::string colline;
+        for (int k = 0; k < 12; k++) {
+            int sk = order[k];
+            if (o.skin[sk] < 0.005) break;                 // hide <0.5%
+            char cell[28];
+            snprintf(cell, sizeof(cell), "%s %.0f%%  ",
+                     breeding::skinName((breeding::Skin)sk), o.skin[sk] * 100.0);
+            if ((int)(colline.size() + strlen(cell)) > getmaxx(winInfo_) - 1) {
+                if (ry < rows - 1) mvwprintw(winInfo_, ry++, 0, "%s", colline.c_str());
+                colline.clear();
+            }
+            colline += cell;
+        }
+        if (!colline.empty() && ry < rows - 1)
+            mvwprintw(winInfo_, ry++, 0, "%s", colline.c_str());
+        if (ry < rows - 1)
+            mvwprintw(winInfo_, ry++, 0,
+                      "Hidden male carrier: pink %.0f%%  rnbw %.0f%%",
+                      o.malePink * 100.0, o.maleRnbw * 100.0);
+        if (ry < rows - 1)
+            mvwprintw(winInfo_, ry++, 0,
+                      "Defects: Ster %.0f%% Cant %.0f%% Hatch %.0f%% (bb/ff/hh)",
+                      o.defAff[0] * 100, o.defAff[1] * 100, o.defAff[2] * 100);
+    } else {
+        // Breeder-room status (one line per room, with egg/hatch clock times).
+        auto lines = breederMgr_.statusLines(breedApp_, now);
+        for (size_t i = 0; i < lines.size() && ry < rows - 1; ++i)
+            mvwprintw(winInfo_, ry++, 0, "%.*s", getmaxx(winInfo_) - 1, lines[i].c_str());
+    }
+
+    const char *bottom = !breedMsg_.empty() ? breedMsg_.c_str()
+                       : (breedCursorB_ >= 0 ? "A: 2nd mate  L/R: filter  START: rooms  B: cancel"
+                                             : "A: mate 1  L/R: filter  START: rooms  B: back");
+    mvwprintw(winInfo_, rows - 1, 1, "%.*s", getmaxx(winInfo_) - 2, bottom);
+}
+
+void TerminalUI::breedingButton(const ButtonEvent &ev)
+{
+    // ── Rooms browser mode (START/Y toggles) ────────────────────────────────
+    if (breedRoomsView_) {
+        int rc = breederMgr_.roomCount();
+        switch (ev.button) {
+            case GpiButton::START:
+            case GpiButton::Y:    breedRoomsView_ = false; return;
+            case GpiButton::UP:   breedRoomSel_ = (breedRoomSel_ + rc - 1) % rc; return;
+            case GpiButton::DOWN: breedRoomSel_ = (breedRoomSel_ + 1) % rc; return;
+            case GpiButton::A:
+                if (breederMgr_.room(breedRoomSel_).state != breeding::ROOM_EMPTY) {
+                    breederMgr_.cancel(breedRoomSel_);
+                    pentestSaveRooms();
+                    breederSig_ = breederRoomsSig(breederMgr_);
+                    breedMsg_ = "Kicked them out of the room.";
+                }
+                return;
+            case GpiButton::B:    screen_ = Screen::MENU; return;
+            default:              return;
+        }
+    }
+
+    const auto &r = breedApp_.roster();
+    long now = time(nullptr);
+    // Rebuild the current tab's filtered list (roster indices).
+    std::vector<int> filt;
+    for (int i = 0; i < (int)r.size(); ++i)
+        if (boxTabMatch(breeding::skinOf(r[i].geno), breedTab_)) filt.push_back(i);
+    int fn = (int)filt.size();
+
+    switch (ev.button) {
+        case GpiButton::LEFT:
+            breedTab_ = (breedTab_ + kBoxTabCount - 1) % kBoxTabCount;
+            breedCursorA_ = 0; breedScroll_ = 0; breedMsg_.clear();
+            break;
+        case GpiButton::RIGHT:
+            breedTab_ = (breedTab_ + 1) % kBoxTabCount;
+            breedCursorA_ = 0; breedScroll_ = 0; breedMsg_.clear();
+            break;
+        case GpiButton::UP:
+            if (fn) breedCursorA_ = (breedCursorA_ + fn - 1) % fn;
+            breedMsg_.clear();
+            break;
+        case GpiButton::DOWN:
+            if (fn) breedCursorA_ = (breedCursorA_ + 1) % fn;
+            breedMsg_.clear();
+            break;
+        case GpiButton::A: {
+            if (fn == 0) break;
+            int rosterIdx = filt[breedCursorA_ % fn];
+            uint32_t mid = r[rosterIdx].id;
+            // If this mon is already in a breeder room, A takes it OUT (cancels
+            // the room; the 7-day cooldown it started still applies).
+            if (breederMgr_.inAnyRoom(mid)) {
+                for (int s = 0; s < breederMgr_.roomCount(); ++s) {
+                    const auto &rm = breederMgr_.room(s);
+                    if (rm.idA == mid || rm.idB == mid) { breederMgr_.cancel(s); break; }
+                }
+                breedMsg_ = "Took them out of the breeder room.";
+                breedCursorB_ = -1;
+                break;
+            }
+            if (breedCursorB_ < 0) {
+                breedCursorB_ = rosterIdx;            // lock mate 1 (roster index)
+                breedMsg_ = "Mate 1 set \xE2\x80\x94 filter/scroll to mate 2.";
+            } else {
+                std::string err;
+                int room = breederMgr_.placePair(breedApp_, (size_t)breedCursorB_,
+                                                 (size_t)rosterIdx, now, err);
+                breedMsg_ = (room >= 0) ? "Paired! Egg at 6AM, hatches 6PM." : err;
+                breedCursorB_ = -1;
+            }
+            break;
+        }
+        case GpiButton::START:
+        case GpiButton::Y:
+            breedRoomsView_ = true; breedRoomSel_ = 0; breedMsg_.clear();
+            break;
+        case GpiButton::B:
+            if (breedCursorB_ >= 0) { breedCursorB_ = -1; breedMsg_ = "Cleared."; }
+            else                     screen_ = Screen::MENU;
+            break;
+        default: break;
+    }
+}
+
 void TerminalUI::startGymBattle(uint8_t gymIdx, uint8_t trainerIdx)
 {
     if (!hasParty_ || partyCount_ == 0) {
@@ -5051,9 +5872,11 @@ void TerminalUI::syncBattleWindow() {
             // Normal pentest mode: header + SSID tag always visible.
             snprintf(s.header, sizeof(s.header), "PENTEST PIKACHU");
             s.pentest = true;
+            s.catchSeq     = pentestCatchSeq_;      // drives the Poke Ball animation
+            s.catchOutcome = pentestCatchOutcome_;
             snprintf(s.foeTag, sizeof(s.foeTag), "%s", pentestSsid_);
             snprintf(s.foe.nickname, sizeof(s.foe.nickname), "%s", dexName(em.species));
-            if (pentestShowStatus_) {
+            if (pentestShowStatus_ && !pentestSyncBoxView(s)) {
                 s.menuMode = true;
                 s.log.clear();
                 pentestBuildMenuLog(s.log);
@@ -5087,7 +5910,9 @@ void TerminalUI::syncBattleWindow() {
         uint32_t have  = pentestXp_; if (have > delta) have = delta;
         s.expPermille = delta ? (int)(have * 1000 / delta) : 0;
 
-        if (pentestShowStatus_) {
+        if (pentestShowStatus_ && pentestSyncBoxView(s)) {
+            // Bill's PC browser owns the frame.
+        } else if (pentestShowStatus_) {
             s.menuMode = true;
             s.log.clear();
             pentestBuildMenuLog(s.log);

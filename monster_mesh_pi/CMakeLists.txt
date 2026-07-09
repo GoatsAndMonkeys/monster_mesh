@@ -50,6 +50,27 @@ add_executable(test_battle
 target_include_directories(test_battle PRIVATE src/shared src/battle)
 target_link_libraries(test_battle m)
 
+# ── Breeding app (Phase 6): roster + Mendelian breeding, no ncurses/SDL ───────
+# Runnable breeding module + Monte-Carlo genetics verifier. Mirrors the firmware
+# PentestGenetics genotype so caught mons transfer to the deck and breed here.
+add_executable(mmbreed
+    tests/test_breeding.cpp
+    src/shared/BreedingApp.cpp
+)
+target_include_directories(mmbreed PRIVATE src/shared)
+target_link_libraries(mmbreed m)
+
+# ── Pentest Pikachu catch prototype: warwalk → catch → box → breed (Pi) ────────
+# In-process mirror of the firmware catching genetics; caught mons drop straight
+# into the breeding roster (no ESP32, no mesh transfer). `mmpoke --selftest`
+# verifies BSSID→species+skin determinism and the catch math.
+add_executable(mmpoke
+    tests/pentest_catch.cpp
+    src/shared/BreedingApp.cpp
+)
+target_include_directories(mmpoke PRIVATE src/shared)
+target_link_libraries(mmpoke m)
+
 # ── Daemon ────────────────────────────────────────────────────────────────────
 add_executable(mmd
     src/daemon/main.cpp
@@ -80,6 +101,7 @@ add_executable(mmterm
     src/battle/LordLogic.cpp
     src/battle/LordE4.cpp
     src/battle/LordSave.cpp
+    src/shared/BreedingApp.cpp
 )
 target_include_directories(mmterm PRIVATE src/terminal src/shared src/battle)
 target_include_directories(mmterm PRIVATE ${CURSES_INCLUDE_DIR} ${SDL2_INCLUDE_DIRS})

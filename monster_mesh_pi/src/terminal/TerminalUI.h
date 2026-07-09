@@ -6,6 +6,8 @@
 #include "../shared/LordSave.h"
 #include "../shared/LordGyms.h"
 #include "../battle/Gen1BattleEngine.h"
+#include "../shared/BreedingApp.h"        // Breed tab: roster + Mendelian breeding
+#include "../shared/BreederRoom.h"        // Breed tab: overnight breeder-room cycle
 #include "IpcClient.h"
 #include "InputHandler.h"
 #include "BattleWindow.h"
@@ -24,6 +26,7 @@ enum class Screen {
     BATTLE_END,     // battle result, press A to return
     MOVE_LEARN,     // daycare level-up taught a move; pick one to forget
     GYM_SELECT,     // gym list with badge status
+    BREEDING,       // Bill's PC box: pick two caught mons and breed them
     PVP_BATTLE,     // networked battle vs T-Deck (state driven by daemon UPDATEs)
     PVP_BATTLE_END, // networked battle result
     HELP,           // help overlay
@@ -37,8 +40,8 @@ enum class Screen {
 
 // ── Menu layout (3 tabs) ──────────────────────────────────────────────────────
 
-static constexpr int TAB_COUNT = 3;
-static constexpr const char *TAB_NAMES[TAB_COUNT] = { "MESH", "LOCAL", "SYSTEM" };
+static constexpr int TAB_COUNT = 4;
+static constexpr const char *TAB_NAMES[TAB_COUNT] = { "MESH", "LOCAL", "SYSTEM", "BREED" };
 
 static constexpr const char *MESH_ITEMS[]  = { "Beacon", "Neighbors", "Daycare" };
 static constexpr const char *MESH_DESC[]   = {
@@ -62,6 +65,12 @@ static constexpr const char *SYSTEM_DESC[]  = {
     "Return to RetroPie",
 };
 static constexpr int SYSTEM_COUNT = 2;
+
+static constexpr const char *BREED_ITEMS[] = { "Breeder Rooms" };
+static constexpr const char *BREED_DESC[]  = {
+    "Breed caught mons: 6AM egg, 6PM hatch",
+};
+static constexpr int BREED_COUNT = 1;
 
 // ── TerminalUI ────────────────────────────────────────────────────────────────
 
@@ -342,6 +351,8 @@ private:
     void handleButton(const ButtonEvent &ev);
     void menuButton(const ButtonEvent &ev);
     void partyButton(const ButtonEvent &ev);
+    void renderBreeding();
+    void breedingButton(const ButtonEvent &ev);
     void neighborsButton(const ButtonEvent &ev);
     void daycareEventButton(const ButtonEvent &ev);
     void challengeButton(const ButtonEvent &ev);
@@ -361,6 +372,7 @@ private:
     void activateMeshItem(int item);
     void activateLocalItem(int item);
     void activateSystemItem(int item);
+    void activateBreedItem(int item);
 
     // Build the player's Gen1Party (`party_`) from partySlots_ using the
     // real moves the SAV file provided.  Used by both startLocalBattle()
@@ -425,10 +437,40 @@ private:
     int      rollRareColor(const char *bssid, uint8_t species);
     bool     pentestTryCatchTick();       // returns true if it handled the tick
     void     pentestSaveRareCatch(uint8_t dex, uint8_t variant, uint8_t level);
+    // New genetics: the current wild foe's FULL genotype (cosmetic + defect),
+    // rolled by rollRareColor() from the AP MAC. A catch keeps the whole
+    // genotype so it can breed in the Breed tab.
+    breeding::Genotype pentestFoeGeno_ = {};
+    uint8_t  pentestFoeDex_   = 0;        // national dex of the current wild foe
+    uint32_t pentestCatchSeq_     = 0;    // bumped per ball throw → drives the SDL anim
+    uint8_t  pentestCatchOutcome_ = 0;    // 1 = caught, 2 = broke free
+    // Breeding box (Bill's PC): every catch is added here as a Wild parent and
+    // persisted to a 22-byte-per-record box file. The Breed tab reads this.
+    breeding::BreedingApp breedApp_;
+    breeding::BreederManager breederMgr_;  // 3 breeder rooms, 6am-egg/6pm-hatch cycle
+    uint64_t breederSig_      = 0;         // room-state signature; persist on change
+    bool     breedLoaded_     = false;
+    int      breedCursorA_    = 0;        // Breed-tab: cursor within the filtered list
+    int      breedCursorB_    = -1;       // locked mate 1 (ROSTER index, -1 = none)
+    int      breedScroll_     = 0;        // box list scroll offset
+    int      breedTab_        = 0;        // Breed-tab: skin-category filter
+    bool     breedRoomsView_  = false;    // Breed screen: rooms browser vs mon list
+    int      breedRoomSel_    = 0;        // selected room in the rooms browser
+    std::string breedMsg_;                // last breeding outcome line
+    void     pentestLoadBox();            // load the box file into breedApp_
+    void     pentestAppendBox(const breeding::BreedMon &m);  // persist one catch
+    void     pentestRewriteBox();         // overwrite the box file from the roster
+    void     pentestDedupBox();           // collapse to 1 mon per coloration (fewest defects)
+    void     pentestSaveRooms();          // persist the 3 breeder rooms
+    void     pentestLoadRooms();          // restore the breeder rooms at startup
     uint8_t  pentestGymBeaten_  = 0;      // bitset of gym leaders defeated
                                           // (drives zone unlock + next leader)
     uint8_t  pentestBattleGym_  = 255;    // gym idx of the current fight (255=wild)
     int      pentestStatusSel_   = 0;      // selected option in the status menu
+    int      pentestBoxSel_      = 0;      // Bill's PC browser: index within the current tab
+    int      pentestBoxTab_      = 0;      // Bill's PC browser: skin-category tab
+    int      pentestBoxAction_   = -1;     // Bill's PC: action menu cursor (-1 = browsing)
+    uint8_t  pentestActiveDex_   = 0;      // active battler (0 = default Pikachu/Raichu)
     bool     pentestConfirmReset_= false; // status menu is in the reset-confirm step
     bool     pentestBossMode_    = false; // Y: interactive fight (looks like normal battle)
     bool     pentestRematch_     = false; // true = lost last fight, retry same network
@@ -442,6 +484,7 @@ private:
     std::vector<std::string> pentestDoneSsids_;  // SSIDs already cracked this session
     bool     pentestStandby_       = false;  // waiting for a vulnerable network
     bool     pentestScanAvailable_ = false;  // wpa_cli scanner reachable?
+    uint64_t pentestLastScanKickMs_ = 0;     // throttle for active scans (see .cpp)
     uint64_t pentestScanMs_        = 0;      // last standby rescan (throttle)
     int      pentestNetsSeen_      = 0;      // total APs in the last scan (status)
     static constexpr uint64_t PENTEST_STANDBY_SCAN_MS = 6000;  // rescan cadence
@@ -456,6 +499,9 @@ private:
     void pentestMarkBeaten(uint8_t dex);        // flag a species as defeated
     void pentestBuildMenuLog(std::vector<std::string> &out); // in-log menu lines
     void pentestBuildStatus(std::vector<std::string> &out);  // status detail lines
+    // Bill's PC browser: fill `s` with the selected caught mon's sprites +
+    // blood test when the box sub-view is active. Returns false if not active.
+    bool pentestSyncBoxView(BattleWindow::State &s);
     static constexpr uint64_t PENTEST_TURN_MS = 900;
     static constexpr uint64_t PENTEST_END_MS  = 2500;  // victory linger before next
     char pentestSsid_[24] = {};      // WiFi target name shown in the fight

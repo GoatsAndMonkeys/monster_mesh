@@ -130,6 +130,34 @@ static void applyVariant(int variant, int i, int w, int h, uint16_t phase,
             }
             break;
         }
+        // ── Blackout ("double dark", DD) — much darker than Dark. Everything
+        // collapses to a near-black grayscale silhouette (~40% luma); the
+        // Pink/Rainbow trait still tints the red pixels but heavily dimmed.
+        case VAR_BLACKOUT: case VAR_BLACKOUT_SHINY: {
+            uint8_t y = (uint8_t)(s_gammaLut[luma(r, g, b)] * 2 / 5);
+            r = g = b = y;
+            break;
+        }
+        case VAR_BLACKOUT_PINK: {
+            if (isRed(r, g, b)) {
+                uint8_t Y = (uint8_t)(luma(r, g, b) * 2 / 5);
+                hueLuma(329, satLite(Y, 217), Y, r, g, b);
+            } else {
+                r = g = b = (uint8_t)(s_gammaLut[luma(r, g, b)] * 2 / 5);
+            }
+            break;
+        }
+        case VAR_BLACKOUT_RAINBOW: {
+            if (isRed(r, g, b)) {
+                int d = (i / w) + (i % w);
+                int hue = ((d * 306) / (2 * (h - 1)) + phase * 20) % 360;
+                uint8_t Y = (uint8_t)(luma(r, g, b) * 2 / 5);
+                hueLuma(hue, satLite(Y, 242), Y, r, g, b);
+            } else {
+                r = g = b = (uint8_t)(s_gammaLut[luma(r, g, b)] * 2 / 5);
+            }
+            break;
+        }
     }
 }
 
@@ -139,7 +167,8 @@ static bool decodeVariant(int dex, bool isBack, int variant, uint16_t phase,
     if (dex < 1 || dex > 386) return false;
     const uint32_t *offs = isBack ? kGen3Back4bppOffsets  : kGen3Front4bppOffsets;
     const uint8_t  *blob = isBack ? kGen3Back4bppDeflate  : kGen3Front4bppDeflate;
-    bool useShiny = (variant == VAR_SHINY || variant == VAR_DARK_SHINY);
+    bool useShiny = (variant == VAR_SHINY || variant == VAR_DARK_SHINY ||
+                     variant == VAR_BLACKOUT_SHINY);
     const uint16_t *pal = isBack
         ? (useShiny ? kGen3BackPalShiny[dex]  : kGen3BackPalNormal[dex])
         : (useShiny ? kGen3FrontPalShiny[dex] : kGen3FrontPalNormal[dex]);
@@ -183,13 +212,15 @@ SDL_Texture *get(SDL_Renderer *renderer, int dex, bool isBack, int variant, uint
     int h = isBack ? GEN3_BACK_4BPP_H : GEN3_FRONT_4BPP_H;
     static uint8_t buf[GEN3_FRONT_4BPP_W * GEN3_FRONT_4BPP_H * 4];      // 16384 B
 
-    // Rainbow / Dark-Rainbow scroll → regenerate each frame into a persistent
-    // dynamic texture (one per direction).
-    if (variant == VAR_RAINBOW || variant == VAR_DARK_RAINBOW) {
+    // Rainbow / Dark-Rainbow / Blackout-Rainbow scroll → regenerate each frame
+    // into a persistent dynamic texture (one per direction). Decoded with the
+    // actual variant so the Dark/Blackout darkening is applied to the glow.
+    if (variant == VAR_RAINBOW || variant == VAR_DARK_RAINBOW ||
+        variant == VAR_BLACKOUT_RAINBOW) {
         if (!renderer) return nullptr;
         int d = isBack ? 1 : 0;
         if (s_dyn[d] && s_dynDex[d] != dex) { SDL_DestroyTexture(s_dyn[d]); s_dyn[d] = nullptr; }
-        if (!decodeVariant(dex, isBack, VAR_RAINBOW, phase, buf, w, h)) return nullptr;
+        if (!decodeVariant(dex, isBack, variant, phase, buf, w, h)) return nullptr;
         if (!s_dyn[d]) {
             s_dyn[d] = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32,
                                          SDL_TEXTUREACCESS_STREAMING, w, h);
