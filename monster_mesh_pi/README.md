@@ -80,6 +80,53 @@ On macOS, install deps with Homebrew: `brew install cmake pkg-config ncurses sdl
 
 ---
 
+## Updating an existing GPi install
+
+Already have MonsterMesh running on your GPi and just want the latest code (new
+catching/breeding, Bill's PC, etc.)? Run this on the Pi itself (SSH in, or open a
+terminal on the device):
+
+```bash
+# 1. Go to wherever you cloned the repo, then pull this branch
+cd ~/monster_mesh                       # your clone location
+git checkout mm/monster-mesh-pi
+git pull origin mm/monster-mesh-pi
+
+# 2. Rebuild the terminal (the daemon only needs rebuilding if mmd/ changed)
+cd monster_mesh_pi/build                # reuse the existing build dir
+cmake ..                                # refresh build rules after a pull
+make mmterm -j2                         # see the -j2 note below
+
+# 3. Swap in the new binary (keep a backup first)
+sudo cp -p /opt/monstermesh/bin/mmterm /opt/monstermesh/bin/mmterm.bak
+cp mmterm /tmp/mmterm.new && sudo mv -f /tmp/mmterm.new /opt/monstermesh/bin/mmterm
+```
+
+That's it — **no reboot or service restart needed for `mmterm`**. It's relaunched
+fresh every time you open the MonsterMesh system in EmulationStation, so the new
+build takes effect the next time you launch it.
+
+**Notes / gotchas**
+
+- **Build with `-j2`, not `-j$(nproc)`.** On a Pi Zero 2 W (512 MB) the compiler
+  gets OOM-killed on the large `TerminalUI.cpp` at `-j4` — the build fails with a
+  bare "Error 2" and no `error:` line. `-j2` (or `-j1`) builds cleanly in ~1–3 min.
+- **Your collection is safe.** Caught mons, breeder rooms, and daycare state live
+  in `/var/lib/monstermesh/` — updating the binary never touches them.
+- **If you use the "Pentest Pikachu" ROM,** exit it before building over SSH: its
+  active Wi-Fi scan briefly drops the single-radio Pi off the network and can
+  interrupt an `scp`/`ssh` mid-update.
+- **"Text file busy" when copying?** You can't `cp` over a *running* `mmterm`. The
+  `mv -f` rename in step 3 avoids this; if you still hit it, close the ROM first.
+- **If `mmd` (the daemon) also changed:** `make mmd -j2`, then
+  `sudo systemctl stop monstermesh && sudo cp mmd /opt/monstermesh/bin/mmd &&
+  sudo systemctl start monstermesh`.
+- **Rather not rebuild by hand?** Re-running `bash retropie/install.sh` from
+  `monster_mesh_pi/` after building also copies the binaries into place (it's
+  idempotent — safe to run again).
+
+---
+
 ## Running it manually
 
 If you're not using the EmulationStation launcher:
