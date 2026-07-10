@@ -1627,18 +1627,21 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
                 if (boxTabMatch(breeding::skinOf(box[i].geno), pentestBoxTab_)) filt.push_back(i);
             int fn = (int)filt.size();
 
-            // Action menu open (A opened it): 0=Set Active, 1=Dedup, 2=Cancel.
+            // Action menu open (A opened it):
+            //   0=Set Active   1=Breed (put in room)   2=Dedup   3=Cancel
             if (pentestBoxAction_ >= 0) {
                 switch (ev.button) {
-                    case GpiButton::UP:   pentestBoxAction_ = (pentestBoxAction_ + 2) % 3; return;
-                    case GpiButton::DOWN: pentestBoxAction_ = (pentestBoxAction_ + 1) % 3; return;
+                    case GpiButton::UP:   pentestBoxAction_ = (pentestBoxAction_ + 3) % 4; return;
+                    case GpiButton::DOWN: pentestBoxAction_ = (pentestBoxAction_ + 1) % 4; return;
                     case GpiButton::A:
                         if (pentestBoxAction_ == 0 && fn > 0) {          // Set Active
                             const breeding::BreedMon &m = box[filt[pentestBoxSel_ % fn]];
                             pentestActiveDex_ = m.dex;
                             pentestSaveProgress();
                             breedMsg_ = std::string(dexName(m.dex)) + " is now your battler!";
-                        } else if (pentestBoxAction_ == 1) {            // Dedup
+                        } else if (pentestBoxAction_ == 1 && fn > 0) {   // Breed
+                            pentestBoxBreedPick(box[filt[pentestBoxSel_ % fn]]);
+                        } else if (pentestBoxAction_ == 2) {             // Dedup
                             pentestDedupBox();
                             breedMsg_ = "Deduped: one per species+colour.";
                         }
@@ -2188,6 +2191,17 @@ bool TerminalUI::pentestSyncBoxView(BattleWindow::State &s) {
     s.boxVariant = (uint8_t)(int)sk;   // Skin 0..11 maps 1:1 to VAR_ (incl. Blackout)
     s.boxAction   = (int8_t)pentestBoxAction_;
     s.boxIsActive = (pentestActiveDex_ != 0 && m.dex == pentestActiveDex_);
+    // Breeding pick indicator (1st breeder chosen, waiting for the mate).
+    s.boxBreedPending = (pentestBreedPickId_ != 0);
+    s.boxBreedIsThis  = (pentestBreedPickId_ != 0 && m.id == pentestBreedPickId_);
+    if (pentestBreedPickId_ != 0) {
+        const breeding::BreedMon *bp = breedApp_.findById(pentestBreedPickId_);
+        snprintf(s.boxBreedName, sizeof(s.boxBreedName), "%s",
+                 bp ? (bp->nick[0] ? bp->nick : breeding::BreedingApp::dexName(bp->dex))
+                    : "?");
+    } else {
+        s.boxBreedName[0] = '\0';
+    }
 
     // Status box (battle FOE-box) fields: name, level, skin.
     s.foe.species = m.dex;
@@ -3797,6 +3811,56 @@ void TerminalUI::pentestRewriteBox() {
 
 // Collapse the box to ONE mon per (SPECIES + COLORATION) — so you keep e.g. a
 // Pink Jigglypuff AND a Pink Pidgey, just not duplicate copies of the same
+static uint64_t breederRoomsSig(const breeding::BreederManager &m);   // defined below
+
+// Bill's PC "Breed" action — pick two mons as a breeder pair without leaving the
+// virtual-pet ROM. First pick arms pentestBreedPickId_; the second pick (a
+// different mon) places the pair in a breeder room via the shared BreederManager,
+// so it shows up in the MM terminal's breeder-room browser. All eligibility
+// checks (sterile, cooldown, room-full, already-in-a-room) live in placePair.
+void TerminalUI::pentestBoxBreedPick(const breeding::BreedMon &m) {
+    if (breeding::isSterile(m.geno)) {
+        breedMsg_ = std::string(dexName(m.dex)) + " is STERILE — can't breed.";
+        return;
+    }
+    // No first pick yet (or re-picking the same mon toggles the choice off).
+    if (pentestBreedPickId_ == 0 || pentestBreedPickId_ == m.id) {
+        if (pentestBreedPickId_ == m.id) {
+            pentestBreedPickId_ = 0;
+            breedMsg_ = "Breeder pick cleared.";
+        } else {
+            pentestBreedPickId_ = m.id;
+            breedMsg_ = std::string("Breeder 1: ") +
+                        (m.nick[0] ? m.nick : dexName(m.dex)) +
+                        " \xE2\x80\x94 pick a mate, then Breed.";
+        }
+        return;
+    }
+    // Second pick — resolve both mons to their current roster indices and place.
+    const auto &roster = breedApp_.roster();
+    int idxA = -1, idxB = -1;
+    for (int i = 0; i < (int)roster.size(); ++i) {
+        if (roster[i].id == pentestBreedPickId_) idxA = i;
+        if (roster[i].id == m.id)                idxB = i;
+    }
+    if (idxA < 0) {                       // first pick vanished (deduped?) — restart
+        pentestBreedPickId_ = m.id;
+        breedMsg_ = "First breeder is gone. Pick again.";
+        return;
+    }
+    std::string err;
+    int room = breederMgr_.placePair(breedApp_, (size_t)idxA, (size_t)idxB,
+                                     time(nullptr), err);
+    if (room >= 0) {
+        pentestSaveRooms();
+        breederSig_ = breederRoomsSig(breederMgr_);
+        breedMsg_ = "Paired! Egg at 6AM, hatches 6PM. (See Breed tab)";
+    } else {
+        breedMsg_ = err;
+    }
+    pentestBreedPickId_ = 0;
+}
+
 // species+colour — keeping the one with the fewest birth defects (lowest
 // sterile+cantFight+noHatch dosage sum). User-triggered from the Bill's PC menu.
 // Rewrites the file if anything changed (backing up the pre-dedup box once).
@@ -5439,10 +5503,20 @@ void TerminalUI::renderBreeding()
         const breeding::BreederRoom &srm = breederMgr_.room(breedRoomSel_);
         int ry = 3 + rc;
         if (srm.state != breeding::ROOM_EMPTY) {
+            // Full genotype letters for each parent (all six loci).
+            auto parentLine = [&](const breeding::BreedMon &m) {
+                char code[24]; breeding::genoLetters(m.geno, code, sizeof(code));
+                const char *nm = m.nick[0] ? m.nick : breeding::BreedingApp::dexName(m.dex);
+                const char *sx = m.geno.female ? "\xE2\x99\x80" : "\xE2\x99\x82";
+                if (ry < rows - 1)
+                    mvwprintw(winInfo_, ry++, 0, "%.9s %s %s", nm, sx, code);
+            };
+            parentLine(srm.parentA);
+            parentLine(srm.parentB);
             ChildOdds o = computeChildOdds(srm.parentA.geno, srm.parentB.geno);
             int order[12]; for (int i = 0; i < 12; i++) order[i] = i;
             std::sort(order, order + 12, [&](int x, int y) { return o.skin[x] > o.skin[y]; });
-            mvwprintw(winInfo_, ry++, 0, "Child colors:");
+            if (ry < rows - 1) mvwprintw(winInfo_, ry++, 0, "Child colors:");
             std::string col;
             for (int k = 0; k < 12; k++) {
                 int sk = order[k]; if (o.skin[sk] < 0.005) break;

@@ -100,6 +100,11 @@ public:
         uint16_t boxTabCnt[7] = {0};
         int8_t   boxAction    = -1;    // Bill's PC action menu cursor (-1 = closed)
         bool     boxIsActive  = false; // the shown mon is the current battler
+        // Breeding pick: a 1st breeder has been chosen from Bill's PC and we're
+        // waiting for the mate. boxBreedIsThis = the shown mon IS that 1st pick.
+        bool     boxBreedPending = false;
+        bool     boxBreedIsThis  = false;
+        char     boxBreedName[16] = {0};
         // Poke Ball catch animation: TerminalUI bumps catchSeq on each ball
         // throw; catchOutcome is 1 (caught) or 2 (broke free). BattleWindow
         // edge-detects a new catchSeq and plays throw → wobble → result.

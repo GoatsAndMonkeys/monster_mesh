@@ -461,6 +461,7 @@ private:
     void     pentestAppendBox(const breeding::BreedMon &m);  // persist one catch
     void     pentestRewriteBox();         // overwrite the box file from the roster
     void     pentestDedupBox();           // collapse to 1 mon per coloration (fewest defects)
+    void     pentestBoxBreedPick(const breeding::BreedMon &m);  // pick breeders from Bill's PC
     void     pentestSaveRooms();          // persist the 3 breeder rooms
     void     pentestLoadRooms();          // restore the breeder rooms at startup
     uint8_t  pentestGymBeaten_  = 0;      // bitset of gym leaders defeated
@@ -470,6 +471,7 @@ private:
     int      pentestBoxSel_      = 0;      // Bill's PC browser: index within the current tab
     int      pentestBoxTab_      = 0;      // Bill's PC browser: skin-category tab
     int      pentestBoxAction_   = -1;     // Bill's PC: action menu cursor (-1 = browsing)
+    uint32_t pentestBreedPickId_ = 0;      // Bill's PC: 1st breeder chosen (0 = none)
     uint8_t  pentestActiveDex_   = 0;      // active battler (0 = default Pikachu/Raichu)
     bool     pentestConfirmReset_= false; // status menu is in the reset-confirm step
     bool     pentestBossMode_    = false; // Y: interactive fight (looks like normal battle)

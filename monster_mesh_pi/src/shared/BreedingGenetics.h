@@ -30,6 +30,7 @@
 #pragma once
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
 
 namespace breeding {
 
@@ -176,6 +177,21 @@ static inline const char *noHatchAllele(const Genotype &g) {
     switch (g.noHatch) { case 2: return "hh — NO-HATCH";
                          case 1: return "Hh — No-hatch carrier";
                          default: return "HH — clean"; }
+}
+
+// Compact full-genotype letter code across all six loci, e.g. "Rr Ss dd BB FF HH"
+// (cosmetic R/S/D then defect B/F/H). Writes into out (needs >= 18 bytes).
+static inline void genoLetters(const Genotype &g, char *out, size_t n) {
+    static const char *R[3] = {"RR", "Rr", "rr"};
+    static const char *S[3] = {"SS", "Ss", "ss"};
+    static const char *D[3] = {"dd", "Dd", "DD"};
+    static const char *B[3] = {"BB", "Bb", "bb"};
+    static const char *F[3] = {"FF", "Ff", "ff"};
+    static const char *H[3] = {"HH", "Hh", "hh"};
+    auto ix = [](uint8_t d) -> int { return d > 2 ? 2 : d; };
+    snprintf(out, n, "%s %s %s %s %s %s",
+             R[ix(g.rainbow)], S[ix(g.shiny)], D[ix(g.dark)],
+             B[ix(g.sterile)], F[ix(g.cantFight)], H[ix(g.noHatch)]);
 }
 
 // True if the mon is free of every defect (clean foundation stock: BB FF HH).

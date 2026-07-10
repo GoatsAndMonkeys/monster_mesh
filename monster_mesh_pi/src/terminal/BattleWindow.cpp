@@ -701,14 +701,29 @@ void BattleWindow::drawBoxView() {
         BitmapFont::drawString(renderer_, LOGICAL_W / 2 - 40, spriteY + DIM / 2 - 6,
                                "\x10 ACTIVE", COL_INK, 2);
 
-    // ── Action menu overlay (A opened it): Set Active / Dedup / Cancel ───────
+    // ── Breeding-pick banner: a 1st breeder is chosen, waiting for the mate ───
+    if (state_.boxBreedPending) {
+        char banner[48];
+        snprintf(banner, sizeof(banner), "\x10 BREEDER 1: %s \x11 pick a mate",
+                 state_.boxBreedName);
+        int w = BitmapFont::stringWidth(banner, 2);
+        SDL_SetRenderDrawColor(renderer_, COL_INK.r, COL_INK.g, COL_INK.b, 255);
+        SDL_Rect bar = { (LOGICAL_W - w) / 2 - 8, spriteY + 4, w + 16, 20 };
+        SDL_RenderFillRect(renderer_, &bar);
+        BitmapFont::drawString(renderer_, (LOGICAL_W - w) / 2, spriteY + 8, banner, COL_WHITE, 2);
+    }
+
+    // ── Action menu overlay (A opened it): Set Active / Breed / Dedup / Cancel ─
     if (state_.boxAction >= 0) {
-        static const char *const ACT[3] = { "Set as Active (swap)",
-                                            "Dedup (1 per species+colour)",
-                                            "Cancel" };
-        int mw = 340, mh = 3 * 22 + 16, mx = (LOGICAL_W - mw) / 2, my = 150;
+        const char *const ACT[4] = {
+            "Set as Active (swap)",
+            state_.boxBreedIsThis ? "Breed: un-pick this mon"
+              : state_.boxBreedPending ? "Breed with this one" : "Breed (put in room)",
+            "Dedup (1 per species+colour)",
+            "Cancel" };
+        int mw = 360, mh = 4 * 22 + 16, mx = (LOGICAL_W - mw) / 2, my = 140;
         drawBox(mx, my, mw, mh, COL_WHITE, COL_INK);
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 4; ++i) {
             int ry = my + 10 + i * 22;
             if (i == state_.boxAction) {
                 SDL_SetRenderDrawColor(renderer_, COL_INK.r, COL_INK.g, COL_INK.b, 255);
