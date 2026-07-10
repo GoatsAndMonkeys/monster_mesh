@@ -86,6 +86,10 @@ Already have MonsterMesh running on your GPi and just want the latest code (new
 catching/breeding, Bill's PC, etc.)? Run this on the Pi itself (SSH in, or open a
 terminal on the device):
 
+> **Don't want to run commands yourself?** Paste the prompt in
+> [docs/UPDATE-GPI-WITH-CLAUDE.md](docs/UPDATE-GPI-WITH-CLAUDE.md) to Claude and it
+> will do this whole update for you.
+
 ```bash
 # 1. Go to wherever you cloned the repo, then pull this branch
 cd ~/monster_mesh                       # your clone location
