@@ -3869,7 +3869,7 @@ void TerminalUI::pentestBoxBreedPick(const breeding::BreedMon &m) {
     pentestBreedPickId_ = 0;
 }
 
-// species+colour — keeping the one with the fewest birth defects (lowest
+// species+colour — keeping the one with the fewest genetic disorders (lowest
 // sterile+cantFight+noHatch dosage sum). User-triggered from the Bill's PC menu.
 // Rewrites the file if anything changed (backing up the pre-dedup box once).
 void TerminalUI::pentestDedupBox() {
@@ -5540,7 +5540,7 @@ void TerminalUI::renderBreeding()
                 mvwprintw(winInfo_, ry++, 0, "Hidden male carrier: pink %.0f%%  rnbw %.0f%%",
                           o.malePink * 100, o.maleRnbw * 100);
             if (ry < rows - 1)
-                mvwprintw(winInfo_, ry++, 0, "Defects: Ster %.0f%% Cant %.0f%% Hatch %.0f%%",
+                mvwprintw(winInfo_, ry++, 0, "Disorders: Ster %.0f%% Cant %.0f%% Hatch %.0f%%",
                           o.defAff[0] * 100, o.defAff[1] * 100, o.defAff[2] * 100);
         }
         mvwprintw(winInfo_, rows - 1, 1, "%.*s", getmaxx(winInfo_) - 2,
@@ -5652,7 +5652,7 @@ void TerminalUI::renderBreeding()
                       o.malePink * 100.0, o.maleRnbw * 100.0);
         if (ry < rows - 1)
             mvwprintw(winInfo_, ry++, 0,
-                      "Defects: Ster %.0f%% Cant %.0f%% Hatch %.0f%% (bb/ff/hh)",
+                      "Disorders: Ster %.0f%% Cant %.0f%% Hatch %.0f%% (bb/ff/hh)",
                       o.defAff[0] * 100, o.defAff[1] * 100, o.defAff[2] * 100);
     } else {
         // Breeder-room status (one line per room, with egg/hatch clock times).

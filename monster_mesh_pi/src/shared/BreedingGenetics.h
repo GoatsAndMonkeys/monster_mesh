@@ -136,7 +136,7 @@ static inline Genotype cross(const Genotype &a, const Genotype &b, Rng &r) {
     return o;
 }
 
-// ── Defect predicates (heartbreak cases) ──────────────────────────────────────
+// ── Genetic-disorder predicates ───────────────────────────────────────────────
 static inline bool isSterile(const Genotype &g)  { return g.sterile   == 2; } // bb
 static inline bool cantFight(const Genotype &g)  { return g.cantFight == 2; } // ff
 static inline bool neverHatches(const Genotype &g){ return g.noHatch  == 2; } // hh
@@ -194,7 +194,7 @@ static inline void genoLetters(const Genotype &g, char *out, size_t n) {
              B[ix(g.sterile)], F[ix(g.cantFight)], H[ix(g.noHatch)]);
 }
 
-// True if the mon is free of every defect (clean foundation stock: BB FF HH).
+// True if the mon is free of every genetic disorder (clean foundation stock: BB FF HH).
 static inline bool isCleanStock(const Genotype &g) {
     return g.sterile == 0 && g.cantFight == 0 && g.noHatch == 0;
 }
