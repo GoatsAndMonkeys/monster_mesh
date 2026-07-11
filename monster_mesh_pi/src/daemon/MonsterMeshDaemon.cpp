@@ -8,6 +8,9 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>   // _NSGetExecutablePath for resolveMqttRelay()
+#endif
 
 volatile bool MonsterMeshDaemon::shouldStop = false;
 
@@ -84,9 +87,27 @@ bool MonsterMeshDaemon::init(const char *serialPort, const char *saveDir) {
                     strncpy(serialPort_, detected.c_str(), sizeof(serialPort_) - 1);
             }
         }
+        // No serial radio present at all → fall back to the MQTT relay so the
+        // daemon can still exchange MonsterMesh packets with the T-Decks over
+        // the broker. This is a startup-time decision; once in MQTT mode we
+        // stay there (see tryReconnectSerial()).
+        if (!serialOk) {
+            std::string mqttRelay = resolveMqttRelay();
+            if (!mqttRelay.empty()) {
+                LOG_INFO("No radio found — falling back to MQTT relay (%s)",
+                         mqttRelay.c_str());
+                strncpy(relayScript_, mqttRelay.c_str(), sizeof(relayScript_) - 1);
+                relayScript_[sizeof(relayScript_) - 1] = '\0';
+                usingMqttFallback_ = true;
+                serialOk = mesh_.openRelay(relayScript_, serialPort_);
+            } else {
+                LOG_WARN("No radio found and mqtt_relay.py not located "
+                         "(set MM_MQTT_RELAY) — no transport available");
+            }
+        }
     }
     if (!serialOk) {
-        LOG_WARN("MonsterMeshDaemon: serial not available — will retry");
+        LOG_WARN("MonsterMeshDaemon: no transport available — will retry");
     }
 
     // ── Save watcher ───────────────────────────────────────────────────────────
@@ -209,6 +230,18 @@ void MonsterMeshDaemon::tick() {
 void MonsterMeshDaemon::tryReconnectSerial() {
     bool ok = false;
 
+    // MQTT fallback mode: there is no serial port to probe — just relaunch the
+    // MQTT relay subprocess if it died (broker drop, transient crash, etc.).
+    if (usingMqttFallback_) {
+        ok = mesh_.openRelay(relayScript_, serialPort_);
+        if (ok)
+            LOG_INFO("MonsterMeshDaemon: MQTT relay relaunched");
+        else
+            LOG_WARN("MonsterMeshDaemon: MQTT relay relaunch failed -- retry in %us",
+                     SERIAL_RETRY_INTERVAL_MS / 1000);
+        return;
+    }
+
     // If we were launched in relay mode, relaunch the relay subprocess.
     // First: don't spawn a Python subprocess just to discover the port is
     // missing — check stat() ourselves.  On macOS we also need to translate
@@ -270,6 +303,48 @@ void MonsterMeshDaemon::tryReconnectSerial() {
         LOG_WARN("MonsterMeshDaemon: serial reconnect failed -- retry in %us",
                  SERIAL_RETRY_INTERVAL_MS / 1000);
     }
+}
+
+// ── Locate mqtt_relay.py for the no-radio fallback ────────────────────────────
+
+std::string MonsterMeshDaemon::resolveMqttRelay() {
+    auto exists = [](const std::string &p) {
+        struct stat st;
+        return !p.empty() && stat(p.c_str(), &st) == 0;
+    };
+
+    // 1) Explicit override.
+    if (const char *env = getenv("MM_MQTT_RELAY")) {
+        if (exists(env)) return env;
+        LOG_WARN("MM_MQTT_RELAY=%s does not exist — trying defaults", env);
+    }
+
+    // 2) Directory the running executable lives in (install + build tree).
+    std::string exeDir;
+    {
+        char buf[1024] = {};
+#ifdef __APPLE__
+        uint32_t sz = sizeof(buf);
+        if (_NSGetExecutablePath(buf, &sz) == 0) exeDir = buf;
+#else
+        ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+        if (n > 0) { buf[n] = '\0'; exeDir = buf; }
+#endif
+        auto slash = exeDir.find_last_of('/');
+        exeDir = (slash == std::string::npos) ? "." : exeDir.substr(0, slash);
+    }
+
+    const std::string candidates[] = {
+        "/opt/monstermesh/bin/mqtt_relay.py",   // canonical Pi install path
+        exeDir + "/mqtt_relay.py",              // alongside the binary
+        exeDir + "/../tools/mqtt_relay.py",     // build/ tree (build/mmd)
+        exeDir + "/../../tools/mqtt_relay.py",  // build/<sub>/mmd
+        "tools/mqtt_relay.py",                  // run from repo root (dev)
+    };
+    for (const auto &c : candidates)
+        if (exists(c)) return c;
+
+    return "";
 }
 
 // ── Daycare callbacks ─────────────────────────────────────────────────────────

@@ -53,6 +53,14 @@ private:
     uint32_t lastSerialRetryMs_ = 0;
     static constexpr uint32_t SERIAL_RETRY_INTERVAL_MS = 5000;
 
+    // MQTT fallback: when no radio is found at startup, the daemon launches
+    // tools/mqtt_relay.py through the same openRelay() subprocess path. Once in
+    // this mode we keep relaunching the MQTT relay (not a serial port) on death.
+    bool usingMqttFallback_ = false;
+    // Locate mqtt_relay.py (env MM_MQTT_RELAY, /opt install, or the build tree).
+    // Returns empty string if it can't be found.
+    std::string resolveMqttRelay();
+
     // Queued incoming PvP challenge (one at a time)
     bool     hasPendingChallenge_ = false;
     uint32_t challengeNodeId_     = 0;
