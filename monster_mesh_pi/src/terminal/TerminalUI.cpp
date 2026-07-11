@@ -1629,13 +1629,16 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
                     case GpiButton::A:
                         if (pentestBoxAction_ == 0 && fn > 0) {          // Set Active
                             const breeding::BreedMon &m = box[filt[pentestBoxSel_ % fn]];
-                            pentestActiveDex_ = m.dex;
-                            // Lock the battler's coloration to this individual's
-                            // caught/bred genotype skin (Skin 0..11 maps 1:1 to VAR_).
-                            pentestActiveVariant_ = (uint8_t)(int)breeding::skinOf(m.geno);
-                            pentestActiveId_ = m.id;
+                            // Independent journeys: swap battler AND its trip.
+                            // pentestActivateMon banks the outgoing mon's live
+                            // progress, sets dex/variant/id (coloration lock via
+                            // skinOf preserved), and loads this mon's own level/
+                            // badges/W-L into the live set (seeding from its catch
+                            // level on first activation).
+                            uint8_t mdex = m.dex;              // m may dangle after activate
+                            pentestActivateMon(m.id);
                             pentestSaveProgress();
-                            breedMsg_ = std::string(dexName(m.dex)) + " is now your battler!";
+                            breedMsg_ = std::string(dexName(mdex)) + " is now your battler!";
                         } else if (pentestBoxAction_ == 1 && fn > 0) {   // Breed
                             pentestBoxBreedPick(box[filt[pentestBoxSel_ % fn]]);
                         } else if (pentestBoxAction_ == 2) {             // Dedup
@@ -2052,6 +2055,18 @@ void TerminalUI::pentestBuildStatus(std::vector<std::string> &out) {
     const char *mon = (pentestLevel_ >= 30) ? "Raichu " : "Pikachu";  // evolves at L30
     snprintf(line, sizeof(line), "%s:      Lv%u", mon, (unsigned)pentestLevel_);
     out.push_back(line);
+    // Independent journeys: show THIS mon's current Kanto location (the highest
+    // zone unlocked by its badges that its level can reach). Zone is derived, so
+    // it already reflects the active individual's own level + badges.
+    {
+        const KantoZone *zone = &KANTO_ZONES[0];
+        for (uint8_t i = 0; i < KANTO_ZONE_COUNT; ++i)
+            if (KANTO_ZONES[i].unlockedAfter <= (uint8_t)gyms &&
+                KANTO_ZONES[i].minPikaLvl <= pentestLevel_)
+                zone = &KANTO_ZONES[i];
+        snprintf(line, sizeof(line), "Location:    %s", zone->name);
+        out.push_back(line);
+    }
     unsigned w = pentestWins_, l = pentestLosses_, tot = w + l;
     unsigned pct = tot ? (unsigned)((w * 100 + tot / 2) / tot) : 0;
     snprintf(line, sizeof(line), "Record: %u W - %u L  (%u%%)", w, l, pct);
@@ -2820,6 +2835,78 @@ static const char *pentestSavePath() {
 }
 static constexpr uint32_t PENTEST_SAVE_MAGIC = 0x504B4341u;  // 'PKCA'
 
+// ── Independent journeys: active-mon <-> live-set mirroring ───────────────────
+// The live pentest* globals are the ACTIVE mon's working set. These two helpers
+// move that set to/from the active mon's persistent "home": the starter fields
+// (id 0) or the matching BreedMon's trip* fields (a Bill's PC catch/bred mon).
+static inline uint16_t clamp16(uint32_t v) { return v > 0xFFFFu ? 0xFFFFu : (uint16_t)v; }
+
+void TerminalUI::pentestStoreLiveToActive() {
+    if (pentestActiveId_ == 0) {
+        starterLevel_  = pentestLevel_;
+        starterXp_     = pentestXp_;
+        starterGym_    = pentestGymBeaten_;
+        starterWins_   = clamp16(pentestWins_);
+        starterLosses_ = clamp16(pentestLosses_);
+    } else if (breeding::BreedMon *m = breedApp_.findById(pentestActiveId_)) {
+        m->tripLevel     = pentestLevel_;
+        m->tripXp        = pentestXp_;
+        m->tripGymBeaten = pentestGymBeaten_;
+        m->tripWins      = clamp16(pentestWins_);
+        m->tripLosses    = clamp16(pentestLosses_);
+    }
+    // If the active id is a box mon we can't find (box not loaded yet), do
+    // nothing — the live set will be re-synced once the box is loaded.
+}
+
+void TerminalUI::pentestLoadActiveToLive() {
+    if (pentestActiveId_ == 0) {
+        if (starterLevel_ == 0) {         // uninitialized → fresh L5 starter run
+            starterLevel_ = 5; starterXp_ = 0; starterGym_ = 0;
+            starterWins_  = 0; starterLosses_ = 0;
+        }
+        pentestLevel_     = starterLevel_;
+        pentestXp_        = starterXp_;
+        pentestGymBeaten_ = (uint8_t)starterGym_;
+        pentestWins_      = starterWins_;
+        pentestLosses_    = starterLosses_;
+    } else if (breeding::BreedMon *m = breedApp_.findById(pentestActiveId_)) {
+        if (m->tripLevel == 0) {          // first activation → seed from catch level
+            m->tripLevel     = (m->level < 5) ? 5 : m->level;
+            m->tripXp        = 0;
+            m->tripGymBeaten = 0;
+            m->tripWins      = 0;
+            m->tripLosses    = 0;
+        }
+        pentestLevel_     = m->tripLevel;
+        pentestXp_        = m->tripXp;
+        pentestGymBeaten_ = (uint8_t)m->tripGymBeaten;
+        pentestWins_      = m->tripWins;
+        pentestLosses_    = m->tripLosses;
+    }
+    // Unknown box id (box not loaded) → leave the live set as-is.
+}
+
+// Swap the active battler to `newId`, banking the current mon's trip and loading
+// the new mon's. Called from Bill's PC "Set Active" and once at startup to sync
+// the live set to the persisted active mon.
+void TerminalUI::pentestActivateMon(uint32_t newId) {
+    pentestStoreLiveToActive();                 // bank the outgoing mon's progress
+    if (newId == 0) {
+        pentestActiveId_      = 0;
+        pentestActiveDex_     = 0;
+        pentestActiveVariant_ = 0;              // default Regular Pikachu skin
+    } else if (breeding::BreedMon *m = breedApp_.findById(newId)) {
+        pentestActiveId_      = m->id;
+        pentestActiveDex_     = m->dex;
+        // Preserve Feature-1's coloration lock: skin follows the individual.
+        pentestActiveVariant_ = (uint8_t)(int)breeding::skinOf(m->geno);
+    } else {
+        return;                                 // unknown id — keep current mon
+    }
+    pentestLoadActiveToLive();                  // bring the incoming mon's progress live
+}
+
 void TerminalUI::pentestLoadProgress() {
     FILE *f = fopen(pentestSavePath(), "rb");
     if (!f) return;  // no save yet — keep the L5 default
@@ -2849,11 +2936,37 @@ void TerminalUI::pentestLoadProgress() {
         pentestActiveId_      = 0;
         fread(&pentestActiveVariant_, sizeof(pentestActiveVariant_), 1, f);
         fread(&pentestActiveId_,      sizeof(pentestActiveId_),      1, f);
+        // ── Independent journeys: the DEFAULT Pikachu's own trip (optional tail).
+        // Older saves predate this block; detect its absence and MIGRATE by
+        // seeding the starter's trip from the (formerly global) progress above,
+        // so the player's existing Pikachu journey becomes the starter's.
+        starterLevel_ = 0;   // sentinel: 0 => not present in file
+        bool haveStarter =
+            fread(&starterLevel_,  sizeof(starterLevel_),  1, f) == 1 &&
+            fread(&starterXp_,     sizeof(starterXp_),     1, f) == 1 &&
+            fread(&starterGym_,    sizeof(starterGym_),    1, f) == 1 &&
+            fread(&starterWins_,   sizeof(starterWins_),   1, f) == 1 &&
+            fread(&starterLosses_, sizeof(starterLosses_), 1, f) == 1;
+        if (!haveStarter || starterLevel_ == 0) {
+            starterLevel_  = pentestLevel_;
+            starterXp_     = pentestXp_;
+            starterGym_    = pentestGymBeaten_;
+            starterWins_   = clamp16(pentestWins_);
+            starterLosses_ = clamp16(pentestLosses_);
+        }
     }
     fclose(f);
 }
 
 void TerminalUI::pentestSaveProgress() {
+    // Independent journeys: bank the live set into the ACTIVE mon's home first,
+    // so the on-disk pentest.dat starter block / box trip record stay in sync
+    // with the globals we're about to write (level-ups, badges, W/L all flow
+    // through here). Persist the active box mon's trip too — but only once the
+    // box is loaded, or we'd rewrite an empty roster over the real box file.
+    pentestStoreLiveToActive();
+    if (breedLoaded_ && pentestActiveId_ != 0) pentestRewriteBox();
+
     FILE *f = fopen(pentestSavePath(), "wb");
     if (!f) return;
     uint32_t magic = PENTEST_SAVE_MAGIC;
@@ -2869,6 +2982,12 @@ void TerminalUI::pentestSaveProgress() {
     fwrite(&pentestActiveDex_, sizeof(pentestActiveDex_), 1, f);
     fwrite(&pentestActiveVariant_, sizeof(pentestActiveVariant_), 1, f);
     fwrite(&pentestActiveId_,      sizeof(pentestActiveId_),      1, f);
+    // Independent journeys: the default Pikachu's own trip (optional tail).
+    fwrite(&starterLevel_,  sizeof(starterLevel_),  1, f);
+    fwrite(&starterXp_,     sizeof(starterXp_),     1, f);
+    fwrite(&starterGym_,    sizeof(starterGym_),    1, f);
+    fwrite(&starterWins_,   sizeof(starterWins_),   1, f);
+    fwrite(&starterLosses_, sizeof(starterLosses_), 1, f);
     fclose(f);
 }
 
@@ -3746,9 +3865,14 @@ static const char *pentestBoxPath() {
 #endif
 }
 
-// Serialize one caught mon to the canonical 22-byte wire record.
-static void pentestSerializeMon(const breeding::BreedMon &m, uint8_t rec[22]) {
-    memset(rec, 0, 22);
+// Serialize one caught mon to the versioned 33-byte box record: the canonical
+// 22-byte CaughtMon wire prefix (still byte-compatible with the firmware
+// transfer / importCaughtMonBlob) followed by the 11-byte per-individual trip
+// tail (tripLevel, tripXp u32, tripGymBeaten u16, tripWins u16, tripLosses u16),
+// all little-endian.
+static void pentestSerializeMon(const breeding::BreedMon &m,
+                                uint8_t rec[breeding::BREEDBOX_REC_SIZE]) {
+    memset(rec, 0, breeding::BREEDBOX_REC_SIZE);
     rec[0] = m.dex;
     rec[1] = m.level;
     rec[2] = m.geno.rainbow;   rec[3] = m.geno.shiny;    rec[4] = m.geno.dark;
@@ -3759,12 +3883,38 @@ static void pentestSerializeMon(const breeding::BreedMon &m, uint8_t rec[22]) {
     rec[13] = (m.prov == breeding::PROV_WILD) ? 0
                                               : (m.provGen ? m.provGen : 1);
     memcpy(rec + 14, m.nick, 8);
+    // ── Trip tail (offset 22) ─────────────────────────────────────────────────
+    uint8_t *t = rec + 22;
+    t[0]  = m.tripLevel;
+    t[1]  = (uint8_t)(m.tripXp & 0xFF);
+    t[2]  = (uint8_t)((m.tripXp >> 8)  & 0xFF);
+    t[3]  = (uint8_t)((m.tripXp >> 16) & 0xFF);
+    t[4]  = (uint8_t)((m.tripXp >> 24) & 0xFF);
+    t[5]  = (uint8_t)(m.tripGymBeaten & 0xFF);
+    t[6]  = (uint8_t)((m.tripGymBeaten >> 8) & 0xFF);
+    t[7]  = (uint8_t)(m.tripWins & 0xFF);
+    t[8]  = (uint8_t)((m.tripWins >> 8) & 0xFF);
+    t[9]  = (uint8_t)(m.tripLosses & 0xFF);
+    t[10] = (uint8_t)((m.tripLosses >> 8) & 0xFF);
+}
+
+// Write the 5-byte box header (magic + version) to an empty file.
+static void pentestWriteBoxHeader(FILE *f) {
+    uint32_t magic = breeding::BREEDBOX_MAGIC;
+    uint8_t  ver   = breeding::BREEDBOX_VERSION;
+    fwrite(&magic, 4, 1, f);
+    fwrite(&ver,   1, 1, f);
 }
 
 void TerminalUI::pentestAppendBox(const breeding::BreedMon &m) {
     FILE *f = fopen(pentestBoxPath(), "ab");
     if (!f) return;
-    uint8_t rec[22];
+    // A brand-new file needs the versioned header before its first record.
+    // (Existing files are already normalized to the versioned format by
+    // pentestLoadBox(), so appends here always land after a valid header.)
+    fseek(f, 0, SEEK_END);
+    if (ftell(f) == 0) pentestWriteBoxHeader(f);
+    uint8_t rec[breeding::BREEDBOX_REC_SIZE];
     pentestSerializeMon(m, rec);
     fwrite(rec, 1, sizeof(rec), f);
     fclose(f);
@@ -3805,11 +3955,15 @@ void TerminalUI::pentestLoadRooms() {
     fclose(f);
 }
 
-// Overwrite the box file with exactly the current roster (used after dedup).
+// Overwrite the box file with exactly the current roster in the versioned
+// format (header + 33-byte trip records). Used after dedup, after a live-set
+// save (to persist the active mon's trip), and once at load to upgrade any
+// legacy headerless file in place.
 void TerminalUI::pentestRewriteBox() {
     FILE *f = fopen(pentestBoxPath(), "wb");
     if (!f) return;
-    uint8_t rec[22];
+    pentestWriteBoxHeader(f);
+    uint8_t rec[breeding::BREEDBOX_REC_SIZE];
     for (const auto &m : breedApp_.roster()) {
         pentestSerializeMon(m, rec);
         fwrite(rec, 1, sizeof(rec), f);
@@ -3903,6 +4057,9 @@ void TerminalUI::pentestDedupBox() {
 }
 
 void TerminalUI::pentestLoadBox() {
+    // Idempotent: importBox appends, so guard against a second load doubling the
+    // roster (one call site — the first-scan path — is unguarded by breedLoaded_).
+    if (breedLoaded_) return;
     FILE *f = fopen(pentestBoxPath(), "rb");
     if (!f) return;
     fseek(f, 0, SEEK_END);
@@ -3910,8 +4067,10 @@ void TerminalUI::pentestLoadBox() {
     fseek(f, 0, SEEK_SET);
     if (len > 0 && len < 1 << 20) {
         std::vector<uint8_t> buf((size_t)len);
+        // importBox handles BOTH the versioned trip format and legacy headerless
+        // 22-byte files (migrating the latter with default trip fields).
         if (fread(buf.data(), 1, (size_t)len, f) == (size_t)len)
-            breedApp_.importCaughtMonBlob(buf.data(), buf.size());
+            breedApp_.importBox(buf.data(), buf.size());
     }
     fclose(f);
     // Sort the box by Pokedex number so mons are always in a findable order
@@ -3922,7 +4081,14 @@ void TerminalUI::pentestLoadBox() {
                   if (a.dex != b.dex) return a.dex < b.dex;
                   return (int)breeding::skinOf(a.geno) < (int)breeding::skinOf(b.geno);
               });
+    // Normalize the on-disk file to the versioned format (upgrades any legacy
+    // headerless box in place, and persists trip fields in sorted order).
+    if (!ros.empty()) pentestRewriteBox();
     pentestLoadRooms();   // restore any occupied breeder rooms (survives relaunch)
+    // Independent journeys: now that the box is loaded, sync the live set to the
+    // persisted active mon (a box mon's trip lives in the roster we just loaded).
+    // pentestLoadActiveToLive seeds a first-time box mon from its catch level.
+    pentestLoadActiveToLive();
 }
 
 // Cheap signature of the breeder-room state — changes whenever a room is placed,

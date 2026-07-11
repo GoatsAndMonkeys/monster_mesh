@@ -475,6 +475,22 @@ private:
     uint8_t  pentestActiveDex_   = 0;      // active battler (0 = default Pikachu/Raichu)
     uint8_t  pentestActiveVariant_ = 0;    // active battler's caught/bred skin (VAR_/Skin 0..11)
     uint32_t pentestActiveId_    = 0;      // active battler's BreedMon.id (0 = default Pikachu)
+    // ── Independent journeys (per-individual "Kanto trip") ────────────────────
+    // The live pentestLevel_/Xp_/GymBeaten_/Wins_/Losses_ above are the ACTIVE
+    // mon's working set. When you swap battler, the current live set is written
+    // back to its home (starter fields for id 0, else the BreedMon.trip* fields)
+    // and the new mon's home is loaded in — so every mon keeps its own level,
+    // badges, zone and record. The DEFAULT Pikachu (id 0) is NOT in Bill's PC,
+    // so its trip lives here and persists in pentest.dat's optional tail.
+    // starterLevel_ == 0 means "not yet started" (seed to L5 on first activate).
+    uint8_t  starterLevel_   = 0;
+    uint32_t starterXp_      = 0;
+    uint16_t starterGym_     = 0;
+    uint16_t starterWins_    = 0;
+    uint16_t starterLosses_  = 0;
+    void     pentestActivateMon(uint32_t newId);     // swap active battler + trip
+    void     pentestStoreLiveToActive();             // live set -> active mon home
+    void     pentestLoadActiveToLive();              // active mon home -> live set
     bool     pentestConfirmReset_= false; // status menu is in the reset-confirm step
     bool     pentestBossMode_    = false; // Y: interactive fight (looks like normal battle)
     bool     pentestRematch_     = false; // true = lost last fight, retry same network

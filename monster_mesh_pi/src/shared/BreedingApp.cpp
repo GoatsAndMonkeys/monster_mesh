@@ -381,32 +381,72 @@ int BreedingApp::importJsonFile(const std::string &path) {
 //   off 14 : char[8] nick (8, NUL-padded)  -> record size = 22 bytes.
 static constexpr size_t CAUGHTMON_WIRE_SIZE = 22;
 
+// Decode the shared leading 22-byte CaughtMon wire record (dex, level, geno,
+// caughtSec, provenance, nick[8]) into a BreedMon. Trip fields are left at their
+// defaults (tripLevel == 0 = "not yet started") so the caller can migrate them.
+static BreedMon parseCaught22(const uint8_t *rec) {
+    BreedMon m{};
+    m.dex   = rec[0];
+    m.level = rec[1];
+    m.geno.rainbow   = rec[2];
+    m.geno.shiny     = rec[3];
+    m.geno.dark      = rec[4];
+    m.geno.sterile   = rec[5];
+    m.geno.cantFight = rec[6];
+    m.geno.noHatch   = rec[7];
+    m.geno.female    = rec[8] ? 1 : 0;
+    // rec[9..12] caughtSec — ignored
+    uint8_t provByte = rec[13];
+    m.prov    = (provByte == 0) ? PROV_WILD : PROV_F;   // 0 = Wild catch
+    m.provGen = (provByte == 0) ? 0 : provByte;
+    memcpy(m.nick, rec + 14, 8);
+    m.nick[8] = '\0';
+    if (!m.nick[0]) strncpy(m.nick, BreedingApp::dexName(m.dex), sizeof(m.nick) - 1);
+    return m;
+}
+
 int BreedingApp::importCaughtMonBlob(const uint8_t *data, size_t len) {
     if (!data || len < CAUGHTMON_WIRE_SIZE) return -1;
     int count = 0;
     for (size_t off = 0; off + CAUGHTMON_WIRE_SIZE <= len; off += CAUGHTMON_WIRE_SIZE) {
-        const uint8_t *rec = data + off;
-        BreedMon m{};
-        m.dex   = rec[0];
-        m.level = rec[1];
-        m.geno.rainbow   = rec[2];
-        m.geno.shiny     = rec[3];
-        m.geno.dark      = rec[4];
-        m.geno.sterile   = rec[5];
-        m.geno.cantFight = rec[6];
-        m.geno.noHatch   = rec[7];
-        m.geno.female    = rec[8] ? 1 : 0;
-        // rec[9..12] caughtSec — ignored
-        uint8_t provByte = rec[13];
-        m.prov    = (provByte == 0) ? PROV_WILD : PROV_F;   // 0 = Wild catch
-        m.provGen = (provByte == 0) ? 0 : provByte;
-        memcpy(m.nick, rec + 14, 8);
-        m.nick[8] = '\0';
-        if (!m.nick[0]) strncpy(m.nick, dexName(m.dex), sizeof(m.nick) - 1);
-        add(m);
+        add(parseCaught22(data + off));
         ++count;
     }
     return count;
+}
+
+// Bill's PC box loader. Two on-disk shapes are accepted:
+//   • Versioned (BREEDBOX_MAGIC + version): 5-byte header, then 33-byte records
+//     that carry the per-individual trip fields (level/xp/badges/W/L).
+//   • Legacy (no header): a bare stream of 22-byte CaughtMon records — migrated
+//     with default trip fields (tripLevel 0 → seed-from-catch-level on activate).
+int BreedingApp::importBox(const uint8_t *data, size_t len) {
+    if (!data || len == 0) return -1;
+    // Detect the versioned header: magic (LE u32) + a matching version byte.
+    if (len >= BREEDBOX_HDR_SIZE) {
+        uint32_t magic;
+        memcpy(&magic, data, 4);
+        if (magic == BREEDBOX_MAGIC && data[4] == BREEDBOX_VERSION) {
+            int count = 0;
+            for (size_t off = BREEDBOX_HDR_SIZE;
+                 off + BREEDBOX_REC_SIZE <= len; off += BREEDBOX_REC_SIZE) {
+                const uint8_t *rec = data + off;
+                BreedMon m = parseCaught22(rec);
+                const uint8_t *t = rec + 22;          // 11-byte trip tail
+                m.tripLevel     = t[0];
+                m.tripXp        = (uint32_t)t[1] | ((uint32_t)t[2] << 8) |
+                                  ((uint32_t)t[3] << 16) | ((uint32_t)t[4] << 24);
+                m.tripGymBeaten = (uint16_t)(t[5] | (t[6] << 8));
+                m.tripWins      = (uint16_t)(t[7] | (t[8] << 8));
+                m.tripLosses    = (uint16_t)(t[9] | (t[10] << 8));
+                add(m);
+                ++count;
+            }
+            return count;
+        }
+    }
+    // No/unknown header → legacy 22-byte records (trip fields default = migrate).
+    return importCaughtMonBlob(data, len);
 }
 
 }  // namespace breeding

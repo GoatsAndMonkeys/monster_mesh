@@ -51,7 +51,33 @@ struct BreedMon {
     // Breeder-room bookkeeping: wall-clock time this mon last went into a
     // breeder room (0 = never). Enforces the once-per-7-days cooldown.
     long      lastBredAt = 0;      // time_t seconds
+
+    // ── Per-individual "Kanto trip" (Feature: independent journeys) ───────────
+    // Every caught/bred mon runs its OWN pentest journey: its own level, XP,
+    // gym badges and W/L. These persist per individual and survive swapping the
+    // active battler. tripLevel == 0 means "uninitialized" — on first activation
+    // it is seeded from this mon's catch `level` (min 5), 0 badges. The current
+    // active mon's trip is mirrored into TerminalUI's live pentest* globals so
+    // the ~30 existing read-sites need no changes (see pentestActivateMon()).
+    uint8_t   tripLevel     = 0;   // 0 = not yet started (seed from catch level)
+    uint32_t  tripXp        = 0;   // partial XP toward the next level
+    uint16_t  tripGymBeaten = 0;   // bitset of gym leaders this mon has beaten
+    uint16_t  tripWins      = 0;   // this mon's lifetime wins
+    uint16_t  tripLosses     = 0;  // this mon's lifetime losses
 };
+
+// ── Bill's PC box file (breeding_box.dat) on-disk format ─────────────────────
+// Old files were a bare stream of 22-byte CaughtMon wire records with NO header.
+// The trip-fields upgrade adds a 5-byte header (magic + version) followed by
+// extended 33-byte records (the legacy 22 bytes + 11 trip bytes). importBox()
+// detects a missing/absent magic and migrates old files (default trip fields →
+// seed-from-catch-level). The first magic byte is 0xFF so it can never collide
+// with a legacy record's leading dex byte (dex is 1..151).
+static constexpr uint32_t BREEDBOX_MAGIC     = 0x4D4258FFu;  // disk: FF 58 42 4D
+static constexpr uint8_t  BREEDBOX_VERSION   = 1;
+static constexpr size_t   BREEDBOX_HDR_SIZE  = 5;   // magic(4) + version(1)
+static constexpr size_t   BREEDBOX_TRIP_SIZE = 11;  // tripLevel(1)+xp(4)+gym(2)+w(2)+l(2)
+static constexpr size_t   BREEDBOX_REC_SIZE  = 22 + BREEDBOX_TRIP_SIZE;  // 33
 
 // Result of pairing two parents.
 enum BreedStatus : uint8_t {
@@ -103,6 +129,12 @@ public:
     // as they sit in Bill's PC on the ESP32. Layout is the packed 22-byte record
     // documented in importCaughtMonBlob(). Appends; returns count or -1.
     int importCaughtMonBlob(const uint8_t *data, size_t len);
+
+    // Bill's PC box loader (breeding_box.dat). Handles BOTH the versioned box
+    // format (magic + 33-byte trip records) and legacy headerless 22-byte-record
+    // files, migrating the latter (default trip fields). Appends; returns count
+    // or -1. Used by TerminalUI::pentestLoadBox().
+    int importBox(const uint8_t *data, size_t len);
 
     // ── Breeding gate ─────────────────────────────────────────────────────────
     // The game rule: breeding needs BOTH a Pentest Pikachu and a deck. We model
