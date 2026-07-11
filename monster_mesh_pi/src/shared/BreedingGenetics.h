@@ -35,8 +35,15 @@
 namespace breeding {
 
 // ── Genotype ──────────────────────────────────────────────────────────────────
-// Layout mirrors PentestGenotype exactly (7 bytes, same field order) so the
-// firmware CaughtMon.geno blob maps straight onto it.
+// The FIRST SEVEN fields mirror PentestGenotype exactly (7 bytes, same field
+// order) so the firmware CaughtMon.geno blob maps straight onto them.  Those
+// seven — and only those seven — are what the firmware-legacy 7-byte transfer
+// serialization reads/writes; a mon transferred from the ESP32 gets tritan=0.
+//   `tritan` is a NEW deck-only 8th gene (tritanopia / blue-cone colour
+// blindness).  It is NOT part of the 7-byte firmware wire format — it rides
+// only in the deck's own extended box record (see BreedingApp box format) — so
+// adding it here does not disturb byte-for-byte firmware compatibility of the
+// first seven fields.
 struct Genotype {
     uint8_t rainbow;    // 0=RR, 1=Rr(Pink), 2=rr(Rainbow)
     uint8_t shiny;      // 0=SS, 1=Ss(carrier), 2=ss(Shiny)
@@ -45,6 +52,10 @@ struct Genotype {
     uint8_t cantFight;  // F/f — 2 = ff (can't battle)
     uint8_t noHatch;    // H/h — 2 = hh (egg never hatches)
     uint8_t female;     // 1 = female, 0 = male (Pink/Rainbow display ♀ only)
+    // ── Deck-only 8th gene — NOT in the 7-byte firmware wire format ───────────
+    uint8_t tritan;     // T/n — tritanopia (OPN1SW). AUTOSOMAL DOMINANT: any T
+                        // expresses. 0=nn(clean), 1=Tn(affected het),
+                        // 2=TT(affected true-breeding). No silent-carrier state.
 };
 
 // ── The 12 visible skins (4 colors × 3 dark levels) ───────────────────────────
@@ -132,6 +143,11 @@ static inline Genotype cross(const Genotype &a, const Genotype &b, Rng &r) {
     o.sterile   = crossLocus(a.sterile,   b.sterile,   r);
     o.cantFight = crossLocus(a.cantFight, b.cantFight, r);
     o.noHatch   = crossLocus(a.noHatch,   b.noHatch,   r);
+    // Tritan T/n is a plain autosomal locus — one random allele from each parent,
+    // exactly like every other gene. Dominant expression is a PHENOTYPE rule
+    // (isTritan), so the GENOTYPE dosage still inherits Mendelian: only Tn×Tn can
+    // roll a new TT (25%), so "100% affected offspring" ≠ "pure/true-breeding".
+    o.tritan    = crossLocus(a.tritan,    b.tritan,    r);
     o.female    = r.bit() ? 1 : 0;
     return o;
 }
@@ -140,6 +156,11 @@ static inline Genotype cross(const Genotype &a, const Genotype &b, Rng &r) {
 static inline bool isSterile(const Genotype &g)  { return g.sterile   == 2; } // bb
 static inline bool cantFight(const Genotype &g)  { return g.cantFight == 2; } // ff
 static inline bool neverHatches(const Genotype &g){ return g.noHatch  == 2; } // hh
+
+// Tritanopia is AUTOSOMAL DOMINANT: any T allele (Tn or TT) expresses — there is
+// NO silent-carrier state (unlike the recessive defects above). Orthogonal to the
+// 12 skins and to isCleanStock (that's the breeding disorders only).
+static inline bool isTritan(const Genotype &g) { return g.tritan >= 1; }
 
 // A mon that can be used as a breeding parent at all (bb is a genetic dead-end).
 static inline bool canBreed(const Genotype &g) { return !isSterile(g); }
@@ -177,6 +198,12 @@ static inline const char *noHatchAllele(const Genotype &g) {
     switch (g.noHatch) { case 2: return "hh — NO-HATCH";
                          case 1: return "Hh — No-hatch carrier";
                          default: return "HH — clean"; }
+}
+// Autosomal DOMINANT — Tn and TT BOTH express (color-blind); only nn is clean.
+static inline const char *tritanAllele(const Genotype &g) {
+    switch (g.tritan) { case 2: return "TT — Tritan";
+                        case 1: return "Tn — Tritan";
+                        default: return "nn — clean"; }
 }
 
 // Compact full-genotype letter code across all six loci, e.g. "Rr Ss dd BB FF HH"

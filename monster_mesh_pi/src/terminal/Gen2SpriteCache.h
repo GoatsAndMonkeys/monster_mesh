@@ -30,8 +30,11 @@ void clear();                // destroy every cached/dynamic texture
 void dims(bool isBack, int *outW, int *outH);   // 64x64
 
 // Fetch a texture for (dex, isBack, variant). `phase` (0..359) animates the
-// Rainbow variant; ignored otherwise. Returns nullptr on failure/invalid dex.
+// Rainbow variant; ignored otherwise. `tritan` (blue-cone colour-blindness gene)
+// is ORTHOGONAL to variant: when true, the variant's palette is additionally
+// transformed through the Machado (2009) tritanopia matrix so the sprite renders
+// the way a tritanope sees it. Returns nullptr on failure/invalid dex.
 SDL_Texture *get(SDL_Renderer *renderer, int dex, bool isBack,
-                 int variant = VAR_NORMAL, uint16_t phase = 0);
+                 int variant = VAR_NORMAL, uint16_t phase = 0, bool tritan = false);
 
 }  // namespace Gen2SpriteCache

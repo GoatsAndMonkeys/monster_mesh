@@ -33,6 +33,7 @@ public:
         uint8_t  status   = 0;   // Gen-1 status byte (SLP/PSN/BRN/FRZ/PAR)
         bool     confused = false;  // volatile confusion (not in the status byte)
         uint8_t  variant  = 0;   // Gen2SpriteCache::VAR_* — colour skin (rare foes)
+        bool     tritan   = false; // tritanopia gene → render sprite as a tritanope sees it
     };
 
     struct MoveView {
@@ -94,6 +95,7 @@ public:
         bool     boxView      = false;
         uint16_t boxSpecies   = 0;   // national dex of the shown mon
         uint8_t  boxVariant   = 0;   // Gen2SpriteCache::VAR_* skin
+        bool     boxTritan    = false; // shown mon carries the tritanopia gene
         // Bill's PC category tabs: current index + per-category counts, drawn as
         // highlighted chips (All/Shiny/Pink/Rnbw/Dark/Blkout/Reg).
         uint8_t  boxTabCur    = 0;

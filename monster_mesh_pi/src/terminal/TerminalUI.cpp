@@ -1887,6 +1887,7 @@ void TerminalUI::pentestResetProgress() {
     pentestGymBeaten_ = 0;
     pentestActiveDex_     = 0;   // back to the default Pikachu…
     pentestActiveVariant_ = 0;   // …in its Regular caught colour
+    pentestActiveTritan_  = false;
     pentestActiveId_      = 0;
     pentestSaveProgress();
 
@@ -2204,6 +2205,7 @@ bool TerminalUI::pentestSyncBoxView(BattleWindow::State &s) {
     breeding::Skin sk = breeding::skinOf(g);
     s.boxSpecies = m.dex;
     s.boxVariant = (uint8_t)(int)sk;   // Skin 0..11 maps 1:1 to VAR_ (incl. Blackout)
+    s.boxTritan  = breeding::isTritan(g);   // render as a tritanope sees it + badge
     s.boxAction   = (int8_t)pentestBoxAction_;
     s.boxIsActive = (pentestActiveDex_ != 0 && m.dex == pentestActiveDex_);
     // Breeding pick indicator (1st breeder chosen, waiting for the mate).
@@ -2264,6 +2266,14 @@ bool TerminalUI::pentestSyncBoxView(BattleWindow::State &s) {
     twoCol("Rainbow", AP(g.rainbow, "RR", "Rr", "rr"),  rW, "Sterile", AP(g.sterile, "BB", "Bb", "bb"),  bW);
     twoCol("Shiny",   AP(g.shiny, "SS", "Ss", "ss"),    sW, "CantFgt", AP(g.cantFight, "FF", "Ff", "ff"), fW);
     twoCol("Dark",    AP(g.dark, "dd", "Dd", "DD"),     dW, "NoHatch", AP(g.noHatch, "HH", "Hh", "hh"),  hW);
+    // Tritan (autosomal-dominant colour blindness) — orthogonal to the skins, so
+    // it gets its own line and is only shown when the mon actually carries it.
+    if (breeding::isTritan(g)) {
+        char tl[64];
+        snprintf(tl, sizeof(tl), "Tritan   %s  (sees like a tritanope)",
+                 AP(g.tritan, "nn", "Tn", "TT"));
+        s.log.push_back(tl);
+    }
     return true;
 }
 
@@ -2861,6 +2871,7 @@ void TerminalUI::pentestStoreLiveToActive() {
 
 void TerminalUI::pentestLoadActiveToLive() {
     if (pentestActiveId_ == 0) {
+        pentestActiveTritan_ = false;     // default Pikachu — no tritan gene
         if (starterLevel_ == 0) {         // uninitialized → fresh L5 starter run
             starterLevel_ = 5; starterXp_ = 0; starterGym_ = 0;
             starterWins_  = 0; starterLosses_ = 0;
@@ -2871,6 +2882,8 @@ void TerminalUI::pentestLoadActiveToLive() {
         pentestWins_      = starterWins_;
         pentestLosses_    = starterLosses_;
     } else if (breeding::BreedMon *m = breedApp_.findById(pentestActiveId_)) {
+        // tritan isn't in the save file — derive it from the (now-loaded) box mon.
+        pentestActiveTritan_ = breeding::isTritan(m->geno);
         if (m->tripLevel == 0) {          // first activation → seed from catch level
             m->tripLevel     = (m->level < 5) ? 5 : m->level;
             m->tripXp        = 0;
@@ -2896,11 +2909,13 @@ void TerminalUI::pentestActivateMon(uint32_t newId) {
         pentestActiveId_      = 0;
         pentestActiveDex_     = 0;
         pentestActiveVariant_ = 0;              // default Regular Pikachu skin
+        pentestActiveTritan_  = false;
     } else if (breeding::BreedMon *m = breedApp_.findById(newId)) {
         pentestActiveId_      = m->id;
         pentestActiveDex_     = m->dex;
         // Preserve Feature-1's coloration lock: skin follows the individual.
         pentestActiveVariant_ = (uint8_t)(int)breeding::skinOf(m->geno);
+        pentestActiveTritan_  = breeding::isTritan(m->geno);   // tritan follows too
     } else {
         return;                                 // unknown id — keep current mon
     }
@@ -3865,11 +3880,11 @@ static const char *pentestBoxPath() {
 #endif
 }
 
-// Serialize one caught mon to the versioned 33-byte box record: the canonical
-// 22-byte CaughtMon wire prefix (still byte-compatible with the firmware
-// transfer / importCaughtMonBlob) followed by the 11-byte per-individual trip
-// tail (tripLevel, tripXp u32, tripGymBeaten u16, tripWins u16, tripLosses u16),
-// all little-endian.
+// Serialize one caught mon to the versioned 34-byte box record (format v2): the
+// canonical 22-byte CaughtMon wire prefix (still byte-compatible with the
+// firmware transfer / importCaughtMonBlob) followed by the 11-byte per-individual
+// trip tail (tripLevel, tripXp u32, tripGymBeaten u16, tripWins u16, tripLosses
+// u16) and finally the 1-byte deck-only tritan genotype, all little-endian.
 static void pentestSerializeMon(const breeding::BreedMon &m,
                                 uint8_t rec[breeding::BREEDBOX_REC_SIZE]) {
     memset(rec, 0, breeding::BREEDBOX_REC_SIZE);
@@ -3896,6 +3911,9 @@ static void pentestSerializeMon(const breeding::BreedMon &m,
     t[8]  = (uint8_t)((m.tripWins >> 8) & 0xFF);
     t[9]  = (uint8_t)(m.tripLosses & 0xFF);
     t[10] = (uint8_t)((m.tripLosses >> 8) & 0xFF);
+    // ── Deck-only tritan gene (offset 22 + trip size = 33) ─────────────────────
+    // NOT part of the 22-byte firmware-compatible prefix — box format v2 only.
+    rec[22 + breeding::BREEDBOX_TRIP_SIZE] = m.geno.tritan;
 }
 
 // Write the 5-byte box header (magic + version) to an empty file.
@@ -6039,6 +6057,9 @@ void TerminalUI::syncBattleWindow() {
     s.foe.confused = (em.confuseTurns > 0);
     // Rare-coloured foe (pentest encounters roll a colour skin).
     s.foe.variant = (inPentestBattle_ || pentestStandby_) ? (uint8_t)pentestFoeVariant_ : 0;
+    // Tritan foe: use the rolled wild genotype (pentest encounters only).
+    s.foe.tritan  = (inPentestBattle_ || pentestStandby_) &&
+                    breeding::isTritan(pentestFoeGeno_);
     snprintf(s.foe.nickname, sizeof(s.foe.nickname), "%s", em.nickname);
 
     s.you.species = pm.species;
@@ -6048,6 +6069,7 @@ void TerminalUI::syncBattleWindow() {
     s.you.status  = pm.status;
     s.you.confused = (pm.confuseTurns > 0);
     s.you.variant = pentestActiveVariant_;  // locked to caught/bred colour
+    s.you.tritan  = pentestActiveTritan_;   // active mon's tritanopia gene
     snprintf(s.you.nickname, sizeof(s.you.nickname), "%s", pm.nickname);
 
     for (int i = 0; i < 4; i++) {
@@ -6148,6 +6170,7 @@ void TerminalUI::syncBattleWindow() {
         s.you.maxHp   = tmp.maxHp;
         s.you.hp      = tmp.maxHp;
         s.you.variant = pentestActiveVariant_;  // locked to caught/bred colour
+        s.you.tritan  = pentestActiveTritan_;   // active mon's tritanopia gene
         snprintf(s.you.nickname, sizeof(s.you.nickname), "%s",
                  evolved ? "RAICHU" : "PIKACHU");
 

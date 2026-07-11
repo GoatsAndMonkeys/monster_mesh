@@ -87,41 +87,42 @@ static BreedMon makeMon(uint8_t dex, uint8_t level, const char *nick,
 void BreedingApp::seedTestRoster() {
     roster_.clear();
     nextId_ = 1;
-    // female, rainbow, shiny, dark, sterile, cantFight, noHatch
-    // {rainbow, shiny, dark, sterile, cantFight, noHatch, female}
+    // Genotype brace order: {rainbow, shiny, dark, sterile, cantFight, noHatch,
+    // female, tritan}. tritan is the deck-only 8th gene (0=nn clean).
 
     // A Pentest Wild Pikachu — a plain catch. Owning this UNLOCKS breeding.
     add(makeMon(25, 12, "Sparky",
-        {0,1,0, 0,0,0, 0}, PROV_WILD, 0, 0));      // Ss carrier male
+        {0,1,0, 0,0,0, 0, 0}, PROV_WILD, 0, 0));   // Ss carrier male
 
     // Pink female (Rr) — the common gateway color, ♀ so she displays it.
     add(makeMon(25, 14, "Rosa",
-        {1,0,0, 0,1,0, 1}, PROV_WILD, 0, 0));      // Rr, Ff carrier
+        {1,0,0, 0,1,0, 1, 0}, PROV_WILD, 0, 0));   // Rr, Ff carrier
 
     // Hidden Rainbow carrier male (Rr) — blood-tested stud. Displays Regular.
+    // Also a Tn tritan carrier — so a blood test + tritanope render are visible.
     add(makeMon(25, 15, "Prism",
-        {1,0,0, 0,0,0, 0}, PROV_WILD, 0, 0));      // Rr male (hidden carrier)
+        {1,0,0, 0,0,0, 0, 1}, PROV_WILD, 0, 0));   // Rr male (hidden), Tn tritan
 
     // Dark pair (Dd × Dd) → 25% Blackout target.
     add(makeMon(94, 20, "Shade",
-        {0,0,1, 0,0,1, 1}, PROV_WILD, 0, 0));      // Dd female, Hh carrier
+        {0,0,1, 0,0,1, 1, 0}, PROV_WILD, 0, 0));   // Dd female, Hh carrier
     add(makeMon(94, 22, "Umbra",
-        {0,0,1, 1,0,0, 0}, PROV_WILD, 0, 0));      // Dd male, Bb carrier
+        {0,0,1, 1,0,0, 0, 0}, PROV_WILD, 0, 0));   // Dd male, Bb carrier
 
     // Shiny-carrier pair (Ss × Ss) → 25% Shiny.
     add(makeMon(133, 10, "Sable",
-        {0,1,0, 0,0,0, 1}, PROV_WILD, 0, 0));      // Ss female
+        {0,1,0, 0,0,0, 1, 0}, PROV_WILD, 0, 0));   // Ss female
     add(makeMon(133, 11, "Cinder",
-        {0,1,0, 0,0,0, 0}, PROV_WILD, 0, 0));      // Ss male
+        {0,1,0, 0,0,0, 0, 0}, PROV_WILD, 0, 0));   // Ss male
 
     // The heartbreak: a gorgeous Wild Rainbow female that is bb — STERILE.
     // Battle-ready and stunning, but a genetic dead-end (can't breed).
     add(makeMon(6, 30, "Iris",
-        {2,0,0, 2,0,0, 1}, PROV_WILD, 0, 0));      // rr Rainbow ♀, bb sterile
+        {2,0,0, 2,0,0, 1, 0}, PROV_WILD, 0, 0));   // rr Rainbow ♀, bb sterile
 
     // Clean foundation stock — plain, but BB FF HH: prime breeding base.
     add(makeMon(143, 25, "Rock",
-        {0,0,0, 0,0,0, 0}, PROV_WILD, 0, 0));
+        {0,0,0, 0,0,0, 0, 0}, PROV_WILD, 0, 0));
 }
 
 // ── Provenance derivation ─────────────────────────────────────────────────────
@@ -260,6 +261,7 @@ std::vector<std::string> BreedingApp::bloodTest(const BreedMon &m) {
     out.push_back(std::string("Sterile : ") + sterileAllele(g));
     out.push_back(std::string("CantFght: ") + cantFightAllele(g));
     out.push_back(std::string("NoHatch : ") + noHatchAllele(g));
+    out.push_back(std::string("Tritan  : ") + tritanAllele(g));
 
     // Roll-up: what this mon can DO (value axes).
     std::string can = "Status  : ";
@@ -415,21 +417,28 @@ int BreedingApp::importCaughtMonBlob(const uint8_t *data, size_t len) {
     return count;
 }
 
-// Bill's PC box loader. Two on-disk shapes are accepted:
-//   • Versioned (BREEDBOX_MAGIC + version): 5-byte header, then 33-byte records
-//     that carry the per-individual trip fields (level/xp/badges/W/L).
+// Bill's PC box loader. On-disk shapes accepted (all migrated forward):
+//   • Versioned (BREEDBOX_MAGIC + version): 5-byte header, then fixed-size records
+//     carrying the per-individual trip fields (level/xp/badges/W/L). The record
+//     size is chosen from the on-disk VERSION byte:
+//       v1 → 33-byte records (no tritan; migrated with tritan = 0)
+//       v2 → 34-byte records (trip tail + deck-only tritan genotype byte)
 //   • Legacy (no header): a bare stream of 22-byte CaughtMon records — migrated
-//     with default trip fields (tripLevel 0 → seed-from-catch-level on activate).
+//     with default trip fields (tripLevel 0 → seed-from-catch-level on activate)
+//     and tritan = 0.
 int BreedingApp::importBox(const uint8_t *data, size_t len) {
     if (!data || len == 0) return -1;
-    // Detect the versioned header: magic (LE u32) + a matching version byte.
+    // Detect the versioned header: magic (LE u32) + a version byte we understand.
     if (len >= BREEDBOX_HDR_SIZE) {
         uint32_t magic;
         memcpy(&magic, data, 4);
-        if (magic == BREEDBOX_MAGIC && data[4] == BREEDBOX_VERSION) {
+        uint8_t ver = data[4];
+        if (magic == BREEDBOX_MAGIC && (ver == 1 || ver == BREEDBOX_VERSION)) {
+            // Per-version record size: v1 has no tritan byte, v2 does.
+            const size_t recSize = (ver >= 2) ? BREEDBOX_REC_SIZE : BREEDBOX_V1_REC_SIZE;
             int count = 0;
             for (size_t off = BREEDBOX_HDR_SIZE;
-                 off + BREEDBOX_REC_SIZE <= len; off += BREEDBOX_REC_SIZE) {
+                 off + recSize <= len; off += recSize) {
                 const uint8_t *rec = data + off;
                 BreedMon m = parseCaught22(rec);
                 const uint8_t *t = rec + 22;          // 11-byte trip tail
@@ -439,13 +448,15 @@ int BreedingApp::importBox(const uint8_t *data, size_t len) {
                 m.tripGymBeaten = (uint16_t)(t[5] | (t[6] << 8));
                 m.tripWins      = (uint16_t)(t[7] | (t[8] << 8));
                 m.tripLosses    = (uint16_t)(t[9] | (t[10] << 8));
+                // Deck-only tritan gene (offset 33). Absent in v1 → migrate to 0.
+                m.geno.tritan   = (ver >= 2) ? rec[22 + BREEDBOX_TRIP_SIZE] : 0;
                 add(m);
                 ++count;
             }
             return count;
         }
     }
-    // No/unknown header → legacy 22-byte records (trip fields default = migrate).
+    // No/unknown header → legacy 22-byte records (trip + tritan default = migrate).
     return importCaughtMonBlob(data, len);
 }
 

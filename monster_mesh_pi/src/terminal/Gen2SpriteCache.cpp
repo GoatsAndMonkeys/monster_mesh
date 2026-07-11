@@ -12,8 +12,10 @@ extern "C" {
 
 namespace Gen2SpriteCache {
 
-// Static cache: [variant][dir][dex]. Rainbow (animated) is NOT cached here.
-static SDL_Texture *s_cache[VAR_COUNT][2][387] = {};
+// Static cache: [variant][dir][tritan][dex]. Rainbow (animated) is NOT cached
+// here. `tritan` (0/1) is orthogonal to the colour variant — the tritanopia
+// palette transform doubles the cache depth.
+static SDL_Texture *s_cache[VAR_COUNT][2][2][387] = {};
 // Dynamic rainbow texture, one per direction, regenerated per frame.
 static SDL_Texture *s_dyn[2]   = {};
 static int          s_dynDex[2] = { -1, -1 };
@@ -37,8 +39,9 @@ void init() {
 void clear() {
     for (int v = 0; v < VAR_COUNT; ++v)
         for (int d = 0; d < 2; ++d)
-            for (int i = 0; i < 387; ++i)
-                if (s_cache[v][d][i]) { SDL_DestroyTexture(s_cache[v][d][i]); s_cache[v][d][i] = nullptr; }
+            for (int t = 0; t < 2; ++t)
+                for (int i = 0; i < 387; ++i)
+                    if (s_cache[v][d][t][i]) { SDL_DestroyTexture(s_cache[v][d][t][i]); s_cache[v][d][t][i] = nullptr; }
     for (int d = 0; d < 2; ++d) {
         if (s_dyn[d]) { SDL_DestroyTexture(s_dyn[d]); s_dyn[d] = nullptr; }
         s_dynDex[d] = -1;
@@ -161,9 +164,25 @@ static void applyVariant(int variant, int i, int w, int h, uint16_t phase,
     }
 }
 
-// Decode one sprite into RGBA32 with the variant applied. `phase` animates Rainbow.
+// Machado (2009) tritanopia (blue-cone) transform at FULL severity, applied to a
+// single sRGB 0..255 colour in place, clamped to [0,255]. Intended to run at the
+// PALETTE level (only ~4-16 colours), not per output pixel — see decodeVariant.
+static inline void applyTritan(uint8_t &r, uint8_t &g, uint8_t &b) {
+    float R = r, G = g, B = b;
+    float nr = 1.255528f * R - 0.076749f * G - 0.178779f * B;
+    float ng = -0.078411f * R + 0.930809f * G + 0.147602f * B;
+    float nb =  0.004733f * R + 0.691367f * G + 0.303900f * B;
+    auto cl = [](float v) -> uint8_t {
+        return v <= 0.0f ? 0 : (v >= 255.0f ? 255 : (uint8_t)(v + 0.5f));
+    };
+    r = cl(nr); g = cl(ng); b = cl(nb);
+}
+
+// Decode one sprite into RGBA32 with the variant applied. `phase` animates
+// Rainbow. When `tritan` is set, the variant's effective palette is additionally
+// run through the tritanopia matrix (palette-level, ~<=16 colours).
 static bool decodeVariant(int dex, bool isBack, int variant, uint16_t phase,
-                          uint8_t *out, int w, int h) {
+                          bool tritan, uint8_t *out, int w, int h) {
     if (dex < 1 || dex > 386) return false;
     const uint32_t *offs = isBack ? kGen3Back4bppOffsets  : kGen3Front4bppOffsets;
     const uint8_t  *blob = isBack ? kGen3Back4bppDeflate  : kGen3Front4bppDeflate;
@@ -178,15 +197,42 @@ static bool decodeVariant(int dex, bool isBack, int variant, uint16_t phase,
     unsigned long destlen = (unsigned long)(w * h / 2), srclen = end - start;
     if (puff(idxbuf, &destlen, blob + start, &srclen) != 0) return false;
 
+    // Rainbow variants recolour per-pixel (the tint depends on pixel position),
+    // so they can't be reduced to a fixed palette — the tritan matrix is applied
+    // per-pixel there. Every other variant is position-independent, so we build a
+    // 16-entry effective palette ONCE (expand 5-6-5 -> variant recolour -> tritan)
+    // and blit by index: that's the intended palette-level tritan transform.
+    const bool posDep = (variant == VAR_RAINBOW || variant == VAR_DARK_RAINBOW ||
+                         variant == VAR_BLACKOUT_RAINBOW);
+    uint8_t effR[16], effG[16], effB[16];
+    if (!posDep) {
+        for (int k = 0; k < 16; ++k) {
+            uint16_t c = pal[k];
+            int r = ((c >> 11) & 0x1F) << 3;  r |= r >> 5;    // 5->8 bit expand
+            int g = ((c >> 5)  & 0x3F) << 2;  g |= g >> 6;
+            int b = (c & 0x1F) << 3;          b |= b >> 5;
+            uint8_t rr = (uint8_t)r, gg = (uint8_t)g, bb = (uint8_t)b;
+            applyVariant(variant, 0, w, h, phase, rr, gg, bb);  // pos ignored (non-rainbow)
+            if (tritan) applyTritan(rr, gg, bb);                // palette-level: <=16 colours
+            effR[k] = rr; effG[k] = gg; effB[k] = bb;
+        }
+    }
+
     for (int i = 0; i < w * h; ++i) {
         uint8_t idx = (i & 1) ? (idxbuf[i >> 1] & 0x0F) : (idxbuf[i >> 1] >> 4);
         if (idx == 0) { out[i*4]=0; out[i*4+1]=0; out[i*4+2]=0; out[i*4+3]=0; continue; }
-        uint16_t c = pal[idx];
-        int r = ((c >> 11) & 0x1F) << 3;  r |= r >> 5;    // 5->8 bit expand
-        int g = ((c >> 5)  & 0x3F) << 2;  g |= g >> 6;
-        int b = (c & 0x1F) << 3;          b |= b >> 5;
-        uint8_t rr = (uint8_t)r, gg = (uint8_t)g, bb = (uint8_t)b;
-        applyVariant(variant, i, w, h, phase, rr, gg, bb);
+        uint8_t rr, gg, bb;
+        if (!posDep) {
+            rr = effR[idx]; gg = effG[idx]; bb = effB[idx];
+        } else {
+            uint16_t c = pal[idx];
+            int r = ((c >> 11) & 0x1F) << 3;  r |= r >> 5;
+            int g = ((c >> 5)  & 0x3F) << 2;  g |= g >> 6;
+            int b = (c & 0x1F) << 3;          b |= b >> 5;
+            rr = (uint8_t)r; gg = (uint8_t)g; bb = (uint8_t)b;
+            applyVariant(variant, i, w, h, phase, rr, gg, bb);
+            if (tritan) applyTritan(rr, gg, bb);
+        }
         out[i*4] = rr; out[i*4+1] = gg; out[i*4+2] = bb; out[i*4+3] = 255;
     }
     return true;
@@ -204,7 +250,8 @@ static SDL_Texture *makeTex(SDL_Renderer *renderer, const uint8_t *buf, int w, i
     return tex;
 }
 
-SDL_Texture *get(SDL_Renderer *renderer, int dex, bool isBack, int variant, uint16_t phase) {
+SDL_Texture *get(SDL_Renderer *renderer, int dex, bool isBack, int variant,
+                 uint16_t phase, bool tritan) {
     if (dex < 1 || dex > 386) return nullptr;
     if (variant < 0 || variant >= VAR_COUNT) variant = VAR_NORMAL;
     if (!s_gammaReady) initGamma();
@@ -215,12 +262,14 @@ SDL_Texture *get(SDL_Renderer *renderer, int dex, bool isBack, int variant, uint
     // Rainbow / Dark-Rainbow / Blackout-Rainbow scroll → regenerate each frame
     // into a persistent dynamic texture (one per direction). Decoded with the
     // actual variant so the Dark/Blackout darkening is applied to the glow.
+    // (Tritan is folded into the per-frame decode; the animated path isn't cached
+    // so it needs no extra cache dimension.)
     if (variant == VAR_RAINBOW || variant == VAR_DARK_RAINBOW ||
         variant == VAR_BLACKOUT_RAINBOW) {
         if (!renderer) return nullptr;
         int d = isBack ? 1 : 0;
         if (s_dyn[d] && s_dynDex[d] != dex) { SDL_DestroyTexture(s_dyn[d]); s_dyn[d] = nullptr; }
-        if (!decodeVariant(dex, isBack, variant, phase, buf, w, h)) return nullptr;
+        if (!decodeVariant(dex, isBack, variant, phase, tritan, buf, w, h)) return nullptr;
         if (!s_dyn[d]) {
             s_dyn[d] = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32,
                                          SDL_TEXTUREACCESS_STREAMING, w, h);
@@ -235,11 +284,11 @@ SDL_Texture *get(SDL_Renderer *renderer, int dex, bool isBack, int variant, uint
         return s_dyn[d];
     }
 
-    // Static variants → lazy per (variant, dir, dex) cache.
-    SDL_Texture **slot = &s_cache[variant][isBack ? 1 : 0][dex];
+    // Static variants → lazy per (variant, dir, tritan, dex) cache.
+    SDL_Texture **slot = &s_cache[variant][isBack ? 1 : 0][tritan ? 1 : 0][dex];
     if (*slot) return *slot;
     if (!renderer) return nullptr;
-    if (!decodeVariant(dex, isBack, variant, 0, buf, w, h)) return nullptr;
+    if (!decodeVariant(dex, isBack, variant, 0, tritan, buf, w, h)) return nullptr;
     *slot = makeTex(renderer, buf, w, h);
     return *slot;
 }

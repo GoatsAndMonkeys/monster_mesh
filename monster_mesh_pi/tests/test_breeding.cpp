@@ -51,6 +51,9 @@ static bool pFemale(const Genotype &g)    { return g.female == 1; }
 // Visible Rainbow skin among the whole clutch (sex-limited: ♀ only).
 static bool pVisRainbow(const Genotype &g){ return skinOf(g) == SKIN_RAINBOW; }
 static bool pVisPink(const Genotype &g)   { return skinOf(g) == SKIN_PINK; }
+// Tritan (autosomal dominant): TT genotype, and "any T" phenotype (Tn or TT).
+static bool pTritanTT(const Genotype &g)  { return g.tritan == 2; }
+static bool pTritanAny(const Genotype &g) { return isTritan(g); }
 
 static int runSelfTest() {
     const int N = 200000;
@@ -58,27 +61,36 @@ static int runSelfTest() {
     printf("=== Breeding genetics self-test (%d rolls/cross) ===\n", N);
 
     // Pink × Pink  (Rr × Rr) → 25% rr / 50% Rr / 25% RR
-    Genotype pink{1,0,0, 0,0,0, 1};
+    Genotype pink{1,0,0, 0,0,0, 1, 0};
     printf("Pink x Pink (Rr x Rr):\n");
     expectNear("rr Rainbow-geno", fraction(pink, pink, N, pRainbowRR, 1), 0.25, TOL);
     expectNear("Rr Pink-geno",    fraction(pink, pink, N, pRainbowRr, 2), 0.50, TOL);
 
     // Dark × Dark  (Dd × Dd) → 25% Blackout / 50% Dark / 25% none
-    Genotype darkM{0,0,1, 0,0,0, 0}, darkF{0,0,1, 0,0,0, 1};
+    Genotype darkM{0,0,1, 0,0,0, 0, 0}, darkF{0,0,1, 0,0,0, 1, 0};
     printf("Dark x Dark (Dd x Dd):\n");
     expectNear("DD Blackout", fraction(darkM, darkF, N, pDarkDD, 3), 0.25, TOL);
     expectNear("Dd Dark",     fraction(darkM, darkF, N, pDarkDd, 4), 0.50, TOL);
 
     // Shiny carrier × carrier (Ss × Ss) → 25% ss Shiny / 50% Ss
-    Genotype ssc{0,1,0, 0,0,0, 0};
+    Genotype ssc{0,1,0, 0,0,0, 0, 0};
     printf("Carrier x Carrier (Ss x Ss):\n");
     expectNear("ss Shiny",   fraction(ssc, ssc, N, pShinyss, 5), 0.25, TOL);
     expectNear("Ss carrier", fraction(ssc, ssc, N, pShinySs, 6), 0.50, TOL);
 
     // Sterile carrier × carrier (Bb × Bb) → 25% bb affected
-    Genotype bbc{0,0,0, 1,0,0, 0};
+    Genotype bbc{0,0,0, 1,0,0, 0, 0};
     printf("Defect carrier x carrier (Bb x Bb):\n");
     expectNear("bb affected", fraction(bbc, bbc, N, pSterilebb, 7), 0.25, TOL);
+
+    // Tritan carrier × carrier (Tn × Tn) — autosomal DOMINANT, so PHENOTYPE is
+    // 75% affected, but the GENOTYPE still splits Mendelian: 25% TT / 50% Tn /
+    // 25% nn. Only the 25% TT is true-breeding — that's the "100% affected ≠
+    // pure" nuance that requires storing the genotype, not just the phenotype.
+    Genotype tnM{0,0,0, 0,0,0, 0, 1}, tnF{0,0,0, 0,0,0, 1, 1};
+    printf("Tritan carrier x carrier (Tn x Tn):\n");
+    expectNear("TT true-breeding", fraction(tnM, tnF, N, pTritanTT, 11), 0.25, TOL);
+    expectNear("any-T affected",   fraction(tnM, tnF, N, pTritanAny, 12), 0.75, TOL);
 
     // Sex is a fair coin.
     printf("Sex ratio:\n");
@@ -88,12 +100,12 @@ static int runSelfTest() {
     // Genotype daughters: 50% rr(Rainbow) / 50% Rr(Pink). Sons never display.
     // Across the WHOLE clutch: ~25% visible-Rainbow, ~25% visible-Pink, ~50%
     // Regular-looking (all sons + none else).
-    Genotype rainF{2,0,0, 0,0,0, 1}, carrM{1,0,0, 0,0,0, 0};
+    Genotype rainF{2,0,0, 0,0,0, 1, 0}, carrM{1,0,0, 0,0,0, 0, 0};
     printf("Rainbow-female x hidden-carrier-male (sex-limited):\n");
     expectNear("clutch visible Rainbow", fraction(rainF, carrM, N, pVisRainbow, 9),  0.25, TOL);
     expectNear("clutch visible Pink",    fraction(rainF, carrM, N, pVisPink,    10), 0.25, TOL);
     // A male can NEVER display Pink/Rainbow — sanity check on a Pink male.
-    Genotype pinkMale{1,0,0, 0,0,0, 0};
+    Genotype pinkMale{1,0,0, 0,0,0, 0, 0};
     printf("Sex-limited display invariant:\n");
     printf("  [%s] Pink-genotype male displays as %s (must be Regular)\n",
            skinOf(pinkMale) == SKIN_REGULAR ? "PASS" : "FAIL",

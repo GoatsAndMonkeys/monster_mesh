@@ -68,16 +68,27 @@ struct BreedMon {
 
 // ── Bill's PC box file (breeding_box.dat) on-disk format ─────────────────────
 // Old files were a bare stream of 22-byte CaughtMon wire records with NO header.
-// The trip-fields upgrade adds a 5-byte header (magic + version) followed by
-// extended 33-byte records (the legacy 22 bytes + 11 trip bytes). importBox()
-// detects a missing/absent magic and migrates old files (default trip fields →
-// seed-from-catch-level). The first magic byte is 0xFF so it can never collide
-// with a legacy record's leading dex byte (dex is 1..151).
-static constexpr uint32_t BREEDBOX_MAGIC     = 0x4D4258FFu;  // disk: FF 58 42 4D
-static constexpr uint8_t  BREEDBOX_VERSION   = 1;
-static constexpr size_t   BREEDBOX_HDR_SIZE  = 5;   // magic(4) + version(1)
-static constexpr size_t   BREEDBOX_TRIP_SIZE = 11;  // tripLevel(1)+xp(4)+gym(2)+w(2)+l(2)
-static constexpr size_t   BREEDBOX_REC_SIZE  = 22 + BREEDBOX_TRIP_SIZE;  // 33
+// The trip-fields upgrade added a 5-byte header (magic + version) followed by
+// extended records. importBox() detects a missing/absent magic and migrates old
+// files. The first magic byte is 0xFF so it can never collide with a legacy
+// record's leading dex byte (dex is 1..151).
+//
+// Record layout has grown by version — importBox() reads the on-disk version and
+// uses that version's record size, so ANY older box migrates forward:
+//   v1: 22-byte CaughtMon prefix + 11-byte trip tail                 = 33 bytes
+//   v2: v1 record + 1 deck-only tritan byte (genotype.tritan)        = 34 bytes
+// The 22-byte prefix stays byte-for-byte firmware-compatible; the tritan gene is
+// deck-only, so a v1/legacy record migrates with tritan = 0.
+static constexpr uint32_t BREEDBOX_MAGIC       = 0x4D4258FFu;  // disk: FF 58 42 4D
+static constexpr uint8_t  BREEDBOX_VERSION     = 2;
+static constexpr size_t   BREEDBOX_HDR_SIZE    = 5;   // magic(4) + version(1)
+static constexpr size_t   BREEDBOX_TRIP_SIZE   = 11;  // tripLevel(1)+xp(4)+gym(2)+w(2)+l(2)
+static constexpr size_t   BREEDBOX_TRITAN_SIZE = 1;   // deck-only tritan genotype byte
+// v1 record: prefix + trip (no tritan). Used only when reading a v1 file.
+static constexpr size_t   BREEDBOX_V1_REC_SIZE = 22 + BREEDBOX_TRIP_SIZE;             // 33
+// Current (v2) record: prefix + trip + tritan.
+static constexpr size_t   BREEDBOX_REC_SIZE    = 22 + BREEDBOX_TRIP_SIZE
+                                                    + BREEDBOX_TRITAN_SIZE;           // 34
 
 // Result of pairing two parents.
 enum BreedStatus : uint8_t {

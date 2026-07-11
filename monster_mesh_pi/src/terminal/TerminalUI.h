@@ -474,6 +474,7 @@ private:
     uint32_t pentestBreedPickId_ = 0;      // Bill's PC: 1st breeder chosen (0 = none)
     uint8_t  pentestActiveDex_   = 0;      // active battler (0 = default Pikachu/Raichu)
     uint8_t  pentestActiveVariant_ = 0;    // active battler's caught/bred skin (VAR_/Skin 0..11)
+    bool     pentestActiveTritan_ = false; // active battler carries the tritanopia gene
     uint32_t pentestActiveId_    = 0;      // active battler's BreedMon.id (0 = default Pikachu)
     // ── Independent journeys (per-individual "Kanto trip") ────────────────────
     // The live pentestLevel_/Xp_/GymBeaten_/Wins_/Losses_ above are the ACTIVE

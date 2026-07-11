@@ -256,7 +256,8 @@ void BattleWindow::drawFoeSprite() {
     int srcW, srcH;
     Gen2SpriteCache::dims(false, &srcW, &srcH);  // 64x64 native
     SDL_Texture *tex = Gen2SpriteCache::get(renderer_, state_.foe.species, false,
-                                            state_.foe.variant, animPhase_);
+                                            state_.foe.variant, animPhase_,
+                                            state_.foe.tritan);
     if (!tex) return;
     // 2× scale → 128×128 (bit-perfect).  Anchored so the foot of the sprite sits on the
     // platform ellipse, centered horizontally over (470, 165).
@@ -275,7 +276,8 @@ void BattleWindow::drawYouSprite() {
     int srcW, srcH;
     Gen2SpriteCache::dims(true, &srcW, &srcH);  // 64x64 native
     SDL_Texture *tex = Gen2SpriteCache::get(renderer_, state_.you.species, true,
-                                            state_.you.variant, animPhase_);
+                                            state_.you.variant, animPhase_,
+                                            state_.you.tritan);
     if (!tex) return;
     // 2× scale → 128×128 (bit-perfect).
     int dstW = srcW * SPRITE_SCALE;
@@ -683,9 +685,9 @@ void BattleWindow::drawBoxView() {
     // ── Big front (right) + back (left) sprites, 4× = 256 px (bit-perfect) ────
     const int DIM = 256;
     SDL_Texture *fr = Gen2SpriteCache::get(renderer_, state_.boxSpecies, false,
-                                           state_.boxVariant, animPhase_);
+                                           state_.boxVariant, animPhase_, state_.boxTritan);
     SDL_Texture *bk = Gen2SpriteCache::get(renderer_, state_.boxSpecies, true,
-                                           state_.boxVariant, animPhase_);
+                                           state_.boxVariant, animPhase_, state_.boxTritan);
     const int spriteY = 40;
     if (fr) { SDL_Rect d = { LOGICAL_W - 8 - DIM, spriteY, DIM, DIM };
               SDL_RenderCopy(renderer_, fr, nullptr, &d); }
@@ -712,6 +714,12 @@ void BattleWindow::drawBoxView() {
     if (state_.boxIsActive)
         BitmapFont::drawString(renderer_, LOGICAL_W / 2 - 40, spriteY + DIM / 2 - 6,
                                "\x10 ACTIVE", COL_INK, 2);
+
+    // Tritan carrier marker — some species barely shift under the tritanopia
+    // matrix, so flag it explicitly. Sits just under the ACTIVE badge slot.
+    if (state_.boxTritan)
+        BitmapFont::drawString(renderer_, LOGICAL_W / 2 - 48, spriteY + DIM / 2 + 12,
+                               "\x10 TRITAN", COL_INK, 2);
 
     // ── Breeding-pick banner: a 1st breeder is chosen, waiting for the mate ───
     if (state_.boxBreedPending) {
