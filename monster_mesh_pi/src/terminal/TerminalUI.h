@@ -473,6 +473,8 @@ private:
     int      pentestBoxAction_   = -1;     // Bill's PC: action menu cursor (-1 = browsing)
     uint32_t pentestBreedPickId_ = 0;      // Bill's PC: 1st breeder chosen (0 = none)
     uint8_t  pentestActiveDex_   = 0;      // active battler (0 = default Pikachu/Raichu)
+    uint8_t  pentestActiveVariant_ = 0;    // active battler's caught/bred skin (VAR_/Skin 0..11)
+    uint32_t pentestActiveId_    = 0;      // active battler's BreedMon.id (0 = default Pikachu)
     bool     pentestConfirmReset_= false; // status menu is in the reset-confirm step
     bool     pentestBossMode_    = false; // Y: interactive fight (looks like normal battle)
     bool     pentestRematch_     = false; // true = lost last fight, retry same network

@@ -1371,17 +1371,10 @@ void TerminalUI::handleButton(const ButtonEvent &ev) {
         return;
     }
 
-    // L/R shoulder buttons cycle the player sprite's colour skin on any battle
-    // screen (Regular→Shiny→Rainbow→Dark→Dark-Shiny→Pink→Dark-Pink). Testing
-    // hook; L/R are unused by battle logic. R = next, L = previous.
-    if (ev.pressed && (ev.button == GpiButton::L || ev.button == GpiButton::R)) {
-        bool onBattle = (screen_ == Screen::BATTLE     || screen_ == Screen::BATTLE_END ||
-                         screen_ == Screen::PVP_BATTLE || screen_ == Screen::PVP_BATTLE_END);
-        if (onBattle) {
-            battleWindow_.cyclePlayerVariant(ev.button == GpiButton::R ? +1 : -1);
-            return;
-        }
-    }
+    // NOTE: the player's on-screen colour is FIXED to the skin the active mon
+    // was caught or bred with (state_.you.variant, derived from its genotype).
+    // The old L/R "cycle skin" test-hook has been removed so coloration can no
+    // longer be changed by hand.
 
     switch (screen_) {
         case Screen::MENU:          menuButton(ev);         break;
@@ -1637,6 +1630,10 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
                         if (pentestBoxAction_ == 0 && fn > 0) {          // Set Active
                             const breeding::BreedMon &m = box[filt[pentestBoxSel_ % fn]];
                             pentestActiveDex_ = m.dex;
+                            // Lock the battler's coloration to this individual's
+                            // caught/bred genotype skin (Skin 0..11 maps 1:1 to VAR_).
+                            pentestActiveVariant_ = (uint8_t)(int)breeding::skinOf(m.geno);
+                            pentestActiveId_ = m.id;
                             pentestSaveProgress();
                             breedMsg_ = std::string(dexName(m.dex)) + " is now your battler!";
                         } else if (pentestBoxAction_ == 1 && fn > 0) {   // Breed
@@ -1885,6 +1882,9 @@ void TerminalUI::pentestResetProgress() {
     pentestWins_      = 0;
     pentestLosses_    = 0;
     pentestGymBeaten_ = 0;
+    pentestActiveDex_     = 0;   // back to the default Pikachu…
+    pentestActiveVariant_ = 0;   // …in its Regular caught colour
+    pentestActiveId_      = 0;
     pentestSaveProgress();
 
     pentestShowStatus_   = false;
@@ -2843,6 +2843,12 @@ void TerminalUI::pentestLoadProgress() {
         // Active battler dex (optional — 0/absent = default Pikachu).
         pentestActiveDex_ = 0;
         fread(&pentestActiveDex_, sizeof(pentestActiveDex_), 1, f);
+        // Active battler's caught/bred colour + individual id (optional tail —
+        // older saves predate the coloration lock; default 0 = Regular Pikachu).
+        pentestActiveVariant_ = 0;
+        pentestActiveId_      = 0;
+        fread(&pentestActiveVariant_, sizeof(pentestActiveVariant_), 1, f);
+        fread(&pentestActiveId_,      sizeof(pentestActiveId_),      1, f);
     }
     fclose(f);
 }
@@ -2861,6 +2867,8 @@ void TerminalUI::pentestSaveProgress() {
     fwrite(&pentestLosses_, sizeof(pentestLosses_), 1, f);
     fwrite(&pentestGymBeaten_, sizeof(pentestGymBeaten_), 1, f);
     fwrite(&pentestActiveDex_, sizeof(pentestActiveDex_), 1, f);
+    fwrite(&pentestActiveVariant_, sizeof(pentestActiveVariant_), 1, f);
+    fwrite(&pentestActiveId_,      sizeof(pentestActiveId_),      1, f);
     fclose(f);
 }
 
@@ -5873,6 +5881,7 @@ void TerminalUI::syncBattleWindow() {
     s.you.maxHp   = pm.maxHp;
     s.you.status  = pm.status;
     s.you.confused = (pm.confuseTurns > 0);
+    s.you.variant = pentestActiveVariant_;  // locked to caught/bred colour
     snprintf(s.you.nickname, sizeof(s.you.nickname), "%s", pm.nickname);
 
     for (int i = 0; i < 4; i++) {
@@ -5972,6 +5981,7 @@ void TerminalUI::syncBattleWindow() {
         s.you.level   = pentestLevel_;
         s.you.maxHp   = tmp.maxHp;
         s.you.hp      = tmp.maxHp;
+        s.you.variant = pentestActiveVariant_;  // locked to caught/bred colour
         snprintf(s.you.nickname, sizeof(s.you.nickname), "%s",
                  evolved ? "RAICHU" : "PIKACHU");
 

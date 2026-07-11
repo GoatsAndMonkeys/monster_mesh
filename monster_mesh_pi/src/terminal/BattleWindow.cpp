@@ -104,10 +104,6 @@ void BattleWindow::close() {
 
 void BattleWindow::setState(const State &s) { state_ = s; }
 
-void BattleWindow::cyclePlayerVariant(int dir) {
-    youVariant_ = (youVariant_ + dir + Gen2SpriteCache::VAR_COUNT) % Gen2SpriteCache::VAR_COUNT;
-}
-
 void BattleWindow::pumpEvents() {
     if (!window_) return;
     SDL_Event ev;
@@ -279,7 +275,7 @@ void BattleWindow::drawYouSprite() {
     int srcW, srcH;
     Gen2SpriteCache::dims(true, &srcW, &srcH);  // 64x64 native
     SDL_Texture *tex = Gen2SpriteCache::get(renderer_, state_.you.species, true,
-                                            youVariant_, animPhase_);
+                                            state_.you.variant, animPhase_);
     if (!tex) return;
     // 2× scale → 128×128 (bit-perfect).
     int dstW = srcW * SPRITE_SCALE;
@@ -353,8 +349,8 @@ void BattleWindow::drawYouBox() {
         "", "Shiny", "Pink", "Rainbow", "Dark", "Dark Shiny", "Dark Pink", "Dark Rainbow",
         "Blackout", "Blackout Shiny", "Blackout Pink", "Blackout Rainbow"
     };
-    if (youVariant_ > 0 && youVariant_ < Gen2SpriteCache::VAR_COUNT)
-        BitmapFont::drawString(renderer_, bx + 8, by + 40, kSkinNames[youVariant_], COL_DIMINK, 1);
+    if (state_.you.variant > 0 && state_.you.variant < Gen2SpriteCache::VAR_COUNT)
+        BitmapFont::drawString(renderer_, bx + 8, by + 40, kSkinNames[state_.you.variant], COL_DIMINK, 1);
 
     char lv[16];
     snprintf(lv, sizeof(lv), "L%d", (int)state_.you.level);
@@ -574,7 +570,7 @@ void BattleWindow::render() {
     auto animatedV = [](int v) { return v == Gen2SpriteCache::VAR_RAINBOW ||
                                         v == Gen2SpriteCache::VAR_DARK_RAINBOW ||
                                         v == Gen2SpriteCache::VAR_BLACKOUT_RAINBOW; };
-    if (animatedV(youVariant_) || animatedV(state_.foe.variant) ||
+    if (animatedV(state_.you.variant) || animatedV(state_.foe.variant) ||
         (state_.boxView && animatedV(state_.boxVariant))) {
         static uint32_t lastPhaseMs = 0;
         uint32_t now = SDL_GetTicks();
@@ -643,24 +639,40 @@ void BattleWindow::render() {
 void BattleWindow::drawBoxView() {
     drawBackground();
 
-    // ── Category tabs, drawn as chips (current highlighted) ──────────────────
+    // ── Category tabs — full-width chips with large centred labels ───────────
+    // Seven tabs split the whole window width so the text is big and legible:
+    // category name at 2x scale, live count beneath it. Current tab is a
+    // filled chip (white on ink); the rest are ink on paper.
     static const char *const TABS[7] = { "All", "Shiny", "Pink", "Rnbw", "Dark", "Blkout", "Reg" };
-    int chipX = 6;
-    for (int t = 0; t < 7; ++t) {
-        char lbl[16];
-        snprintf(lbl, sizeof(lbl), "%s %d", TABS[t], (int)state_.boxTabCnt[t]);
-        int w = BitmapFont::stringWidth(lbl, 1);
-        if (t == state_.boxTabCur) {                    // highlighted chip
+    const int kTabCount = 7;
+    const int cellW  = LOGICAL_W / kTabCount;   // 91 px per tab
+    const int tabTop = 3;
+    const int tabH   = 30;
+    for (int t = 0; t < kTabCount; ++t) {
+        int cellX = t * cellW;
+        // Last cell absorbs the rounding remainder so the strip spans full width.
+        int thisW = (t == kTabCount - 1) ? (LOGICAL_W - cellX) : cellW;
+        bool cur  = (t == state_.boxTabCur);
+        if (cur) {
             SDL_SetRenderDrawColor(renderer_, COL_INK.r, COL_INK.g, COL_INK.b, 255);
-            SDL_Rect chip = { chipX - 3, 5, w + 6, 15 };
+            SDL_Rect chip = { cellX, tabTop, thisW, tabH };
             SDL_RenderFillRect(renderer_, &chip);
-            BitmapFont::drawString(renderer_, chipX, 9, lbl, COL_WHITE, 1);
-        } else {
-            BitmapFont::drawString(renderer_, chipX, 9, lbl, COL_DIMINK, 1);
         }
-        chipX += w + 12;
+        SDL_Color nameCol = cur ? COL_WHITE : COL_INK;
+        SDL_Color cntCol  = cur ? COL_WHITE : COL_DIMINK;
+        // Big centred category name (2x).
+        int nameW = BitmapFont::stringWidth(TABS[t], 2);
+        int nx    = cellX + (thisW - nameW) / 2;
+        BitmapFont::drawString(renderer_, nx, tabTop + 3, TABS[t], nameCol, 2);
+        // Small centred count beneath it.
+        char cnt[8];
+        snprintf(cnt, sizeof(cnt), "%d", (int)state_.boxTabCnt[t]);
+        int cntW = BitmapFont::stringWidth(cnt, 1);
+        int cx   = cellX + (thisW - cntW) / 2;
+        BitmapFont::drawString(renderer_, cx, tabTop + 3 + BitmapFont::GLYPH_H * 2 + 2,
+                               cnt, cntCol, 1);
     }
-    BitmapFont::drawString(renderer_, 8, 26,
+    BitmapFont::drawString(renderer_, 8, tabTop + tabH + 4,
                            "L/R: category   U/D: scan   A: menu   B: back", COL_DIMINK, 1);
 
     if (state_.boxSpecies < 1 || state_.boxSpecies > 386) {

@@ -135,16 +135,11 @@ public:
     // ncurses still owns input.  Cheap; safe to call once per main-loop tick.
     void pumpEvents();
 
-    // Cycle the PLAYER sprite's colour skin (Regular → Shiny → Rainbow → Dark →
-    // Dark-Shiny → Pink → Dark-Pink). dir +1 = next (R), -1 = prev (L).
-    void cyclePlayerVariant(int dir = +1);
-
 private:
     SDL_Window   *window_   = nullptr;
     SDL_Renderer *renderer_ = nullptr;
     State         state_;
     bool          initOk_   = false;
-    int           youVariant_ = 0;   // Gen2SpriteCache::VAR_* for the player sprite
     uint16_t      animPhase_  = 0;    // advances each frame; animates Rainbow
     // Catch-animation runtime (edge-triggered by State::catchSeq).
     uint32_t      catchLastSeq_    = 0;
