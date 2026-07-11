@@ -79,12 +79,29 @@ def _activate_venv_if_needed():
     except ImportError:
         pass
     here = os.path.dirname(os.path.abspath(__file__))
-    venv = os.path.join(here, ".venv")
-    py   = os.path.join(venv, "bin", "python3")
-    # Guard against an exec loop: only re-exec if we're not already that python.
-    if os.path.exists(py) and os.path.realpath(sys.executable) != os.path.realpath(py):
-        log(f"Re-exec into venv at {venv}")
-        os.execv(py, [py] + sys.argv)
+    # Search common venv locations: next to the script, one level up (the Pi
+    # install lives at /opt/monstermesh/.venv while this script is installed to
+    # /opt/monstermesh/bin/), and the well-known Pi install path. The env var
+    # MM_VENV overrides everything.
+    candidates = []
+    if os.environ.get("MM_VENV"):
+        candidates.append(os.environ["MM_VENV"])
+    candidates += [
+        os.path.join(here, ".venv"),
+        os.path.join(here, "..", ".venv"),
+        os.path.join(here, "..", "..", ".venv"),
+        "/opt/monstermesh/.venv",
+    ]
+    for venv in candidates:
+        py = os.path.abspath(os.path.join(venv, "bin", "python3"))
+        # Compare the LITERAL path, not realpath: a venv's python3 is often a
+        # symlink to /usr/bin/python3, but the venv's site-packages only load
+        # when the interpreter is launched *via the venv path*. Guard against an
+        # exec loop by checking we're not already running that exact path.
+        if os.path.exists(py) and os.path.abspath(sys.executable) != py:
+            log(f"Re-exec into venv at {os.path.abspath(venv)}")
+            os.execv(py, [py] + sys.argv)
+            return  # unreachable on success
 
 
 _activate_venv_if_needed()
@@ -98,7 +115,13 @@ except ImportError:
     sys.exit(3)
 
 try:
-    from meshtastic.protobuf import mqtt_pb2, mesh_pb2, portnums_pb2  # noqa: F401
+    # meshtastic >= 2.3 nests protobufs under meshtastic.protobuf; older
+    # releases (e.g. 2.2.x, which is what ships in the Pi venv) expose them at
+    # the top level. Support both so the relay works on either.
+    try:
+        from meshtastic.protobuf import mqtt_pb2, mesh_pb2, portnums_pb2  # noqa: F401
+    except ImportError:
+        from meshtastic import mqtt_pb2, mesh_pb2, portnums_pb2  # noqa: F401
 except ImportError:
     log("FATAL: meshtastic python package not installed. pip install meshtastic")
     sys.exit(3)
