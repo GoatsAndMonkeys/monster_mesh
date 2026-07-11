@@ -36,7 +36,7 @@
 // client and silently drops bursts > ~1 msg/sec — fatal for MMB's chunked
 // party exchange. Our private broker has no rate limits and supports the
 // full QoS spectrum.
-#define default_mqtt_address "mqtt.cableclub.net"
+#define default_mqtt_address "sf17b671.ala.us-east-1.emqxsl.com"
 #define default_mqtt_username "ash"
 #define default_mqtt_password "large4meowth"
 // MonsterMesh private namespace on the EMQX broker. The framework's auto-
@@ -46,7 +46,7 @@
 // every boot, so the broker-side topics stay flat and predictable.
 #define default_mqtt_root "kanto"
 #define default_mqtt_encryption_enabled true
-#define default_mqtt_tls_enabled false
+#define default_mqtt_tls_enabled true
 #define default_mqtt_json_enabled true
 
 #define IF_ROUTER(routerVal, normalVal)                                                                                          \
