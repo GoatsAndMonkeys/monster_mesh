@@ -82,6 +82,43 @@ private:
     bool     pvpAwaitingAccept_ = false;
     uint8_t  pvpUpdateSeq_      = 0;
 
+    // ── Server-auth board shadow (hash reconciliation + FULL_STATE) ─────────
+    // The Pi's Gen1BattleEngine actually runs in the *terminal* process; the
+    // daemon only relays raw UPDATE bodies. The terminal ships a ZERO
+    // boardHash24 in every UPDATE (TerminalUI.cpp), so the T-Deck client's
+    // recomputed hash never matches and it spams TEXT_BATTLE_STATE_REQUEST
+    // (0x6A) — which the daemon never answered, hanging the battle.
+    //
+    // We mirror just enough of the client-visible board here — seeded from the
+    // exchanged V2 WireParties, then updated from each relayed UPDATE — to
+    //   (a) recompute the correct boardHash24 and patch it into the outgoing
+    //       UPDATE (so the client stops mismatching), and
+    //   (b) answer STATE_REQUEST with a wire-correct FULL_STATE (0x6B).
+    // The buffer layout is byte-identical to the T-Deck's
+    // packClientStateFromEngine()/serverAuthSendFullState() output.
+    struct PvpMonShadow   { uint16_t hp = 0; uint8_t status = 0; };
+    struct PvpPartyShadow { uint8_t count = 0; uint8_t active = 0; PvpMonShadow mons[6]; };
+    PvpPartyShadow pvpClientParty_;     // wire side 0 (T-Deck / client, "me")
+    PvpPartyShadow pvpServerParty_;     // wire side 1 (Pi / server, "enemy")
+    uint8_t  pvpClientPP_[4]      = {}; // client active mon PP (trailing board field)
+    uint8_t  pvpShadowTurn_       = 0;
+    bool     pvpShadowSeeded_     = false;
+    bool     pvpShadowHaveUpdate_ = false;
+
+    // Seed both party shadows from the exchanged V2 WireParties (full HP).
+    void   pvpSeedShadow(const Gen1BattleEngine::WireParty &clientWire,
+                         const Gen1BattleEngine::WireParty &serverWire);
+    // Apply a relayed server UPDATE body (starts at the turn byte,
+    // == BattlePacket.payload[0]) to the shadow: actives + active-mon
+    // hp/status/pp + turn.
+    void   pvpApplyUpdateToShadow(const uint8_t *body, size_t len);
+    // Build the canonical client-visible board buffer (== packClientStateFromEngine
+    // layout == FULL_STATE body). Returns bytes written. includePP appends the
+    // 4-byte client active PP.
+    size_t pvpBuildBoardBuffer(uint8_t *out, bool includePP) const;
+    // STATE_REQUEST → FULL_STATE responder.
+    void   sendPvpFullState(uint32_t peerNodeId);
+
     // Pack a Gen1Party into 109-byte partyMin wire format
     void buildOurWireParty(Gen1BattleEngine::WireParty &out);
     void pushMyWireParty();

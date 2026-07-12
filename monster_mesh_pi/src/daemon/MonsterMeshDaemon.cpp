@@ -668,6 +668,19 @@ void MonsterMeshDaemon::onMeshPacket(const MeshPacketIn &pkt) {
             hasParty = 1;
         }
 
+        // Seed the board shadow so we can reconcile the UPDATE hash and answer
+        // STATE_REQUEST. The client's party arrives here; ours is rebuilt from
+        // the same source the terminal seeds its engine from (buildOurWireParty),
+        // so both shadow parties are byte-identical to both engines' parties.
+        if (hasParty) {
+            Gen1BattleEngine::WireParty clientWire, serverWire;
+            unpackWireParty(partyMinBuf, clientWire);
+            buildOurWireParty(serverWire);
+            pvpSeedShadow(clientWire, serverWire);
+            LOG_INFO("MonsterMeshDaemon: PvP board shadow seeded (client=%u server=%u mons)",
+                     (unsigned)clientWire.count, (unsigned)serverWire.count);
+        }
+
         // Forward to terminal as JSON with the WireParty byte array
         char jsonBuf[1024];
         int pos = snprintf(jsonBuf, sizeof(jsonBuf),
@@ -701,6 +714,16 @@ void MonsterMeshDaemon::onMeshPacket(const MeshPacketIn &pkt) {
         ipc_.push(jsonBuf);
         LOG_INFO("MonsterMeshDaemon: ACTION_V2 from client turn=%u action=%u index=%u",
                  (unsigned)turn, (unsigned)actionType, (unsigned)index);
+
+    } else if (pktType == static_cast<uint8_t>(PktType::TEXT_BATTLE_STATE_REQUEST)) {
+        // Server role: the client's recomputed boardHash24 disagreed with our
+        // UPDATE, so it wants an authoritative snapshot. Answer with a
+        // wire-correct FULL_STATE (0x6B) rebuilt from the board shadow.
+        if (!pvpServerMode_ || !pvpActive_) return;
+        uint16_t sessionId = ((uint16_t)pkt.payload[1] << 8) | pkt.payload[2];
+        if (sessionId != pvpSessionId_) return;
+        if (pkt.fromNode != pvpPeerNodeId_) return;
+        sendPvpFullState(pkt.fromNode);
     }
     // Other packet types not handled
 }
@@ -832,6 +855,20 @@ void MonsterMeshDaemon::onIpcMessage(const std::string &msg) {
             body[bodyLen++] = (uint8_t)atoi(dp);
             while (*dp && *dp != ',' && *dp != ']') dp++;
         }
+        // The terminal ships a zero boardHash24 in every UPDATE. Fold this
+        // UPDATE into the board shadow and recompute the real FNV1a-24 the
+        // T-Deck client expects, patching it into body[3..5] before send —
+        // otherwise the client mismatches on every turn and STATE_REQUESTs.
+        if (pvpShadowSeeded_ && bodyLen >= 6) {
+            pvpApplyUpdateToShadow(body, (size_t)bodyLen);
+            uint8_t board[80];
+            size_t blen = pvpBuildBoardBuffer(board, /*includePP=*/true);
+            uint32_t h24 = tbBoardHash24(board, blen);
+            body[3] = (h24 >> 16) & 0xFF;
+            body[4] = (h24 >>  8) & 0xFF;
+            body[5] =  h24        & 0xFF;
+        }
+
         uint8_t buf[BATTLELINK_MAX_PKT] = {};
         BattlePacket *pkt = (BattlePacket *)buf;
         pkt->type = (uint8_t)PktType::TEXT_BATTLE_UPDATE;
@@ -1411,6 +1448,7 @@ void MonsterMeshDaemon::sendBattleChallenge(uint32_t targetNodeId) {
     pvpAwaitingAccept_ = true;
     pvpActive_         = false;
     pvpUpdateSeq_      = 0;
+    pvpShadowSeeded_   = false;   // re-seeded from parties when ACCEPT lands
 
     pkt->setSessionId(session);
     pkt->seq = 0;
@@ -1440,6 +1478,130 @@ void MonsterMeshDaemon::sendBattleChallenge(uint32_t targetNodeId) {
     char jsonBuf[64];
     snprintf(jsonBuf, sizeof(jsonBuf), "{\"type\":\"PVP_CHALLENGE_SENT\",\"ok\":1}");
     ipc_.push(jsonBuf);
+}
+
+// ── Server-auth board shadow (hash reconciliation + FULL_STATE) ──────────────
+
+// Seed both party shadows from the exchanged V2 WireParties. Battle starts
+// fully healed on both sides (the wire form carries only final stats incl.
+// maxHp, no current HP/status), matching how both engines start().
+void MonsterMeshDaemon::pvpSeedShadow(const Gen1BattleEngine::WireParty &clientWire,
+                                      const Gen1BattleEngine::WireParty &serverWire) {
+    auto seed = [](PvpPartyShadow &dst, const Gen1BattleEngine::WireParty &src) {
+        dst.count  = src.count > 6 ? 6 : src.count;
+        dst.active = 0;
+        for (uint8_t i = 0; i < 6; ++i) {
+            dst.mons[i].hp     = (i < dst.count) ? src.mons[i].maxHp : 0;
+            dst.mons[i].status = 0;
+        }
+    };
+    seed(pvpClientParty_, clientWire);
+    seed(pvpServerParty_, serverWire);
+    memset(pvpClientPP_, 0, sizeof(pvpClientPP_));
+    pvpShadowTurn_       = 0;
+    pvpShadowSeeded_     = true;
+    pvpShadowHaveUpdate_ = false;
+}
+
+// Fold a relayed server UPDATE body into the shadow. Body layout (terminal's
+// sendPvpUpdate): [0]=turn [1..2]=flags(BE) [3..5]=hash then, in flag order,
+// HP(4: cliHp,srvHp) PP(4: client active) SWITCH(2: cli.active,srv.active)
+// STATUS(2: cli,srv) [RESULT] [LOG]. Only the fields that feed the board hash
+// are tracked; RESULT/LOG (and the BENCH/FX the terminal never emits) are skipped.
+void MonsterMeshDaemon::pvpApplyUpdateToShadow(const uint8_t *body, size_t len) {
+    if (!pvpShadowSeeded_ || len < 6) return;
+    uint8_t  turn  = body[0];
+    uint16_t flags = ((uint16_t)body[1] << 8) | body[2];
+
+    size_t r = 6;  // past turn(1) + flags(2) + hash(3)
+    auto take = [&](size_t n) -> const uint8_t * {
+        if (r + n > len) return nullptr;
+        const uint8_t *p = body + r; r += n; return p;
+    };
+
+    uint16_t cliHp = 0, srvHp = 0; bool haveHp = false;
+    uint8_t  cliPP[4] = {};         bool havePP = false;
+    uint8_t  cliActive = pvpClientParty_.active, srvActive = pvpServerParty_.active;
+    uint8_t  cliStatus = 0, srvStatus = 0; bool haveStatus = false;
+
+    if (flags & TB_UPD_HP) {
+        const uint8_t *p = take(4);
+        if (p) { cliHp = ((uint16_t)p[0] << 8) | p[1];
+                 srvHp = ((uint16_t)p[2] << 8) | p[3]; haveHp = true; }
+    }
+    if (flags & TB_UPD_PP) {
+        const uint8_t *p = take(4);
+        if (p) { memcpy(cliPP, p, 4); havePP = true; }
+    }
+    if (flags & TB_UPD_SWITCH) {
+        const uint8_t *p = take(2);
+        if (p) { cliActive = p[0]; srvActive = p[1]; }
+    }
+    if (flags & TB_UPD_STATUS) {
+        const uint8_t *p = take(2);
+        if (p) { cliStatus = p[0]; srvStatus = p[1]; haveStatus = true; }
+    }
+
+    pvpShadowTurn_ = turn;
+    if (cliActive < 6) pvpClientParty_.active = cliActive;
+    if (srvActive < 6) pvpServerParty_.active = srvActive;
+    uint8_t ca = pvpClientParty_.active, sa = pvpServerParty_.active;
+    if (haveHp) {
+        if (ca < 6) pvpClientParty_.mons[ca].hp = cliHp;
+        if (sa < 6) pvpServerParty_.mons[sa].hp = srvHp;
+    }
+    if (haveStatus) {
+        if (ca < 6) pvpClientParty_.mons[ca].status = cliStatus;
+        if (sa < 6) pvpServerParty_.mons[sa].status = srvStatus;
+    }
+    if (havePP) memcpy(pvpClientPP_, cliPP, 4);
+    pvpShadowHaveUpdate_ = true;
+}
+
+// Build the canonical client-visible board buffer — byte-identical to the
+// T-Deck's packClientStateFromEngine(): turn(2 BE) result(1) then per wire
+// side {active,count, count×[hp:2 BE,status:1]} for side 0 (client) then side 1
+// (server), then optionally the 4-byte client active PP. result is always
+// ONGOING in the hash input (the outcome rides the UPDATE's RESULT flag).
+size_t MonsterMeshDaemon::pvpBuildBoardBuffer(uint8_t *out, bool includePP) const {
+    size_t w = 0;
+    out[w++] = (pvpShadowTurn_ >> 8) & 0xFF;   // turn is 8-bit → hi byte 0
+    out[w++] =  pvpShadowTurn_       & 0xFF;
+    out[w++] = TB_RESULT_ONGOING;
+    const PvpPartyShadow *sides[2] = { &pvpClientParty_, &pvpServerParty_ };
+    for (int s = 0; s < 2; ++s) {
+        const PvpPartyShadow &p = *sides[s];
+        uint8_t cnt = p.count > 6 ? 6 : p.count;
+        out[w++] = p.active;
+        out[w++] = cnt;
+        for (uint8_t i = 0; i < cnt; ++i) {
+            out[w++] = (p.mons[i].hp >> 8) & 0xFF;
+            out[w++] =  p.mons[i].hp       & 0xFF;
+            out[w++] =  p.mons[i].status;
+        }
+    }
+    if (includePP) for (int i = 0; i < 4; ++i) out[w++] = pvpClientPP_[i];
+    return w;
+}
+
+// Answer a TEXT_BATTLE_STATE_REQUEST with an authoritative FULL_STATE (0x6B).
+void MonsterMeshDaemon::sendPvpFullState(uint32_t peerNodeId) {
+    if (!mesh_.isOpen() || !pvpShadowSeeded_) return;
+    uint8_t buf[BATTLELINK_MAX_PKT] = {};
+    BattlePacket *pkt = (BattlePacket *)buf;
+    pkt->type = (uint8_t)PktType::TEXT_BATTLE_FULL_STATE;
+    pkt->setSessionId(pvpSessionId_);
+    // FULL_STATE.seq == the last UPDATE seq; the client stores it as
+    // lastAppliedUpdateSeq_ and echoes it in its next ACTION.
+    pkt->seq = (pvpUpdateSeq_ > 0) ? (uint8_t)(pvpUpdateSeq_ - 1) : 0;
+    // Include client PP only once a real UPDATE has supplied it; before that,
+    // omit the 4 trailing bytes so clientApplyFullState() keeps the client
+    // engine's canonical full PP instead of zeroing it.
+    size_t blen = pvpBuildBoardBuffer(pkt->payload, /*includePP=*/pvpShadowHaveUpdate_);
+    mesh_.sendPacket(peerNodeId, MONSTERMESH_CHANNEL, buf,
+                     (uint16_t)(BATTLELINK_HDR_SIZE + blen));
+    LOG_INFO("MonsterMeshDaemon: STATE_REQUEST from 0x%08X -> sending FULL_STATE seq=%u",
+             (unsigned)peerNodeId, (unsigned)pkt->seq);
 }
 
 void MonsterMeshDaemon::pushAchievement(const char *name, const char *desc) {
