@@ -476,6 +476,11 @@ void MonsterMeshDaemon::onMeshPacket(const MeshPacketIn &pkt) {
         // Push updated neighbor list to UI so the user sees them appear
         pushNeighbors();
 
+        // HollaBack: if the sender asked for a response, reply with our own
+        // beacon so they get us in their live roster. forceBeacon() sends a
+        // NORMAL beacon (requestResponse=0) so this never cascades.
+        if (beacon.requestResponse) daycare_.forceBeacon();
+
     } else if (pktType == static_cast<uint8_t>(PktType::TEXT_BATTLE_CHALLENGE_V2)) {
         // BattlePacket layout: [0]=type [1]=sessionHi [2]=sessionLo [3]=seq [4..]=payload
         // CHALLENGE payload (T-Deck serverAuthSendChallenge wire format):
@@ -753,6 +758,10 @@ void MonsterMeshDaemon::onIpcMessage(const std::string &msg) {
     } else if (strcmp(cmd, "FORCE_BEACON") == 0) {
         daycare_.forceBeacon();
         ipc_.push("{\"type\":\"ACK\",\"cmd\":\"FORCE_BEACON\"}");
+    } else if (strcmp(cmd, "HOLLABACK") == 0) {
+        // HB! — request-response beacon; peers reply so we get a live roster.
+        daycare_.forceHollaback();
+        ipc_.push("{\"type\":\"ACK\",\"cmd\":\"HOLLABACK\"}");
     } else if (strcmp(cmd, "FORCE_EVENT") == 0) {
         daycare_.forceEvent();
         ipc_.push("{\"type\":\"ACK\",\"cmd\":\"FORCE_EVENT\"}");

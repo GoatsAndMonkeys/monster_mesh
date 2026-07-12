@@ -463,6 +463,11 @@ void PokemonDaycare::broadcastBeacon(uint32_t nowMs) {
         strncpy(beacon.pokemon[i].nickname, state_.pokemon[i].nickname, 10);
     }
 
+    // HollaBack: a one-shot request-response beacon (peers reply so we get a
+    // live roster). Consumed here so the next periodic beacon is a normal one.
+    beacon.requestResponse = nextHollaback_ ? 1 : 0;
+    nextHollaback_ = false;
+
     sendBeacon_(beacon, sendBeaconCtx_);
 }
 

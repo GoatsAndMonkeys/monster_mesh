@@ -66,6 +66,10 @@ public:
     // Force an immediate beacon broadcast.
     void forceBeacon() { broadcastBeacon(millis()); state_.lastBeaconMs = millis(); }
 
+    // HollaBack: force an immediate REQUEST-RESPONSE beacon. Peers that receive
+    // it reply with their own beacon (MQTT-only) so we get a live roster back.
+    void forceHollaback() { nextHollaback_ = true; broadcastBeacon(millis()); state_.lastBeaconMs = millis(); }
+
     // Credit XP from a finished battle into the same totalXpGained counter
     // a daycare event would feed.  Drained by clearTotalXpGained() after a
     // successful SAV writeback so we don't double-apply.
@@ -108,6 +112,7 @@ public:
 private:
     DaycareState state_ = {};
     bool active_ = false;
+    bool nextHollaback_ = false;   // set by forceHollaback(); next beacon requests a response
 
     // Neighbors from beacons
     static constexpr uint8_t MAX_NEIGHBORS = 16;

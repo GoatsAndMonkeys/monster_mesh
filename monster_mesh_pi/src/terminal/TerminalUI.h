@@ -43,13 +43,14 @@ enum class Screen {
 static constexpr int TAB_COUNT = 4;
 static constexpr const char *TAB_NAMES[TAB_COUNT] = { "MESH", "LOCAL", "SYSTEM", "BREED" };
 
-static constexpr const char *MESH_ITEMS[]  = { "Beacon", "Neighbors", "Daycare" };
+static constexpr const char *MESH_ITEMS[]  = { "Beacon", "Neighbors", "Daycare", "HollaBack" };
 static constexpr const char *MESH_DESC[]   = {
     "Broadcast your party to the mesh",
-    "See nearby trainers  [K=challenge]",
+    "See nearby trainers  [A=battle]",
     "Last daycare event + XP",
+    "HB! Ping peers for a live response",
 };
-static constexpr int MESH_COUNT = 3;
+static constexpr int MESH_COUNT = 4;
 
 static constexpr const char *LOCAL_ITEMS[] = { "Party", "Fight", "Gyms" };
 static constexpr const char *LOCAL_DESC[]  = {
@@ -191,6 +192,9 @@ private:
     NeighborEntry neighbors_[MAX_NEIGHBORS_DISPLAY] = {};
     int           neighborDisplayCount_ = 0;
     int           neighborSel_          = 0;  // highlighted neighbor
+    // HollaBack: while now < hbUntilMs_, newly-arriving neighbors are echoed
+    // into the activity feed as "HB ..." lines (live-response stream).
+    uint64_t      hbUntilMs_            = 0;
     // Neighbor battle action menu: -1 = browsing the list, >=0 = menu open on
     // the highlighted neighbor with this option cursor.
     //   0 = MonsterMesh Battle (live PvP)   1 = Gauntlet (async snapshot)   2 = Cancel

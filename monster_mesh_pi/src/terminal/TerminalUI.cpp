@@ -2569,6 +2569,21 @@ void TerminalUI::activateMeshItem(int item) {
             ipc_.send("{\"cmd\":\"GET_STATUS\"}");
             screen_ = Screen::DAYCARE_EVENT;
             break;
+        case 3: { // HollaBack (HB!) — request-response beacon + live roster
+            ipc_.send("{\"cmd\":\"HOLLABACK\"}");
+            pushActivity("HB!");
+            // Stream freshly-arriving responses as HB lines for a short window
+            // (see parseNeighbors); first, echo who we already know about.
+            hbUntilMs_ = millis() + 15000;
+            for (int i = 0; i < neighborDisplayCount_; i++) {
+                const NeighborEntry &n = neighbors_[i];
+                pushActivity("HB %s/%s Lv%d %s",
+                             n.shortName[0] ? n.shortName : "?",
+                             n.lead[0] ? n.lead : "?",
+                             n.leadLevel, n.partyCount ? "Kanto" : "-");
+            }
+            break;
+        }
     }
 }
 
@@ -5412,6 +5427,16 @@ void TerminalUI::parseNeighbors(const std::string &msg) {
         }
         bool isNew = (n.firstSeenMs == 0);
         if (isNew) n.firstSeenMs = now ? now : 1;  // 0 means "no entry"
+
+        // HollaBack live stream: a fresh responder arriving inside the HB
+        // window gets echoed into the activity feed as an "HB ..." line
+        // (matches the T-Deck's live HollaBack response stream).
+        if (isNew && now < hbUntilMs_) {
+            pushActivity("HB %s/%s Lv%d %s",
+                         n.shortName[0] ? n.shortName : "?",
+                         n.lead[0] ? n.lead : "?",
+                         n.leadLevel, n.partyCount ? "Kanto" : "-");
+        }
 
         if (isNew) {
             pushActivity("> NEW NEIGHBOR: %s (%s) %s Lv%d", n.shortName,
