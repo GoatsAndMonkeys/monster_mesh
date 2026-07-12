@@ -14,6 +14,7 @@
 #include "../shared/LordLogic.h"           // NG+ tier state + scaling
 #include "../shared/KantoZones.h"          // Pentest Pikachu zone encounters
 #include "../shared/Gen1Learnsets.h"       // per-species level-up moves (swapped battler)
+#include "../shared/Gen1Evolution.h"       // caught mons evolve as their trip level climbs
 #include "../shared/BreedingApp.h"         // roster + Mendelian breeding (Breed tab)
 #include "../shared/PentestCatch.h"        // deterministic wild genotype from BSSID
 #include <ncurses.h>
@@ -4337,16 +4338,25 @@ void TerminalUI::startPentestBattle() {
     // Active battler: default Pikachu/Raichu, OR a caught mon promoted via the
     // Bill's PC "Set as Active" menu (pentestActiveDex_ != 0).
     bool    evolved      = (pentestLevel_ >= PIKACHU_EVOLVE_LEVEL);
-    uint8_t battlerDex   = (pentestActiveDex_ != 0) ? pentestActiveDex_
-                                                    : (uint8_t)(evolved ? 26 : 25);
+    // A caught battler evolves as its trip level climbs: a Weedle levelled to 68
+    // fights as Beedrill (dex 15), so it uses Beedrill's species + learnset
+    // instead of being a moveless Weedle. Resolved dynamically from the caught
+    // base dex + current level, so evolutions come online as the mon levels.
+    uint8_t battlerDex   = (pentestActiveDex_ != 0)
+                             ? gen1FinalFormAtLevel(pentestActiveDex_, pentestLevel_)
+                             : (uint8_t)(evolved ? 26 : 25);
     uint8_t battlerInt   = dexToInternal[battlerDex];
     uint8_t battlerMoves[4];
     char    battlerName[12];
     if (pentestActiveDex_ != 0) {
-        // This species' REAL level-up learnset — the 4 most-recently-learned
-        // moves at the trainer's level, just like the games (and the Pikachu path).
+        // The 4 most-recently-learned moves at this level from the EVOLVED form's
+        // learnset, just like the games. Pre-evolutions (Weedle/Caterpie/etc.)
+        // have no level-up moves of their own, so fall back to the caught form
+        // only if the evolved form somehow has an empty learnset.
         uint8_t all[32];
-        uint8_t na = gen1MovesLearnedBetween(pentestActiveDex_, 0, pentestLevel_, all, 32);
+        uint8_t na = gen1MovesLearnedBetween(battlerDex, 0, pentestLevel_, all, 32);
+        if (na == 0 && battlerDex != pentestActiveDex_)
+            na = gen1MovesLearnedBetween(pentestActiveDex_, 0, pentestLevel_, all, 32);
         battlerMoves[0] = battlerMoves[1] = battlerMoves[2] = battlerMoves[3] = 0;
         int start = (na > 4) ? na - 4 : 0, j = 0;
         for (int i = start; i < (int)na; i++) battlerMoves[j++] = all[i];
