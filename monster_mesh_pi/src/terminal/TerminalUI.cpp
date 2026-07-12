@@ -2180,9 +2180,10 @@ void TerminalUI::pentestBuildStatus(std::vector<std::string> &out) {
         int shown = 0;
         for (int i = (int)box.size() - 1; i >= 0 && shown < 12; --i, ++shown) {
             const breeding::BreedMon &m = box[i];
-            snprintf(line, sizeof(line), "  L%-3d %-10.10s %-8.8s %s%s%s",
+            snprintf(line, sizeof(line), "  L%-3d %-10.10s %-8.8s %-4s%s%s%s",
                      m.level, m.nick[0] ? m.nick : dexName(m.dex),
                      breeding::skinName(breeding::skinOf(m.geno)),
+                     breeding::BreedingApp::provTag(m).c_str(),
                      m.geno.female ? "\xE2\x99\x80" : "\xE2\x99\x82",
                      breeding::isSterile(m.geno) ? " bb" : "",
                      breeding::isTritan(m.geno)
@@ -2319,9 +2320,11 @@ bool TerminalUI::pentestSyncBoxView(BattleWindow::State &s) {
         return d == 0 ? a : (d == 1 ? b : c);
     };
     char title[80];
-    snprintf(title, sizeof(title), "%s  Lv%d  %s %s",
+    // Provenance: Wild (caught) or the breed tag (F2 / S1 / BX1 / IBL).
+    snprintf(title, sizeof(title), "%s  Lv%d  %s %s  [%s]",
              m.nick[0] ? m.nick : breeding::BreedingApp::dexName(m.dex),
-             m.level, breeding::skinName(sk), g.female ? "(F)" : "(M)");
+             m.level, breeding::skinName(sk), g.female ? "(F)" : "(M)",
+             breeding::BreedingApp::provTag(m).c_str());
     s.log.push_back(title);
     char gl[96];
     snprintf(gl, sizeof(gl), "Genome  %s %s %s | %s %s %s | T:%s",
@@ -5916,10 +5919,11 @@ void TerminalUI::renderBreeding()
         char mark   = locked ? '*' : (sel ? '>' : (busy ? '~' : ' '));
         breeding::Skin sk = breeding::skinOf(m.geno);
         if (sel) wattron(winInfo_, A_REVERSE | COLOR_PAIR(3));
-        mvwprintw(winInfo_, 2 + i, 0, "%cL%-3d %-9.9s %-8.8s %s%s%s",
+        mvwprintw(winInfo_, 2 + i, 0, "%cL%-3d %-9.9s %-8.8s %-4s%s%s%s",
                   mark, m.level,
                   m.nick[0] ? m.nick : breeding::BreedingApp::dexName(m.dex),
                   breeding::skinName(sk),
+                  breeding::BreedingApp::provTag(m).c_str(),
                   m.geno.female ? "\xE2\x99\x80" : "\xE2\x99\x82",
                   breeding::isTritan(m.geno)
                     ? (m.geno.tritan == 2 ? " TT" : " Tn") : "",
