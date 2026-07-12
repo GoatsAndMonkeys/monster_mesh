@@ -684,10 +684,14 @@ void BattleWindow::drawBoxView() {
 
     // ── Big front (right) + back (left) sprites, 4× = 256 px (bit-perfect) ────
     const int DIM = 256;
+    // Browse in TRUE skin colours — the tritanope recolour would distort the
+    // very coloration you're evaluating, so tritan is reported in the text box
+    // below, not painted onto the browser sprites. (Battle sprites still apply
+    // the tritan recolour.)
     SDL_Texture *fr = Gen2SpriteCache::get(renderer_, state_.boxSpecies, false,
-                                           state_.boxVariant, animPhase_, state_.boxTritan);
+                                           state_.boxVariant, animPhase_, false);
     SDL_Texture *bk = Gen2SpriteCache::get(renderer_, state_.boxSpecies, true,
-                                           state_.boxVariant, animPhase_, state_.boxTritan);
+                                           state_.boxVariant, animPhase_, false);
     const int spriteY = 40;
     if (fr) { SDL_Rect d = { LOGICAL_W - 8 - DIM, spriteY, DIM, DIM };
               SDL_RenderCopy(renderer_, fr, nullptr, &d); }
@@ -715,11 +719,7 @@ void BattleWindow::drawBoxView() {
         BitmapFont::drawString(renderer_, LOGICAL_W / 2 - 40, spriteY + DIM / 2 - 6,
                                "\x10 ACTIVE", COL_INK, 2);
 
-    // Tritan carrier marker — some species barely shift under the tritanopia
-    // matrix, so flag it explicitly. Sits just under the ACTIVE badge slot.
-    if (state_.boxTritan)
-        BitmapFont::drawString(renderer_, LOGICAL_W / 2 - 48, spriteY + DIM / 2 + 12,
-                               "\x10 TRITAN", COL_INK, 2);
+    // (Tritan is reported in the genetics text box below — no sprite-area badge.)
 
     // ── Breeding-pick banner: a 1st breeder is chosen, waiting for the mate ───
     if (state_.boxBreedPending) {
