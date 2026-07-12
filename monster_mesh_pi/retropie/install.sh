@@ -49,8 +49,12 @@ if [ -d "retropie/themes/monstermesh" ]; then
     sudo cp -r retropie/themes/monstermesh /etc/emulationstation/themes/
 fi
 
-# Create a placeholder .mm file so the system shows in RetroPie
+# Create the marker .mm files so the system shows in RetroPie. Each marker is a
+# separate "game" in the MonsterMesh system; launch.sh dispatches on the name:
+#   MonsterMesh.mm      -> the full terminal
+#   Pentest Pikachu.mm  -> boots straight into the pentest battle (mmterm --pentest)
 touch "$ROM_DIR/MonsterMesh.mm"
+touch "$ROM_DIR/Pentest Pikachu.mm"
 
 # Ensure pi user is in dialout for serial port access
 sudo usermod -a -G dialout pi
