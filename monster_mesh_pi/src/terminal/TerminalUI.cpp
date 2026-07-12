@@ -681,16 +681,29 @@ void TerminalUI::renderMenu() {
     mvwhline(winMenu_, 2, 1, ACS_HLINE, cols_ - 2);
 
     // Items - max rows = menuRows_ - 5 (borders + tab row + separator + hint).
-    // On menu screens menuRows_ is MENU_ROWS_DEFAULT (10) → 5 item rows.
+    // On the GPi's short screen menuRows_ is MENU_ROWS_DEFAULT (8) → 3 item
+    // rows, so tabs with more entries (e.g. MESH: Beacon/Neighbors/Daycare/
+    // HollaBack) must scroll to keep the selected item visible.
     const char **items = tabItems(activeTab_);
     int count = tabItemCount(activeTab_);
     int maxRows = menuRows_ - 5;
     if (maxRows < 0) maxRows = 0;
-    for (int i = 0; i < count && i < maxRows; i++) {
+    // Scroll the visible window so activeItem_ is always shown.
+    int first = 0;
+    if (maxRows > 0 && count > maxRows) {
+        if (activeItem_ >= maxRows) first = activeItem_ - maxRows + 1;
+        if (first > count - maxRows) first = count - maxRows;
+        if (first < 0) first = 0;
+    }
+    for (int r = 0; r < maxRows && (first + r) < count; r++) {
+        int i = first + r;
         if (i == activeItem_) wattron(winMenu_, A_REVERSE | COLOR_PAIR(3));
-        mvwprintw(winMenu_, 3 + i, 2, "%-*s", cols_ - 4, items[i]);
+        mvwprintw(winMenu_, 3 + r, 2, "%-*s", cols_ - 4, items[i]);
         if (i == activeItem_) wattroff(winMenu_, A_REVERSE | COLOR_PAIR(3));
     }
+    // Down-arrow hint when there are more items below the fold.
+    if (maxRows > 0 && first + maxRows < count)
+        mvwprintw(winMenu_, 3 + maxRows - 1, cols_ - 3, "v");
 
     // Controls hint
     // (no on-screen key legend — the GPI Case has physical buttons)
