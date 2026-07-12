@@ -680,30 +680,18 @@ void TerminalUI::renderMenu() {
     // ACS_HLINE under ncursesw → renders as ─ on a UTF-8 console.
     mvwhline(winMenu_, 2, 1, ACS_HLINE, cols_ - 2);
 
-    // Items - max rows = menuRows_ - 5 (borders + tab row + separator + hint).
-    // On the GPi's short screen menuRows_ is MENU_ROWS_DEFAULT (8) → 3 item
-    // rows, so tabs with more entries (e.g. MESH: Beacon/Neighbors/Daycare/
-    // HollaBack) must scroll to keep the selected item visible.
+    // Items start at row 3; the menu window is menuRows_ tall, leaving
+    // menuRows_-4 usable item rows (4 at the default 8). The MESH/LOCAL tabs
+    // top out at 3-4 items so no scrolling is needed.
     const char **items = tabItems(activeTab_);
     int count = tabItemCount(activeTab_);
-    int maxRows = menuRows_ - 5;
+    int maxRows = menuRows_ - 4;
     if (maxRows < 0) maxRows = 0;
-    // Scroll the visible window so activeItem_ is always shown.
-    int first = 0;
-    if (maxRows > 0 && count > maxRows) {
-        if (activeItem_ >= maxRows) first = activeItem_ - maxRows + 1;
-        if (first > count - maxRows) first = count - maxRows;
-        if (first < 0) first = 0;
-    }
-    for (int r = 0; r < maxRows && (first + r) < count; r++) {
-        int i = first + r;
+    for (int i = 0; i < count && i < maxRows; i++) {
         if (i == activeItem_) wattron(winMenu_, A_REVERSE | COLOR_PAIR(3));
-        mvwprintw(winMenu_, 3 + r, 2, "%-*s", cols_ - 4, items[i]);
+        mvwprintw(winMenu_, 3 + i, 2, "%-*s", cols_ - 4, items[i]);
         if (i == activeItem_) wattroff(winMenu_, A_REVERSE | COLOR_PAIR(3));
     }
-    // Down-arrow hint when there are more items below the fold.
-    if (maxRows > 0 && first + maxRows < count)
-        mvwprintw(winMenu_, 3 + maxRows - 1, cols_ - 3, "v");
 
     // Controls hint
     // (no on-screen key legend — the GPI Case has physical buttons)
@@ -2570,19 +2558,9 @@ void TerminalUI::activateItem(int item) {
 
 void TerminalUI::activateMeshItem(int item) {
     switch (item) {
-        case 0: // Beacon
-            ipc_.send("{\"cmd\":\"FORCE_BEACON\"}");
-            break;
-        case 1: // Neighbors
-            ipc_.send("{\"cmd\":\"GET_STATUS\"}");
-            infoScroll_ = 0;
-            screen_ = Screen::NEIGHBORS;
-            break;
-        case 2: // Daycare
-            ipc_.send("{\"cmd\":\"GET_STATUS\"}");
-            screen_ = Screen::DAYCARE_EVENT;
-            break;
-        case 3: { // HollaBack (HB!) — request-response beacon + live roster
+        case 0: { // HollaBack (HB!) — broadcasts our party beacon AND, over
+                  // MQTT, asks peers to reply so we get a live roster back.
+                  // (The daemon downgrades to a plain beacon on a real radio.)
             ipc_.send("{\"cmd\":\"HOLLABACK\"}");
             pushActivity("HB!");
             // Stream freshly-arriving responses as HB lines for a short window
@@ -2597,6 +2575,15 @@ void TerminalUI::activateMeshItem(int item) {
             }
             break;
         }
+        case 1: // Neighbors
+            ipc_.send("{\"cmd\":\"GET_STATUS\"}");
+            infoScroll_ = 0;
+            screen_ = Screen::NEIGHBORS;
+            break;
+        case 2: // Daycare
+            ipc_.send("{\"cmd\":\"GET_STATUS\"}");
+            screen_ = Screen::DAYCARE_EVENT;
+            break;
     }
 }
 

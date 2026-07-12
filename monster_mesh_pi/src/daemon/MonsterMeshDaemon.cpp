@@ -478,8 +478,11 @@ void MonsterMeshDaemon::onMeshPacket(const MeshPacketIn &pkt) {
 
         // HollaBack: if the sender asked for a response, reply with our own
         // beacon so they get us in their live roster. forceBeacon() sends a
-        // NORMAL beacon (requestResponse=0) so this never cascades.
-        if (beacon.requestResponse) daycare_.forceBeacon();
+        // NORMAL beacon (requestResponse=0) so this never cascades. Only do
+        // this over MQTT — on a real LoRa radio, every peer replying at once
+        // would be an airtime storm, so we stay quiet and let the radio's
+        // own NodeInfo/beacon schedule advertise us.
+        if (beacon.requestResponse && usingMqttFallback_) daycare_.forceBeacon();
 
     } else if (pktType == static_cast<uint8_t>(PktType::TEXT_BATTLE_CHALLENGE_V2)) {
         // BattlePacket layout: [0]=type [1]=sessionHi [2]=sessionLo [3]=seq [4..]=payload
@@ -782,8 +785,14 @@ void MonsterMeshDaemon::onIpcMessage(const std::string &msg) {
         daycare_.forceBeacon();
         ipc_.push("{\"type\":\"ACK\",\"cmd\":\"FORCE_BEACON\"}");
     } else if (strcmp(cmd, "HOLLABACK") == 0) {
-        // HB! — request-response beacon; peers reply so we get a live roster.
-        daycare_.forceHollaback();
+        // HB! Over MQTT, send a request-response beacon so every peer replies
+        // and we get a live roster back. Over a real LoRa radio that would
+        // trigger a simultaneous-reply airtime storm, so we just broadcast our
+        // own party beacon (the radio emits our NodeInfo on its own schedule).
+        if (usingMqttFallback_)
+            daycare_.forceHollaback();
+        else
+            daycare_.forceBeacon();
         ipc_.push("{\"type\":\"ACK\",\"cmd\":\"HOLLABACK\"}");
     } else if (strcmp(cmd, "FORCE_EVENT") == 0) {
         daycare_.forceEvent();

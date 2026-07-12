@@ -43,14 +43,13 @@ enum class Screen {
 static constexpr int TAB_COUNT = 4;
 static constexpr const char *TAB_NAMES[TAB_COUNT] = { "MESH", "LOCAL", "SYSTEM", "BREED" };
 
-static constexpr const char *MESH_ITEMS[]  = { "Beacon", "Neighbors", "Daycare", "HollaBack" };
+static constexpr const char *MESH_ITEMS[]  = { "HollaBack", "Neighbors", "Daycare" };
 static constexpr const char *MESH_DESC[]   = {
-    "Broadcast your party to the mesh",
+    "HB! Broadcast party + ping for replies",
     "See nearby trainers  [A=battle]",
     "Last daycare event + XP",
-    "HB! Ping peers for a live response",
 };
-static constexpr int MESH_COUNT = 4;
+static constexpr int MESH_COUNT = 3;
 
 static constexpr const char *LOCAL_ITEMS[] = { "Party", "Fight", "Gyms" };
 static constexpr const char *LOCAL_DESC[]  = {
@@ -114,7 +113,7 @@ private:
     // sprites and message log.  The 3-tab menu screens need ~10 rows so
     // five item rows can fit between the tab header, separator, and hint.
     static constexpr int MENU_ROWS_BATTLE  = 5;
-    static constexpr int MENU_ROWS_DEFAULT = 9;   // 4 item rows + 5 chrome rows
+    static constexpr int MENU_ROWS_DEFAULT = 8;   // 4 item rows + 4 chrome rows
 
     // GBC DMG green-scale color slots.  These indices are written into the
     // terminal's color palette via init_color() in startup() — anything
