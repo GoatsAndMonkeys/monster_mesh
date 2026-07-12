@@ -426,15 +426,37 @@ int BreedingApp::importCaughtMonBlob(const uint8_t *data, size_t len) {
 //   • Legacy (no header): a bare stream of 22-byte CaughtMon records — migrated
 //     with default trip fields (tripLevel 0 → seed-from-catch-level on activate)
 //     and tritan = 0.
+// One-time retro-seed: give every mon in roster_[startIdx..] that is still nn a
+// random tritan genotype. Runs when a pre-v3 (or legacy) box is loaded, so a
+// collection caught before the gene existed ends up with the trait distributed.
+// The seed is derived deterministically from each mon's identity, so the roll is
+// stable across reloads and never depends on host rand().
+static void retroSeedTritanRange(std::vector<BreedMon> &r, size_t startIdx) {
+    for (size_t i = startIdx; i < r.size(); ++i) {
+        BreedMon &m = r[i];
+        if (m.geno.tritan != 0) continue;          // preserve any real (bred) tritan
+        uint64_t seed = 0xA24BAED4963EE407ull;
+        seed ^= (uint64_t)m.dex   * 0x100000001B3ull;
+        seed ^= (uint64_t)m.level << 17;
+        seed ^= (uint64_t)m.id    * 0x9E3779B97F4A7C15ull;
+        for (int k = 0; k < 11 && m.nick[k]; ++k)
+            seed = (seed ^ (uint8_t)m.nick[k]) * 0x100000001B3ull;
+        seed ^= (uint64_t)(i + 1) << 33;
+        Rng rng(seed);
+        m.geno.tritan = retroTritanDraw(rng);
+    }
+}
+
 int BreedingApp::importBox(const uint8_t *data, size_t len) {
     if (!data || len == 0) return -1;
+    const size_t before = roster_.size();
     // Detect the versioned header: magic (LE u32) + a version byte we understand.
     if (len >= BREEDBOX_HDR_SIZE) {
         uint32_t magic;
         memcpy(&magic, data, 4);
         uint8_t ver = data[4];
-        if (magic == BREEDBOX_MAGIC && (ver == 1 || ver == BREEDBOX_VERSION)) {
-            // Per-version record size: v1 has no tritan byte, v2 does.
+        if (magic == BREEDBOX_MAGIC && ver >= 1 && ver <= BREEDBOX_VERSION) {
+            // Per-version record size: v1 has no tritan byte; v2/v3 do (same 34B).
             const size_t recSize = (ver >= 2) ? BREEDBOX_REC_SIZE : BREEDBOX_V1_REC_SIZE;
             int count = 0;
             for (size_t off = BREEDBOX_HDR_SIZE;
@@ -453,11 +475,16 @@ int BreedingApp::importBox(const uint8_t *data, size_t len) {
                 add(m);
                 ++count;
             }
+            // Any pre-v3 box predates the tritan gene → seed it once. The caller
+            // (pentestLoadBox) rewrites the file as v3, so this never re-rolls.
+            if (ver < BREEDBOX_VERSION) retroSeedTritanRange(roster_, before);
             return count;
         }
     }
-    // No/unknown header → legacy 22-byte records (trip + tritan default = migrate).
-    return importCaughtMonBlob(data, len);
+    // No/unknown header → legacy 22-byte records (always pre-tritan → seed).
+    int count = importCaughtMonBlob(data, len);
+    if (count > 0) retroSeedTritanRange(roster_, before);
+    return count;
 }
 
 }  // namespace breeding

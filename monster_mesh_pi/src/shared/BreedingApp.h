@@ -77,10 +77,14 @@ struct BreedMon {
 // uses that version's record size, so ANY older box migrates forward:
 //   v1: 22-byte CaughtMon prefix + 11-byte trip tail                 = 33 bytes
 //   v2: v1 record + 1 deck-only tritan byte (genotype.tritan)        = 34 bytes
+//   v3: identical layout to v2 (34 bytes) — the version bump is a one-time
+//       marker that pre-tritan mons have been retro-seeded a random tritan
+//       genotype (see importBox). Any file < v3 gets seeded exactly once, then
+//       rewritten as v3 so it never re-rolls.
 // The 22-byte prefix stays byte-for-byte firmware-compatible; the tritan gene is
-// deck-only, so a v1/legacy record migrates with tritan = 0.
+// deck-only, so a v1/legacy record migrates with tritan = 0 (then seeded to v3).
 static constexpr uint32_t BREEDBOX_MAGIC       = 0x4D4258FFu;  // disk: FF 58 42 4D
-static constexpr uint8_t  BREEDBOX_VERSION     = 2;
+static constexpr uint8_t  BREEDBOX_VERSION     = 3;
 static constexpr size_t   BREEDBOX_HDR_SIZE    = 5;   // magic(4) + version(1)
 static constexpr size_t   BREEDBOX_TRIP_SIZE   = 11;  // tripLevel(1)+xp(4)+gym(2)+w(2)+l(2)
 static constexpr size_t   BREEDBOX_TRITAN_SIZE = 1;   // deck-only tritan genotype byte

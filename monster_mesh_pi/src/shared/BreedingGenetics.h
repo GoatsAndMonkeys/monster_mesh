@@ -162,6 +162,26 @@ static inline bool neverHatches(const Genotype &g){ return g.noHatch  == 2; } //
 // 12 skins and to isCleanStock (that's the breeding disorders only).
 static inline bool isTritan(const Genotype &g) { return g.tritan >= 1; }
 
+// ── Retroactive tritan seeding for pre-existing box mons ──────────────────────
+// Mons caught/bred before the tritan gene existed all carry tritan = 0. This
+// one-time seed gives each such mon a random tritan genotype so the trait is
+// distributed across an existing collection (see BreedingApp::importBox v2->v3).
+//
+// This is a SEPARATE, more-visible rate than the ultra-rare (~1/10,000) WILD
+// spawn rate in PentestCatch.h — the wild rate would leave essentially no
+// tritan in a normal box, which defeats the point of seeding. Each inherited
+// allele is T with probability RETRO_TRITAN_ALLELE_PCT%, so:
+//   express (Tn or TT) ~= 1-(1-p)^2 ,  TT ~= p^2.
+// At 11%: ~20.8% of mons express tritan, ~1.2% are true-breeding TT.
+// Bump this ONE number to make the trait rarer or more common.
+static constexpr uint32_t RETRO_TRITAN_ALLELE_PCT = 11;
+static inline uint8_t retroTritanDraw(Rng &r) {
+    uint8_t dosage = 0;
+    if ((uint32_t)(r.next() % 100) < RETRO_TRITAN_ALLELE_PCT) dosage++;
+    if ((uint32_t)(r.next() % 100) < RETRO_TRITAN_ALLELE_PCT) dosage++;
+    return dosage;                       // 0=nn, 1=Tn, 2=TT
+}
+
 // A mon that can be used as a breeding parent at all (bb is a genetic dead-end).
 static inline bool canBreed(const Genotype &g) { return !isSterile(g); }
 
@@ -216,9 +236,13 @@ static inline void genoLetters(const Genotype &g, char *out, size_t n) {
     static const char *F[3] = {"FF", "Ff", "ff"};
     static const char *H[3] = {"HH", "Hh", "hh"};
     auto ix = [](uint8_t d) -> int { return d > 2 ? 2 : d; };
-    snprintf(out, n, "%s %s %s %s %s %s",
+    int wrote = snprintf(out, n, "%s %s %s %s %s %s",
              R[ix(g.rainbow)], S[ix(g.shiny)], D[ix(g.dark)],
              B[ix(g.sterile)], F[ix(g.cantFight)], H[ix(g.noHatch)]);
+    // Deck-only tritan (8th gene) — appended only when carried, so a clean mon's
+    // six-locus code is unchanged. Tn/TT both express (autosomal dominant).
+    if (g.tritan >= 1 && wrote > 0 && (size_t)wrote < n)
+        snprintf(out + wrote, n - (size_t)wrote, " %s", g.tritan == 2 ? "TT" : "Tn");
 }
 
 // True if the mon is free of every genetic disorder (clean foundation stock: BB FF HH).

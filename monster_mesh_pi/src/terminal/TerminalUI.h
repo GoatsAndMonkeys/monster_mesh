@@ -479,6 +479,7 @@ private:
                                           // (drives zone unlock + next leader)
     uint8_t  pentestBattleGym_  = 255;    // gym idx of the current fight (255=wild)
     int      pentestStatusSel_   = 0;      // selected option in the status menu
+    int      pentestMenuPage_    = 0;      // pentest menu page: 0=main, 1=Security submenu
     int      pentestBoxSel_      = 0;      // Bill's PC browser: index within the current tab
     int      pentestBoxTab_      = 0;      // Bill's PC browser: skin-category tab
     int      pentestBoxAction_   = -1;     // Bill's PC: action menu cursor (-1 = browsing)

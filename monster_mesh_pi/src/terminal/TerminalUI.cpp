@@ -1642,6 +1642,7 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
             pentestShowStatus_ = !pentestShowStatus_;
             pentestSubView_    = 0;
             pentestStatusSel_  = 0;
+            pentestMenuPage_   = 0;
             if (pentestShowStatus_) pentestConfirmReset_ = false;
         }
         return;   // SELECT alone: swallow, armed for the exit combo.
@@ -1653,6 +1654,7 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
         if (pentestSubView_ == 1) {
             if (ev.button == GpiButton::B && ev.pressed) {
                 pentestSubView_   = 0;
+                pentestMenuPage_  = 0;
                 pentestStatusSel_ = 1;   // leave cursor on Status
             }
             return;
@@ -1720,7 +1722,8 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
                     return;
                 case GpiButton::B:
                     pentestSubView_   = 0;
-                    pentestStatusSel_ = 6;   // leave cursor on Bill's PC
+                    pentestMenuPage_  = 0;
+                    pentestStatusSel_ = 2;   // leave cursor on Bill's PC
                     return;
                 default: return;
             }
@@ -1729,11 +1732,12 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
         // ── SIGINT sub-views (2=scanner 3=probes 4=deauths 5=captures) ────────
         if (pentestSubView_ >= 2 && pentestSubView_ <= 5) {
             if (!ev.pressed) return;
-            // Common: B = back to menu
+            // Common: B = back to the Security submenu (these tools live there).
             if (ev.button == GpiButton::B) {
-                int prevView      = pentestSubView_;
+                int prevView      = pentestSubView_;   // 2..5
                 pentestSubView_   = 0;
-                pentestStatusSel_ = prevView; // menu item N matches subView N
+                pentestMenuPage_  = 1;                 // Security page
+                pentestStatusSel_ = prevView - 1;      // subView 2..5 → item 1..4
                 return;
             }
             // Scroll-enabled sub-views
@@ -1776,19 +1780,19 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
                     return;
                 case GpiButton::A:
                     if (pentestStatusSel_ == 0) pentestResetProgress();
-                    else { pentestConfirmReset_ = false; pentestStatusSel_ = 7; }
+                    else { pentestConfirmReset_ = false; pentestStatusSel_ = 4; }
                     return;
                 case GpiButton::B:
-                    if (ev.pressed) { pentestConfirmReset_ = false; pentestStatusSel_ = 7; }
+                    if (ev.pressed) { pentestConfirmReset_ = false; pentestStatusSel_ = 4; }
                     return;
                 default: return;
             }
         }
 
-        // ── Main in-log menu (8 items) ────────────────────────────────────────
-        //   0 Back  1 Status  2 AP Scanner  3 Probe Sniffer
-        //   4 Deauth Log  5 Captures  6 Bill's PC  7 Reset Pikachu
-        const int nOpts = 8;
+        // ── Main in-log menu (page 0) / Security submenu (page 1) ─────────────
+        //   Main:     0 Back  1 Status  2 Bill's PC  3 Security  4 Reset Pikachu
+        //   Security: 0 Back  1 AP Scanner  2 Probe Sniffer  3 Deauth Log  4 Captures
+        const int nOpts = 5;
         switch (ev.button) {
             case GpiButton::UP:   case GpiButton::LEFT:
                 pentestStatusSel_ = (pentestStatusSel_ + nOpts - 1) % nOpts;
@@ -1797,6 +1801,37 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
                 pentestStatusSel_ = (pentestStatusSel_ + 1) % nOpts;
                 return;
             case GpiButton::A:
+                if (pentestMenuPage_ == 1) {
+                    // ── Security submenu ──────────────────────────────────────
+                    switch (pentestStatusSel_) {
+                        case 0:  // Back → main menu, cursor on Security
+                            pentestMenuPage_  = 0;
+                            pentestStatusSel_ = 3;
+                            break;
+                        case 1:  // AP Scanner
+                            sigintLoadAllNets();
+                            sigintNetSel_ = sigintNetScroll_ = 0;
+                            pentestSubView_ = 2;
+                            break;
+                        case 2:  // Probe Sniffer
+                            sigintLoadProbes();
+                            sigintProbeSel_ = sigintProbeScroll_ = 0;
+                            pentestSubView_ = 3;
+                            break;
+                        case 3:  // Deauth Log
+                            sigintLoadDeauths();
+                            sigintDeauthSel_ = sigintDeauthScroll_ = 0;
+                            pentestSubView_ = 4;
+                            break;
+                        case 4:  // Captures
+                            sigintLoadCapFiles();
+                            sigintCapSel_ = sigintCapScroll_ = 0;
+                            pentestSubView_ = 5;
+                            break;
+                    }
+                    return;
+                }
+                // ── Main menu ─────────────────────────────────────────────────
                 switch (pentestStatusSel_) {
                     case 0:  // Back
                         pentestShowStatus_ = false;
@@ -1805,31 +1840,15 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
                     case 1:  // Status
                         pentestSubView_ = 1;
                         break;
-                    case 2:  // AP Scanner
-                        sigintLoadAllNets();
-                        sigintNetSel_ = sigintNetScroll_ = 0;
-                        pentestSubView_ = 2;
-                        break;
-                    case 3:  // Probe Sniffer
-                        sigintLoadProbes();
-                        sigintProbeSel_ = sigintProbeScroll_ = 0;
-                        pentestSubView_ = 3;
-                        break;
-                    case 4:  // Deauth Log
-                        sigintLoadDeauths();
-                        sigintDeauthSel_ = sigintDeauthScroll_ = 0;
-                        pentestSubView_ = 4;
-                        break;
-                    case 5:  // Captures
-                        sigintLoadCapFiles();
-                        sigintCapSel_ = sigintCapScroll_ = 0;
-                        pentestSubView_ = 5;
-                        break;
-                    case 6:  // Bill's PC — caught-mon browser
+                    case 2:  // Bill's PC — caught-mon browser
                         pentestBoxSel_  = 0;
                         pentestSubView_ = 6;
                         break;
-                    case 7:  // Reset Pikachu
+                    case 3:  // Security — open the WiFi/pentest submenu
+                        pentestMenuPage_  = 1;
+                        pentestStatusSel_ = 0;
+                        break;
+                    case 4:  // Reset Pikachu
                         pentestConfirmReset_ = true;
                         pentestStatusSel_    = 0;
                         break;
@@ -1837,9 +1856,15 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
                 return;
             case GpiButton::B:
                 if (ev.pressed) {
-                    pentestShowStatus_ = false;
-                    pentestStatusSel_  = 0;
-                    pentestSubView_    = 0;
+                    if (pentestMenuPage_ == 1) {
+                        // Leave Security → back to main menu, cursor on Security.
+                        pentestMenuPage_  = 0;
+                        pentestStatusSel_ = 3;
+                    } else {
+                        pentestShowStatus_ = false;
+                        pentestStatusSel_  = 0;
+                        pentestSubView_    = 0;
+                    }
                 }
                 return;
             default:
@@ -1852,6 +1877,7 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
             pentestShowStatus_   = true;
             pentestSubView_      = 0;
             pentestStatusSel_    = 0;
+            pentestMenuPage_     = 0;
             pentestConfirmReset_ = false;
         }
         return;
@@ -2074,11 +2100,18 @@ void TerminalUI::pentestBuildMenuLog(std::vector<std::string> &out) {
     }
 
     // ── Main menu (subView 0) ─────────────────────────────────────────────────
-    static const char *items[] = {
-        "Back", "Status", "AP Scanner",
-        "Probe Sniffer", "Deauth Log", "Captures", "Bill's PC", "Reset Pikachu",
+    // Breeding is what most players are here for, so Bill's PC sits near the top
+    // and the WiFi/pentest tools are tucked into a "Security" submenu (page 1).
+    static const char *mainItems[] = {
+        "Back", "Status", "Bill's PC", "Security", "Reset Pikachu",
     };
-    const int nItems = (int)(sizeof(items) / sizeof(items[0]));
+    static const char *secItems[] = {
+        "Back", "AP Scanner", "Probe Sniffer", "Deauth Log", "Captures",
+    };
+    const bool sec = (pentestMenuPage_ == 1);
+    const char **items = sec ? secItems : mainItems;
+    const int nItems   = 5;
+    if (sec) out.push_back("-- Security --");
     for (int i = 0; i < nItems; i++) {
         snprintf(ln, sizeof(ln), "%s %s",
                  (i == pentestStatusSel_) ? ">" : " ", items[i]);
@@ -2142,11 +2175,13 @@ void TerminalUI::pentestBuildStatus(std::vector<std::string> &out) {
         int shown = 0;
         for (int i = (int)box.size() - 1; i >= 0 && shown < 12; --i, ++shown) {
             const breeding::BreedMon &m = box[i];
-            snprintf(line, sizeof(line), "  L%-3d %-10.10s %-8.8s %s%s",
+            snprintf(line, sizeof(line), "  L%-3d %-10.10s %-8.8s %s%s%s",
                      m.level, m.nick[0] ? m.nick : dexName(m.dex),
                      breeding::skinName(breeding::skinOf(m.geno)),
                      m.geno.female ? "\xE2\x99\x80" : "\xE2\x99\x82",
-                     breeding::isSterile(m.geno) ? " bb" : "");
+                     breeding::isSterile(m.geno) ? " bb" : "",
+                     breeding::isTritan(m.geno)
+                         ? (m.geno.tritan == 2 ? " TT" : " Tn") : "");
             out.push_back(line);
         }
         if ((int)box.size() > 12) {
@@ -5866,11 +5901,13 @@ void TerminalUI::renderBreeding()
         char mark   = locked ? '*' : (sel ? '>' : (busy ? '~' : ' '));
         breeding::Skin sk = breeding::skinOf(m.geno);
         if (sel) wattron(winInfo_, A_REVERSE | COLOR_PAIR(3));
-        mvwprintw(winInfo_, 2 + i, 0, "%cL%-3d %-9.9s %-8.8s %s%s",
+        mvwprintw(winInfo_, 2 + i, 0, "%cL%-3d %-9.9s %-8.8s %s%s%s",
                   mark, m.level,
                   m.nick[0] ? m.nick : breeding::BreedingApp::dexName(m.dex),
                   breeding::skinName(sk),
                   m.geno.female ? "\xE2\x99\x80" : "\xE2\x99\x82",
+                  breeding::isTritan(m.geno)
+                    ? (m.geno.tritan == 2 ? " TT" : " Tn") : "",
                   breeding::isSterile(m.geno) ? " bb"
                     : busy ? " ~room"
                     : cd > 0 ? " ~cd" : "");
