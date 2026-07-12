@@ -613,5 +613,6 @@ private:
     // ── Tiny JSON helpers (no library - strstr-based) ─────────────────────────
     static std::string jsonGetStr(const std::string &j, const char *key);
     static int         jsonGetInt(const std::string &j, const char *key, int def = 0);
+    static uint32_t    jsonGetU32(const std::string &j, const char *key, uint32_t def = 0);
 
 };

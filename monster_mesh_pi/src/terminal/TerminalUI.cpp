@@ -5200,7 +5200,7 @@ void TerminalUI::onIpcMessage(const std::string &msg) {
     else if (type == "BEACON_RESULT") {
         bool ok = jsonGetInt(msg, "ok", 0) != 0;
         int party = jsonGetInt(msg, "party", 0);
-        uint32_t nid = (uint32_t)jsonGetInt(msg, "node_id", 0);
+        uint32_t nid = jsonGetU32(msg, "node_id", 0);
         if (ok && party > 0)
             pushActivity("> Beacon sent (party=%d, node=0x%08X)", party, nid);
         else if (ok)
@@ -5209,7 +5209,7 @@ void TerminalUI::onIpcMessage(const std::string &msg) {
             pushActivity("> Beacon FAILED - no serial");
     }
     else if (type == "NODE_INFO") {
-        uint32_t nid = (uint32_t)jsonGetInt(msg, "node_id", 0);
+        uint32_t nid = jsonGetU32(msg, "node_id", 0);
         std::string sn = jsonGetStr(msg, "short_name");
         std::string gn = jsonGetStr(msg, "game_name");
         strncpy(localShortName_,   sn.c_str(), sizeof(localShortName_)   - 1);
@@ -5335,7 +5335,7 @@ void TerminalUI::parseDaycareEvent(const std::string &msg) {
 }
 
 void TerminalUI::parseChallenge(const std::string &msg) {
-    challengeNodeId_ = (uint32_t)jsonGetInt(msg, "node_id", 0);
+    challengeNodeId_ = jsonGetU32(msg, "node_id", 0);
     std::string tr   = jsonGetStr(msg, "trainer");
     strncpy(challengerName_, tr.c_str(), sizeof(challengerName_) - 1);
     challengerName_[sizeof(challengerName_) - 1] = '\0';
@@ -5384,8 +5384,8 @@ void TerminalUI::parseNeighbors(const std::string &msg) {
         std::string nick = jsonGetStr(slot, "lead_nick");
         int pc           = jsonGetInt(slot, "party_count", 0);
         int lv           = jsonGetInt(slot, "lead_level", 0);
-        uint32_t nid     = (uint32_t)jsonGetInt(slot, "node_id", 0);
-        uint32_t lsms    = (uint32_t)jsonGetInt(slot, "last_seen_ms", 0);
+        uint32_t nid     = jsonGetU32(slot, "node_id", 0);
+        uint32_t lsms    = jsonGetU32(slot, "last_seen_ms", 0);
 
         NeighborEntry &n = neighbors_[i];
         n.nodeId     = nid;
@@ -6082,6 +6082,20 @@ int TerminalUI::jsonGetInt(const std::string &j, const char *key, int def) {
     while (pos < j.size() && j[pos] == ' ') pos++;
     if (pos >= j.size()) return def;
     return atoi(j.c_str() + pos);
+}
+
+// Unsigned 32-bit variant — REQUIRED for node IDs (and other uint32 fields).
+// Meshtastic node IDs routinely have the high bit set (e.g. 0xF1A05E70 =
+// 4054163568 > INT_MAX), so parsing them through the signed jsonGetInt/atoi
+// overflows to 0x7FFFFFFF and every challenge/lookup targets the wrong node.
+uint32_t TerminalUI::jsonGetU32(const std::string &j, const char *key, uint32_t def) {
+    std::string search = std::string("\"") + key + "\":";
+    size_t pos = j.find(search);
+    if (pos == std::string::npos) return def;
+    pos += search.size();
+    while (pos < j.size() && j[pos] == ' ') pos++;
+    if (pos >= j.size()) return def;
+    return (uint32_t)strtoul(j.c_str() + pos, nullptr, 10);
 }
 
 // ── SDL2 BattleWindow state sync ─────────────────────────────────────────────
