@@ -34,10 +34,14 @@
 // Bill's PC skin-category tabs. A mon matches every category its skin belongs to
 // (a Dark-Pink shows in both Pink and Dark), so counts can overlap — it's a
 // filter view, not a partition.
-static const char *const kBoxTabNames[] = { "All", "Shy", "Pnk", "Rnw", "Drk", "Ddk", "Reg" };
-static constexpr int kBoxTabCount = 7;
-static bool boxTabMatch(breeding::Skin s, int tab) {
+static const char *const kBoxTabNames[] = { "All", "Shy", "Pnk", "Rnw", "Drk", "Ddk", "Reg", "Tri" };
+static constexpr int kBoxTabCount = 8;
+// Matches on the full genotype so the Tritan tab (colour-blindness gene) can
+// filter independently of the skin categories.
+static bool boxTabMatch(const breeding::Genotype &g, int tab) {
     using namespace breeding;
+    if (tab == 7) return isTritan(g);          // Tritan — Tn or TT (autosomal dominant)
+    Skin s = skinOf(g);
     switch (tab) {
         case 0: return true;                                                   // All
         case 1: return s == SKIN_SHINY || s == SKIN_DARK_SHINY || s == SKIN_BLACKOUT_SHINY;
@@ -1668,7 +1672,7 @@ void TerminalUI::pentestButton(const ButtonEvent &ev) {
             // Build the current tab's filtered index list (for scan + actions).
             std::vector<int> filt;
             for (int i = 0; i < (int)box.size(); ++i)
-                if (boxTabMatch(breeding::skinOf(box[i].geno), pentestBoxTab_)) filt.push_back(i);
+                if (boxTabMatch(box[i].geno, pentestBoxTab_)) filt.push_back(i);
             int fn = (int)filt.size();
 
             // Action menu open (A opened it):
@@ -2265,8 +2269,7 @@ bool TerminalUI::pentestSyncBoxView(BattleWindow::State &s) {
     // Per-tab counts + the tab-bar header (current tab bracketed).
     int cnt[kBoxTabCount] = {0};
     for (const auto &mm : box) {
-        breeding::Skin s2 = breeding::skinOf(mm.geno);
-        for (int t = 0; t < kBoxTabCount; ++t) if (boxTabMatch(s2, t)) cnt[t]++;
+        for (int t = 0; t < kBoxTabCount; ++t) if (boxTabMatch(mm.geno, t)) cnt[t]++;
     }
     if (pentestBoxTab_ < 0) pentestBoxTab_ = kBoxTabCount - 1;
     if (pentestBoxTab_ >= kBoxTabCount) pentestBoxTab_ = 0;
@@ -2278,7 +2281,7 @@ bool TerminalUI::pentestSyncBoxView(BattleWindow::State &s) {
     // Filtered list for the current tab (LEFT/RIGHT switch tabs, U/D scan within).
     std::vector<int> filt;
     for (int i = 0; i < n; ++i)
-        if (boxTabMatch(breeding::skinOf(box[i].geno), pentestBoxTab_)) filt.push_back(i);
+        if (boxTabMatch(box[i].geno, pentestBoxTab_)) filt.push_back(i);
     int fn = (int)filt.size();
     if (fn == 0) { s.boxSpecies = 0; return true; }   // this category is empty
     if (pentestBoxSel_ < 0)  pentestBoxSel_ = fn - 1;
@@ -2321,10 +2324,11 @@ bool TerminalUI::pentestSyncBoxView(BattleWindow::State &s) {
              m.level, breeding::skinName(sk), g.female ? "(F)" : "(M)");
     s.log.push_back(title);
     char gl[96];
-    snprintf(gl, sizeof(gl), "Genome  %s %s %s | %s %s %s",
+    snprintf(gl, sizeof(gl), "Genome  %s %s %s | %s %s %s | T:%s",
              AP(g.rainbow, "RR", "Rr", "rr"), AP(g.shiny, "SS", "Ss", "ss"),
              AP(g.dark, "dd", "Dd", "DD"),    AP(g.sterile, "BB", "Bb", "bb"),
-             AP(g.cantFight, "FF", "Ff", "ff"), AP(g.noHatch, "HH", "Hh", "hh"));
+             AP(g.cantFight, "FF", "Ff", "ff"), AP(g.noHatch, "HH", "Hh", "hh"),
+             AP(g.tritan, "nn", "Tn", "TT"));
     s.log.push_back(gl);
 
     // Per-locus meaning words. Rainbow/Pink display on females only; a male
@@ -2350,12 +2354,14 @@ bool TerminalUI::pentestSyncBoxView(BattleWindow::State &s) {
     twoCol("Rainbow", AP(g.rainbow, "RR", "Rr", "rr"),  rW, "Sterile", AP(g.sterile, "BB", "Bb", "bb"),  bW);
     twoCol("Shiny",   AP(g.shiny, "SS", "Ss", "ss"),    sW, "CantFgt", AP(g.cantFight, "FF", "Ff", "ff"), fW);
     twoCol("Dark",    AP(g.dark, "dd", "Dd", "DD"),     dW, "NoHatch", AP(g.noHatch, "HH", "Hh", "hh"),  hW);
-    // Tritan (autosomal-dominant colour blindness) — orthogonal to the skins, so
-    // it gets its own line and is only shown when the mon actually carries it.
-    if (breeding::isTritan(g)) {
+    // Tritan (autosomal-dominant colour blindness) — orthogonal to the skins.
+    // A blood test reads the allele either way, so it's ALWAYS shown: nn is
+    // clean, Tn/TT both express (there is no silent carrier).
+    {
         char tl[64];
-        snprintf(tl, sizeof(tl), "Tritan   %s  (sees like a tritanope)",
-                 AP(g.tritan, "nn", "Tn", "TT"));
+        snprintf(tl, sizeof(tl), "Tritan   %s  %s",
+                 AP(g.tritan, "nn", "Tn", "TT"),
+                 breeding::isTritan(g) ? "(sees like a tritanope)" : "(clean vision)");
         s.log.push_back(tl);
     }
     return true;
@@ -5865,14 +5871,13 @@ void TerminalUI::renderBreeding()
     // Per-category counts + build the filtered list for the current tab.
     int cnt[kBoxTabCount] = {0};
     for (const auto &m : r) {
-        breeding::Skin s2 = breeding::skinOf(m.geno);
-        for (int t = 0; t < kBoxTabCount; ++t) if (boxTabMatch(s2, t)) cnt[t]++;
+        for (int t = 0; t < kBoxTabCount; ++t) if (boxTabMatch(m.geno, t)) cnt[t]++;
     }
     if (breedTab_ < 0) breedTab_ = kBoxTabCount - 1;
     if (breedTab_ >= kBoxTabCount) breedTab_ = 0;
     std::vector<int> filt;
     for (int i = 0; i < (int)r.size(); ++i)
-        if (boxTabMatch(breeding::skinOf(r[i].geno), breedTab_)) filt.push_back(i);
+        if (boxTabMatch(r[i].geno, breedTab_)) filt.push_back(i);
     int fn = (int)filt.size();
     if (breedCursorA_ < 0)  breedCursorA_ = fn ? fn - 1 : 0;
     if (breedCursorA_ >= fn) breedCursorA_ = 0;
@@ -5999,7 +6004,7 @@ void TerminalUI::breedingButton(const ButtonEvent &ev)
     // Rebuild the current tab's filtered list (roster indices).
     std::vector<int> filt;
     for (int i = 0; i < (int)r.size(); ++i)
-        if (boxTabMatch(breeding::skinOf(r[i].geno), breedTab_)) filt.push_back(i);
+        if (boxTabMatch(r[i].geno, breedTab_)) filt.push_back(i);
     int fn = (int)filt.size();
 
     switch (ev.button) {

@@ -99,7 +99,7 @@ public:
         // Bill's PC category tabs: current index + per-category counts, drawn as
         // highlighted chips (All/Shiny/Pink/Rnbw/Dark/Blkout/Reg).
         uint8_t  boxTabCur    = 0;
-        uint16_t boxTabCnt[7] = {0};
+        uint16_t boxTabCnt[8] = {0};
         int8_t   boxAction    = -1;    // Bill's PC action menu cursor (-1 = closed)
         bool     boxIsActive  = false; // the shown mon is the current battler
         // Breeding pick: a 1st breeder has been chosen from Bill's PC and we're

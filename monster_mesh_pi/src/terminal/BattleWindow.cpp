@@ -645,8 +645,8 @@ void BattleWindow::drawBoxView() {
     // Seven tabs split the whole window width so the text is big and legible:
     // category name at 2x scale, live count beneath it. Current tab is a
     // filled chip (white on ink); the rest are ink on paper.
-    static const char *const TABS[7] = { "All", "Shiny", "Pink", "Rnbw", "Dark", "Blkout", "Reg" };
-    const int kTabCount = 7;
+    static const char *const TABS[8] = { "All", "Shiny", "Pink", "Rnbw", "Dark", "Blkout", "Reg", "Tri" };
+    const int kTabCount = 8;
     const int cellW  = LOGICAL_W / kTabCount;   // 91 px per tab
     const int tabTop = 3;
     const int tabH   = 30;
