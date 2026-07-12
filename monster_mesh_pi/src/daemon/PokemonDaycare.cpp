@@ -13,7 +13,7 @@
 
 static constexpr uint32_t EVENT_INTERVAL_MS     = 300000;    // 5 min (testing)
 static constexpr uint32_t BEACON_INTERVAL_MS    = 900000;    // 15 min
-static constexpr uint32_t NEIGHBOR_TIMEOUT_MS   = 7200000;   // 2 hours
+static constexpr uint32_t NEIGHBOR_TIMEOUT_MS   = 3600000;   // 1 hour (keep a neighbor if heard within the last hour)
 static constexpr uint32_t DECAY_INTERVAL_MS     = 86400000;  // 1 day
 static constexpr uint32_t SAVE_INTERVAL_MS      = 300000;    // 5 min autosave
 static constexpr uint32_t MOOD_UPDATE_MS        = 60000;     // 1 min mood check

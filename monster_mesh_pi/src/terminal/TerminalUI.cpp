@@ -5523,9 +5523,10 @@ void TerminalUI::parseStatus(const std::string &msg) {
     if (!ev.empty()) lastEventText_ = ev;
     lastEventXp_    = jsonGetInt(msg, "last_event_xp", 0);
 
-    // Parse neighbor entries (simple: look for shortName fields)
-    neighborDisplayCount_ = 0;
-    // TODO: daemon should push structured NEIGHBORS; for now use neighborCount_
+    // NOTE: do NOT touch neighborDisplayCount_ here. The neighbor list is owned
+    // by the structured NEIGHBORS push (parseNeighbors); the daemon keeps a
+    // neighbor as long as it was heard within NEIGHBOR_TIMEOUT_MS (1 hour).
+    // Wiping it on every periodic STATUS tick made neighbors vanish after ~60s.
 }
 
 // ── Gym select ────────────────────────────────────────────────────────────────
