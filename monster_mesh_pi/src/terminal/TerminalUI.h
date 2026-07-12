@@ -114,7 +114,7 @@ private:
     // sprites and message log.  The 3-tab menu screens need ~10 rows so
     // five item rows can fit between the tab header, separator, and hint.
     static constexpr int MENU_ROWS_BATTLE  = 5;
-    static constexpr int MENU_ROWS_DEFAULT = 8;   // 3 item rows + 5 chrome rows
+    static constexpr int MENU_ROWS_DEFAULT = 9;   // 4 item rows + 5 chrome rows
 
     // GBC DMG green-scale color slots.  These indices are written into the
     // terminal's color palette via init_color() in startup() — anything
