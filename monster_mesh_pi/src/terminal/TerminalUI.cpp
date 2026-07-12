@@ -787,7 +787,28 @@ void TerminalUI::renderNeighbors() {
         }
     }
 
-    // (no on-screen key legend — physical GPI buttons)
+    // ── Battle action menu (opens on A over the highlighted neighbor) ─────────
+    if (neighborAction_ >= 0 && neighborSel_ < neighborDisplayCount_) {
+        const NeighborEntry &n = neighbors_[neighborSel_];
+        static const char *const kActs[NEIGHBOR_ACTION_COUNT] = {
+            "MonsterMesh Battle", "Gauntlet", "Cancel"
+        };
+        static const char *const kActDesc[NEIGHBOR_ACTION_COUNT] = {
+            "live PvP", "async fight", ""
+        };
+        mvwprintw(winMenu_, 0, 1, "Battle %s:", n.shortName);
+        for (int a = 0; a < NEIGHBOR_ACTION_COUNT; a++) {
+            bool asel = (a == neighborAction_);
+            if (asel) wattron(winMenu_, A_REVERSE | COLOR_PAIR(3));
+            mvwprintw(winMenu_, 1 + a, 1, " %s%s%s ",
+                      kActs[a], kActDesc[a][0] ? " - " : "", kActDesc[a]);
+            if (asel) wattroff(winMenu_, A_REVERSE | COLOR_PAIR(3));
+        }
+        mvwprintw(winMenu_, 1 + NEIGHBOR_ACTION_COUNT, 1, "[A] Select  [B] Cancel");
+    } else if (neighborDisplayCount_ > 0) {
+        // Browsing hint.
+        mvwprintw(winMenu_, 0, 1, "[A] Battle   [B] Back");
+    }
 }
 
 // ── Daycare event detail ──────────────────────────────────────────────────────
@@ -1435,7 +1456,64 @@ void TerminalUI::partyButton(const ButtonEvent &ev) {
     }
 }
 
+// MonsterMesh Battle — live synchronous PvP. Send a real challenge over the
+// mesh (Pi as server) and wait for the peer to accept. Same challenge/accept
+// flow + branding as the T-Deck's MonsterMesh Battle.
+void TerminalUI::startMmbChallenge(const NeighborEntry &n) {
+    pvpServerMode_         = true;
+    pvpPendingMyAction_    = 0xFF;
+    pvpPendingOppReceived_ = false;
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd),
+             "{\"cmd\":\"SEND_CHALLENGE\",\"node_id\":%u}", (unsigned)n.nodeId);
+    ipc_.send(cmd);
+    pushActivity("> MonsterMesh Battle: challenge sent to %s...", n.shortName);
+}
+
+// Gauntlet — asynchronous fight. Ask the daemon for the neighbor's cached party
+// (from their beacon), run a local battle against that snapshot with no need
+// for the peer to be online, then ANNOUNCE_RESULT back to the mesh as chat.
+void TerminalUI::startGauntletFight(const NeighborEntry &n) {
+    asyncFightActive_ = true;
+    asyncFightNodeId_ = n.nodeId;
+    snprintf(asyncFightTrainer_, sizeof(asyncFightTrainer_),
+             "%s-%s", n.shortName, n.gameName);
+    char cmd[80];
+    snprintf(cmd, sizeof(cmd),
+             "{\"cmd\":\"GET_NEIGHBOR_PARTY\",\"node_id\":%u}", (unsigned)n.nodeId);
+    ipc_.send(cmd);
+    pushActivity("> Gauntlet vs %s...", asyncFightTrainer_);
+}
+
 void TerminalUI::neighborsButton(const ButtonEvent &ev) {
+    // ── Battle action menu open on the highlighted neighbor ───────────────────
+    if (neighborAction_ >= 0) {
+        switch (ev.button) {
+            case GpiButton::UP:
+                neighborAction_ = (neighborAction_ + NEIGHBOR_ACTION_COUNT - 1) % NEIGHBOR_ACTION_COUNT;
+                break;
+            case GpiButton::DOWN:
+                neighborAction_ = (neighborAction_ + 1) % NEIGHBOR_ACTION_COUNT;
+                break;
+            case GpiButton::A: {
+                int action = neighborAction_;
+                neighborAction_ = -1;                       // close the menu
+                if (action == 2 || neighborSel_ >= neighborDisplayCount_) break;  // Cancel
+                const NeighborEntry &n = neighbors_[neighborSel_];
+                if (n.nodeId == 0) { pushActivity("> Can't battle: missing node ID"); break; }
+                if (action == 0) startMmbChallenge(n);      // MonsterMesh Battle (live PvP)
+                else             startGauntletFight(n);     // Gauntlet (async)
+                break;
+            }
+            case GpiButton::B:
+                neighborAction_ = -1;                       // cancel, stay in the list
+                break;
+            default: break;
+        }
+        return;
+    }
+
+    // ── Browsing the neighbor list ────────────────────────────────────────────
     switch (ev.button) {
         case GpiButton::UP:
             if (neighborDisplayCount_ > 0)
@@ -1445,53 +1523,22 @@ void TerminalUI::neighborsButton(const ButtonEvent &ev) {
             if (neighborDisplayCount_ > 0)
                 neighborSel_ = (neighborSel_ + 1) % neighborDisplayCount_;
             break;
-        case GpiButton::A: {
-            // Async fight: ask the daemon for the neighbor's full party
-            // (it's already in our neighbor cache from their beacon), then
-            // run a local CPU battle against that snapshot. On the result
-            // screen we ANNOUNCE_RESULT back to the mesh as a chat msg.
-            if (neighborSel_ < neighborDisplayCount_) {
-                const NeighborEntry &n = neighbors_[neighborSel_];
-                if (n.nodeId == 0) {
-                    pushActivity("> Can't challenge: missing node ID");
-                    break;
-                }
-                asyncFightActive_   = true;
-                asyncFightNodeId_   = n.nodeId;
-                snprintf(asyncFightTrainer_, sizeof(asyncFightTrainer_),
-                         "%s-%s", n.shortName, n.gameName);
-
-                char cmd[80];
-                snprintf(cmd, sizeof(cmd),
-                         "{\"cmd\":\"GET_NEIGHBOR_PARTY\",\"node_id\":%u}",
-                         (unsigned)n.nodeId);
-                ipc_.send(cmd);
-                pushActivity("> Challenging %s...", asyncFightTrainer_);
-            }
+        case GpiButton::A:
+            // Open the battle action menu on the highlighted neighbor.
+            if (neighborSel_ < neighborDisplayCount_ && neighbors_[neighborSel_].nodeId != 0)
+                neighborAction_ = 0;
+            else if (neighborDisplayCount_ > 0)
+                pushActivity("> Can't battle: missing node ID");
             break;
-        }
-        case GpiButton::Y: {
-            // Y = send a real MMB CHALLENGE over the mesh (Pi as server)
-            if (neighborSel_ < neighborDisplayCount_) {
-                const NeighborEntry &n = neighbors_[neighborSel_];
-                if (n.nodeId == 0) {
-                    pushActivity("> Can't challenge: missing node ID");
-                    break;
-                }
-                pvpServerMode_         = true;
-                pvpPendingMyAction_    = 0xFF;
-                pvpPendingOppReceived_ = false;
-                char cmd[64];
-                snprintf(cmd, sizeof(cmd),
-                         "{\"cmd\":\"SEND_CHALLENGE\",\"node_id\":%u}", (unsigned)n.nodeId);
-                ipc_.send(cmd);
-                pushActivity("> Sent MMB challenge to %s...", n.shortName);
-            }
+        case GpiButton::Y:
+            // Power-user shortcut straight to a live MonsterMesh Battle.
+            if (neighborSel_ < neighborDisplayCount_ && neighbors_[neighborSel_].nodeId != 0)
+                startMmbChallenge(neighbors_[neighborSel_]);
             break;
-        }
         case GpiButton::B:
             screen_ = Screen::MENU;
             neighborSel_ = 0;
+            neighborAction_ = -1;
             break;
         default: break;
     }

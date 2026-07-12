@@ -191,6 +191,11 @@ private:
     NeighborEntry neighbors_[MAX_NEIGHBORS_DISPLAY] = {};
     int           neighborDisplayCount_ = 0;
     int           neighborSel_          = 0;  // highlighted neighbor
+    // Neighbor battle action menu: -1 = browsing the list, >=0 = menu open on
+    // the highlighted neighbor with this option cursor.
+    //   0 = MonsterMesh Battle (live PvP)   1 = Gauntlet (async snapshot)   2 = Cancel
+    int           neighborAction_       = -1;
+    static constexpr int NEIGHBOR_ACTION_COUNT = 3;
 
     // XP summary per party slot (accumulated from DAYCARE_EVENT pushes
     // and battle kills).  sessionXp_ is monotonic — total XP gained this
@@ -354,6 +359,9 @@ private:
     void renderBreeding();
     void breedingButton(const ButtonEvent &ev);
     void neighborsButton(const ButtonEvent &ev);
+    // Launch a battle against a neighbor from the Neighbors action menu.
+    void startMmbChallenge(const NeighborEntry &n);   // live PvP "MonsterMesh Battle"
+    void startGauntletFight(const NeighborEntry &n);  // async snapshot "Gauntlet"
     void daycareEventButton(const ButtonEvent &ev);
     void challengeButton(const ButtonEvent &ev);
     void battleButton(const ButtonEvent &ev);
