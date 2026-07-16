@@ -1,4 +1,5 @@
 #include "MonsterMeshEmulator.h"
+#include "AtomicSdFile.h"
 #include "MonsterMeshAudio.h"
 #include "SPILock.h"
 #include "variant.h"
@@ -51,8 +52,10 @@ bool MonsterMeshEmulator::begin(const char *romPath) {
     if (audio_) { audio_->stop(); delete audio_; audio_ = nullptr; }
     if (gb_) { free(gb_); gb_ = nullptr; }
 
-    strncpy(romPath_, romPath, sizeof(romPath_) - 1);
-    romPath_[sizeof(romPath_) - 1] = '\0';
+    if (!romPath || romPath[0] == '\0' || strlen(romPath) >= sizeof(romPath_)) {
+        Serial.println("[EMU] ROM path is empty or too long");
+        return false;
+    }
 
     if (!loadROM(romPath)) return false;
 
@@ -94,6 +97,10 @@ bool MonsterMeshEmulator::begin(const char *romPath) {
         }
     }
 
+    // Publish the new owner path only after the ROM, save image, emulator
+    // core, and callbacks all initialized successfully. A failed selection
+    // must not retarget later save/reload work away from the last good cart.
+    memcpy(romPath_, romPath, strlen(romPath) + 1);
     running_ = true;
     Serial.printf("[EMU] started — ROM: %s (%u bytes)\n", romPath, (unsigned)romSize_);
     return true;
@@ -282,23 +289,35 @@ bool MonsterMeshEmulator::loadROM(const char *path) {
     return true;
 }
 
-void MonsterMeshEmulator::romPathToSavePath(const char *romPath, char *out, size_t outLen) {
+bool MonsterMeshEmulator::romPathToSavePath(const char *romPath, char *out, size_t outLen) {
     // Save sits next to the ROM on SD card — same path but .sav extension
     // romPath is SD-relative like "/pokemon.gb" or "/roms/pokemon.gb"
     // Strip /sd prefix if present
+    if (!romPath || !out || outLen == 0) return false;
+    out[0] = '\0';
     const char *p = romPath;
     if (strncmp(p, "/sd/", 4) == 0) p = p + 3;  // "/sd/foo" → "/foo"
     else if (strncmp(p, "/sd", 3) == 0 && p[3] == '\0') p = "/";
-    strncpy(out, p, outLen - 1);
-    out[outLen - 1] = '\0';
-    char *dot = strrchr(out, '.');
-    if (dot) strcpy(dot, ".sav");
-    else strncat(out, ".sav", outLen - strlen(out) - 1);
+
+    const char *slash = strrchr(p, '/');
+    const char *dot = strrchr(p, '.');
+    if (dot && slash && dot < slash) dot = nullptr;
+    const size_t stemLength = dot ? static_cast<size_t>(dot - p) : strlen(p);
+    if (stemLength > outLen - 1 || sizeof(".sav") > outLen - stemLength) {
+        return false;
+    }
+
+    memcpy(out, p, stemLength);
+    memcpy(out + stemLength, ".sav", sizeof(".sav"));
+    return true;
 }
 
 void MonsterMeshEmulator::loadSaveFile(const char *romPath) {
     char savPath[256];
-    romPathToSavePath(romPath, savPath, sizeof(savPath));
+    if (!romPathToSavePath(romPath, savPath, sizeof(savPath))) {
+        Serial.println("[EMU] save path is too long");
+        return;
+    }
     Serial.printf("[EMU] loading save: %s (ROM: %s)\n", savPath, romPath);
 
     // SD shares the SPI bus with the radio and TFT — must hold spiLock during
@@ -313,19 +332,55 @@ void MonsterMeshEmulator::loadSaveFile(const char *romPath) {
         return;
     }
 
-    File f = SD.open(savPath, FILE_READ);
-    if (!f) {
-        Serial.printf("[EMU] no save file: %s\n", savPath);
+    // Complete recovery if power was lost after real -> .bak but before the
+    // verified temp file was promoted to the real name.
+    (void)monstermesh::atomic_sd_detail::recoverFile(SD, savPath);
+
+    uint8_t *candidate = static_cast<uint8_t *>(
+        heap_caps_malloc(sizeof(cartRam_), MALLOC_CAP_8BIT));
+    if (!candidate) {
+        Serial.println("[EMU] save-load scratch allocation failed");
         return;
     }
-    size_t n = f.read(cartRam_, sizeof(cartRam_));
-    f.close();
-    Serial.printf("[EMU] save loaded: %s (%u bytes)\n", savPath, (unsigned)n);
+
+    auto readExact = [&]() -> bool {
+        File f = SD.open(savPath, FILE_READ);
+        if (!f || f.size() != sizeof(cartRam_)) {
+            if (f) f.close();
+            return false;
+        }
+        const size_t n = f.read(candidate, sizeof(cartRam_));
+        f.close();
+        return n == sizeof(cartRam_);
+    };
+
+    bool loaded = readExact();
+    if (!loaded) {
+        // A present-but-truncated primary is not authoritative merely because
+        // its filename exists.  Replace it with the retained known-good backup
+        // and validate the restored image before exposing any bytes to cartRam_.
+        if (monstermesh::atomic_sd_detail::restorePreviousFile(SD, savPath)) {
+            loaded = readExact();
+        }
+    }
+    if (!loaded) {
+        free(candidate);
+        Serial.printf("[EMU] no valid 32KiB save file: %s\n", savPath);
+        return;
+    }
+
+    memcpy(cartRam_, candidate, sizeof(cartRam_));
+    free(candidate);
+    Serial.printf("[EMU] save loaded: %s (%u bytes)\n",
+                  savPath, (unsigned)sizeof(cartRam_));
 }
 
-void MonsterMeshEmulator::writeSaveFile(const char *romPath) {
+bool MonsterMeshEmulator::writeSaveFile(const char *romPath) {
     char savPath[256];
-    romPathToSavePath(romPath, savPath, sizeof(savPath));
+    if (!romPathToSavePath(romPath, savPath, sizeof(savPath))) {
+        Serial.println("[EMU] save path is too long");
+        return false;
+    }
     Serial.printf("[EMU] writing save: %s (ROM: %s)\n", savPath, romPath);
 
     // SD shares SPI bus — reinit before access
@@ -334,12 +389,14 @@ void MonsterMeshEmulator::writeSaveFile(const char *romPath) {
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
     if (!SD.begin(SDCARD_CS, SPI)) {
         Serial.printf("[EMU] SD reinit failed for save write\n");
-        return;
+        return false;
     }
 
-    File f = SD.open(savPath, FILE_WRITE);
-    if (!f) { Serial.printf("[EMU] save write failed: %s\n", savPath); return; }
-    size_t written = f.write(cartRam_, sizeof(cartRam_));
-    f.close();
-    Serial.printf("[EMU] save written: %s (%u bytes)\n", savPath, (unsigned)written);
+    if (!monstermesh::atomic_sd_detail::atomicWriteFile(
+            SD, savPath, cartRam_, sizeof(cartRam_))) {
+        Serial.printf("[EMU] atomic save write failed: %s\n", savPath);
+        return false;
+    }
+    Serial.printf("[EMU] save written atomically: %s (%u bytes)\n", savPath, (unsigned)sizeof(cartRam_));
+    return true;
 }

@@ -7,6 +7,8 @@
 #include "showdown_gen3_moves.h"  // gen3Move for gen-aware PP refill
 #include "Gen1Species.h"  // gen1NameToAscii for level-up messages
 #include "WirePartyCodec.h"  // protocol-V2 neutral cross-gen party blob
+#include "MonsterMeshBattleValidation.h"  // transactional wire-party validation
+#include "DaycareSavPatcher.h"  // expForLevel() — growth-rate-correct level thresholds
 #include <string.h>
 #include <stdio.h>
 
@@ -494,11 +496,43 @@ bool MonsterMeshTextBattle::handlePacket(uint32_t fromId,
                   (unsigned)pkt->type, (unsigned)fromId, (unsigned)len,
                   (int)mode_, (int)role_);
 
+    // ── Audit finding 5: sender/session sanity gate (applies to every packet).
+    // Session zero is never a valid wire session; a zero sender cannot be
+    // bound as a peer; and a packet echoed back to us from our own node id
+    // (the MQTT broker fan-out delivers to the publisher too) must never be
+    // treated as an opponent's message. Reject all three before any handler
+    // can mutate mode_/session_/remoteId_ or a staged party.
+    if (pkt->sessionId() == 0) {
+        Serial.printf("[MMB] DROP type=0x%02X from=0x%08X reason=zero_session\n",
+                      (unsigned)pkt->type, (unsigned)fromId);
+        return true;
+    }
+    if (fromId == 0) {
+        Serial.printf("[MMB] DROP type=0x%02X reason=zero_sender\n",
+                      (unsigned)pkt->type);
+        return true;
+    }
+    if (myNodeNum_ != 0 && fromId == myNodeNum_) {
+        Serial.printf("[MMB] DROP type=0x%02X reason=self_echo (from=0x%08X)\n",
+                      (unsigned)pkt->type, (unsigned)fromId);
+        return true;
+    }
+
     // ── Server-auth dispatch (must precede the mode_/session checks since
     // CHALLENGE arrives when mode_ == OFF and ACCEPT/ACTION_V2 may carry
     // session ids unknown to the legacy session_ field). ─────────────────
     if (t == PktType::TEXT_BATTLE_CHALLENGE_V2) {
-        if (mode_ != Mode::OFF) return true;  // busy
+        // A fresh CHALLENGE is only entertained while idle. Once we have bound
+        // a peer, only that peer's retransmit of the SAME session may re-enter
+        // (discovery races); any other CHALLENGE while busy is rejected so a
+        // third node cannot reset our handshake.
+        if (mode_ != Mode::OFF &&
+            !(role_ == Role::CLIENT && fromId == remoteId_ &&
+              pkt->sessionId() == session_)) {
+            Serial.printf("[MMB] DROP CHALLENGE_V2 from=0x%08X reason=busy "
+                          "(peer=0x%08X)\n", (unsigned)fromId, (unsigned)remoteId_);
+            return true;
+        }
         clientAuthOnChallengePkt(fromId, buf, len);
         return true;
     }
@@ -525,11 +559,11 @@ bool MonsterMeshTextBattle::handlePacket(uint32_t fromId,
     }
     if (mode_ != Mode::OFF && role_ == Role::CLIENT) {
         if (t == PktType::TEXT_BATTLE_UPDATE) {
-            clientAuthOnUpdatePkt(buf, len);
+            clientAuthOnUpdatePkt(fromId, buf, len);
             return true;
         }
         if (t == PktType::TEXT_BATTLE_FULL_STATE) {
-            clientAuthOnFullStatePkt(buf, len);
+            clientAuthOnFullStatePkt(fromId, buf, len);
             return true;
         }
     }
@@ -766,9 +800,19 @@ void MonsterMeshTextBattle::resolveTurn()
                 while (true) {
                     uint8_t curLvl = engine_.party(0).mons[s].level;
                     if (curLvl >= 100) break;
+                    // Growth-rate-correct in-battle level threshold. Gen-1
+                    // species (dex 1-151) use their true curve so Slow mons
+                    // (Mewtwo, Dragonite, Gyarados...) stop over-leveling on
+                    // screen mid-fight; Gen-2/3 (dex>151, no growth table) keep
+                    // the medium-fast delta exactly as before. Matches the
+                    // authoritative SAV writeback (creditBattleXpPerSlot).
+                    uint16_t dex = engine_.party(0).mons[s].species;
                     uint32_t threshold =
-                        3u * (uint32_t)curLvl * curLvl +
-                        3u * (uint32_t)curLvl + 1u;
+                        (dex >= 1 && dex <= 151)
+                            ? (expForLevel((uint8_t)dex, curLvl + 1) -
+                               expForLevel((uint8_t)dex, curLvl))
+                            : (3u * (uint32_t)curLvl * curLvl +
+                               3u * (uint32_t)curLvl + 1u);
                     if (slotXpAccum_[s] < threshold) break;
                     slotXpAccum_[s] -= threshold;
                     inBattleLevelUp(s);
@@ -1923,6 +1967,14 @@ void MonsterMeshTextBattle::serverAuthOnAcceptPkt(uint32_t fromId,
                       (unsigned)fromId);
         return;
     }
+    // Audit finding 5: only the bound challenged peer may accept or decline.
+    // Reject before any accept/decline handling so a third node cannot end or
+    // hijack our pending challenge merely by knowing the session id.
+    if (fromId != remoteId_) {
+        Serial.printf("[MMB] DROP ACCEPT from=0x%08X reason=not_peer (peer=0x%08X)\n",
+                      (unsigned)fromId, (unsigned)remoteId_);
+        return;
+    }
     if (len < BATTLELINK_HDR_SIZE + 2 + TB_WIRE_PARTY_BYTES) {
         Serial.printf("[MMB] DROP ACCEPT from=0x%08X reason=short_len=%u min=%u\n",
                       (unsigned)fromId, (unsigned)len,
@@ -1957,9 +2009,22 @@ void MonsterMeshTextBattle::serverAuthOnAcceptPkt(uint32_t fromId,
         return;
     }
 
+    // Audit finding 4/5: decode + validate the accepter's party into a LOCAL
+    // before binding it or starting the engine. A malformed ACCEPT party must
+    // not partially install into wirePeer_ or launch a battle from garbage.
+    Gen1BattleEngine::WireParty peerParty;
+    TbPartyValidationError partyError = TbPartyValidationError::NONE;
+    const size_t partyOffset = (size_t)BATTLELINK_HDR_SIZE + 2 + nameLen;
+    if (!tbUnpackAndValidateWireParty(buf + partyOffset, len - partyOffset,
+                                      peerParty, /*gen superset*/ 3, &partyError)) {
+        Serial.printf("[MMB] DROP ACCEPT from=0x%08X reason=invalid_party error=%u\n",
+                      (unsigned)fromId, (unsigned)partyError);
+        return;
+    }
+
     memset(peerTbName_, 0, sizeof(peerTbName_));
     memcpy(peerTbName_, pkt->payload + 2, nameLen);
-    unpackWireParty(pkt->payload + 2 + nameLen, wirePeer_);
+    wirePeer_ = peerParty;   // bind only the validated party
 
     // Init engine: P0 = us, P1 = client. Seed is private to server (client
     // never runs the engine so doesn't need it). wireMy_ was built when the
@@ -2174,6 +2239,20 @@ void MonsterMeshTextBattle::clientAuthOnChallengePkt(uint32_t fromId,
         return;
     }
 
+    // Audit finding 4/5: decode the challenger's party into a LOCAL and fully
+    // validate it BEFORE mutating any battle state or binding the peer. A
+    // malformed party must leave mode_/role_/remoteId_/session_ untouched so a
+    // bad packet can neither reset an idle station nor bind a bogus opponent.
+    Gen1BattleEngine::WireParty peerParty;
+    TbPartyValidationError partyError = TbPartyValidationError::NONE;
+    const size_t partyOffset = (size_t)BATTLELINK_HDR_SIZE + 6 + nameLen;
+    if (!tbUnpackAndValidateWireParty(buf + partyOffset, len - partyOffset,
+                                      peerParty, gen, &partyError)) {
+        Serial.printf("[MMB] DROP CHALLENGE from=0x%08X reason=invalid_party error=%u\n",
+                      (unsigned)fromId, (unsigned)partyError);
+        return;
+    }
+
     playerWon_ = false;
     resultXpAwarded_ = false;
     mode_     = Mode::NETWORKED;
@@ -2192,7 +2271,7 @@ void MonsterMeshTextBattle::clientAuthOnChallengePkt(uint32_t fromId,
 
     memset(peerTbName_, 0, sizeof(peerTbName_));
     memcpy(peerTbName_, pkt->payload + 6, nameLen);
-    unpackWireParty(pkt->payload + 6 + nameLen, wirePeer_);
+    wirePeer_   = peerParty;   // bind only the validated party
     sessionGen_ = gen;
 
     char line[40];
@@ -2210,6 +2289,17 @@ void MonsterMeshTextBattle::clientAuthOnChallengePkt(uint32_t fromId,
 
 void MonsterMeshTextBattle::clientAuthSendAccept(bool accepted)
 {
+    // Audit finding 5: revalidate our staged SAV party at the last moment. The
+    // CHALLENGE overlay may have opened just before a daycare/save writer
+    // changed the party; sending a structurally valid but stale party would
+    // desync the battle. Convert such an ACCEPT into a clean decline instead.
+    if (accepted && localPartyReadyFn_ &&
+        !localPartyReadyFn_(localPartyReadyCtx_)) {
+        accepted = false;
+        appendLog("Party changed; challenge declined.");
+        Serial.printf("[MMB] ACCEPT converted to decline: local SAV party invalidated\n");
+    }
+
     uint8_t buf[BATTLELINK_MAX_PKT];
     memset(buf, 0, sizeof(buf));
     BattlePacket *pkt = (BattlePacket *)buf;
@@ -2283,16 +2373,24 @@ void MonsterMeshTextBattle::clientAuthSendAccept(bool accepted)
         size_t plen = preAcceptUpdateLen_;
         preAcceptUpdateLen_ = 0;
         Serial.printf("[MMB] applying buffered pre-accept UPDATE len=%u\n", (unsigned)plen);
-        clientAuthOnUpdatePkt(preAcceptUpdateBuf_, plen);
+        clientAuthOnUpdatePkt(remoteId_, preAcceptUpdateBuf_, plen);
     }
 }
 
 // Apply an UPDATE delta to engine_ so the renderer shows authoritative
 // state. Wire side 0 = us (engine P0), wire side 1 = server (engine P1).
-void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len)
+void MonsterMeshTextBattle::clientAuthOnUpdatePkt(uint32_t fromId,
+                                                  const uint8_t *buf, size_t len)
 {
     if (len < BATTLELINK_HDR_SIZE + 6) {
         Serial.printf("[MMB] client UPDATE too short len=%u\n", (unsigned)len);
+        return;
+    }
+    // Audit finding 5: only the bound server may drive our client state.
+    // Reject a wrong-peer UPDATE before it can buffer or mutate the engine.
+    if (fromId != remoteId_) {
+        Serial.printf("[MMB] DROP UPDATE from=0x%08X reason=not_peer (peer=0x%08X)\n",
+                      (unsigned)fromId, (unsigned)remoteId_);
         return;
     }
     const BattlePacket *pkt = (const BattlePacket *)buf;
@@ -2300,6 +2398,55 @@ void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len
         Serial.printf("[MMB] client UPDATE session mismatch pkt=0x%04X our=0x%04X\n",
                       (unsigned)pkt->sessionId(), (unsigned)session_);
         return;
+    }
+    // Audit finding 5f: validate the COMPLETE variable-length UPDATE payload
+    // before mutating ANY battle state. The section decode further down
+    // interleaves its bounds check (the take() lambda) with engine mutation,
+    // so a packet that is truncated in a later section — or that carries a
+    // bogus embedded count — could apply the earlier sections and leave the
+    // client's engine half-updated. Walk the exact flag-ordered layout first,
+    // mirroring the reader's own count clamping, and reject the whole packet
+    // on any overflow before a single field is touched. Same up-front posture
+    // as clientAuthOnFullStatePkt(). The len>=HDR+6 guard above already proved
+    // payload[0..5] (turn+flags+hash) are present, so reading the flags here
+    // is in-bounds. The UPDATE payload carries no species/move/party fields,
+    // so this is a purely structural (size/count) validation.
+    {
+        const uint16_t updFlags =
+            ((uint16_t)pkt->payload[1] << 8) | pkt->payload[2];
+        const size_t payloadLen = len - BATTLELINK_HDR_SIZE;
+        size_t v = 6;   // turn(1) + flags(2) + hash(3), already accounted for
+        auto need = [&](size_t n) -> bool {
+            if (v + n > payloadLen) return false;
+            v += n;
+            return true;
+        };
+        if (updFlags & TB_UPD_HP)     { if (!need(4)) return; }
+        if (updFlags & TB_UPD_PP)     { if (!need(4)) return; }
+        if (updFlags & TB_UPD_SWITCH) { if (!need(2)) return; }
+        if (updFlags & TB_UPD_STATUS) { if (!need(2)) return; }
+        if (updFlags & TB_UPD_RESULT) { if (!need(1)) return; }
+        if (updFlags & TB_UPD_LOG) {
+            if (!need(1)) return;
+            const uint8_t numLines = pkt->payload[v - 1];
+            for (uint8_t i = 0; i < numLines; ++i) {
+                if (!need(1)) return;                 // per-line length byte
+                const uint8_t llen = pkt->payload[v - 1];
+                if (!need(llen)) return;              // line body
+            }
+        }
+        if (updFlags & TB_UPD_BENCH) {
+            if (!need(1)) return;
+            uint8_t count = pkt->payload[v - 1];
+            if (count > 6) count = 6;                 // reader clamps to 6
+            if (!need((size_t)count * 7)) return;     // hp/status/4×pp per slot
+            if (!need(6)) return;                     // active-mon boost stages
+            if (!need(1)) return;
+            uint8_t ecount = pkt->payload[v - 1];
+            if (ecount > 6) ecount = 6;               // reader clamps to 6
+            if (!need((size_t)ecount * 3)) return;    // enemy bench hp/status
+        }
+        if (updFlags & TB_UPD_FX) { if (!need(2 * 8 + 3)) return; }
     }
     // Engine not started yet — buffer this UPDATE for after Y is pressed.
     if (phase_ == Phase::WAIT_CHALLENGE_OVERLAY) {
@@ -2547,9 +2694,19 @@ void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len
                 while (true) {
                     uint8_t curLvl = engine_.party(0).mons[s].level;
                     if (curLvl >= 100) break;
+                    // Growth-rate-correct in-battle level threshold. Gen-1
+                    // species (dex 1-151) use their true curve so Slow mons
+                    // (Mewtwo, Dragonite, Gyarados...) stop over-leveling on
+                    // screen mid-fight; Gen-2/3 (dex>151, no growth table) keep
+                    // the medium-fast delta exactly as before. Matches the
+                    // authoritative SAV writeback (creditBattleXpPerSlot).
+                    uint16_t dex = engine_.party(0).mons[s].species;
                     uint32_t threshold =
-                        3u * (uint32_t)curLvl * curLvl +
-                        3u * (uint32_t)curLvl + 1u;
+                        (dex >= 1 && dex <= 151)
+                            ? (expForLevel((uint8_t)dex, curLvl + 1) -
+                               expForLevel((uint8_t)dex, curLvl))
+                            : (3u * (uint32_t)curLvl * curLvl +
+                               3u * (uint32_t)curLvl + 1u);
                     if (slotXpAccum_[s] < threshold) break;
                     slotXpAccum_[s] -= threshold;
                     inBattleLevelUp(s);
@@ -2625,11 +2782,40 @@ void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len
                   (unsigned)seq, (unsigned)clientTurn_);
 }
 
-void MonsterMeshTextBattle::clientAuthOnFullStatePkt(const uint8_t *buf, size_t len)
+void MonsterMeshTextBattle::clientAuthOnFullStatePkt(uint32_t fromId,
+                                                     const uint8_t *buf, size_t len)
 {
     if (len < BATTLELINK_HDR_SIZE + 5) return;
+    // Audit finding 5: only the bound server may resynchronise our state.
+    if (fromId != remoteId_) {
+        Serial.printf("[MMB] DROP FULL_STATE from=0x%08X reason=not_peer (peer=0x%08X)\n",
+                      (unsigned)fromId, (unsigned)remoteId_);
+        return;
+    }
     const BattlePacket *pkt = (const BattlePacket *)buf;
     if (pkt->sessionId() != session_) return;
+
+    // Audit finding 5: validate the COMPLETE variable-length payload before
+    // mutating EITHER party. Interleaving validation with mutation (as the
+    // old body did) can leave side 0 partially resynchronised when the packet
+    // is truncated at side 1. Walk the exact layout first; only a fully
+    // well-formed FULL_STATE (turn(2)+result(1), then per side active/count +
+    // count×[hp:2,status:1], then the 4-byte PP tail) is applied.
+    {
+        const size_t payloadLen = len - BATTLELINK_HDR_SIZE;
+        size_t v = 3;   // turn(2) + result(1)
+        for (uint8_t ws = 0; ws < 2; ++ws) {
+            if (v + 2 > payloadLen) return;
+            const uint8_t active = pkt->payload[v];
+            const uint8_t count  = pkt->payload[v + 1];
+            if (count == 0 || count > 6 || active >= count ||
+                count != engine_.party(ws).count) return;   // cross-check engine
+            v += 2;
+            if ((size_t)count * 3 > payloadLen - v) return;
+            v += (size_t)count * 3;
+        }
+        if (payloadLen - v != 4) return;   // exactly the PP tail, no more/less
+    }
     size_t r = 0;
     uint16_t turn = ((uint16_t)pkt->payload[r] << 8) | pkt->payload[r + 1]; r += 2;
     uint8_t  result = pkt->payload[r++];

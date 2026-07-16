@@ -37,6 +37,7 @@ static constexpr uint8_t PKM_LEVEL_PC    = 0x03;  // 1 byte (box level)
 static constexpr uint8_t PKM_STATUS      = 0x04;  // 1 byte
 static constexpr uint8_t PKM_TYPE1       = 0x05;  // 1 byte
 static constexpr uint8_t PKM_TYPE2       = 0x06;  // 1 byte
+static constexpr uint8_t PKM_OT_ID       = 0x0C;  // 2 bytes BE (immutable trainer ID)
 static constexpr uint8_t PKM_EXP         = 0x0E;  // 3 bytes BE
 static constexpr uint8_t PKM_HP_EV       = 0x11;  // 2 bytes BE
 static constexpr uint8_t PKM_ATK_EV      = 0x13;  // 2 bytes BE
@@ -573,6 +574,10 @@ struct DaycarePartyInfo {
     uint8_t  dexNum;         // Pokedex number (1-151)
     uint8_t  level;          // from SAV
     uint32_t totalExp;       // from SAV (3-byte BE)
+    // Immutable-enough Gen-1 slot identity used to ensure pending daycare XP
+    // cannot move to a replacement Pokemon of the same species. Byte order is
+    // OT ID high/low followed by the two packed DV bytes.
+    uint8_t  identity[4];
     char     nickname[11];   // decoded to ASCII
     char     otName[11];     // decoded to ASCII
     uint8_t  moves[4];       // 4 move IDs from SAV
@@ -585,14 +590,19 @@ public:
     // out: array of 6 DaycarePartyInfo to fill
     // Returns party count (0-6)
     static uint8_t readParty(const uint8_t *sram, DaycarePartyInfo *out) {
+        if (!sram || !out) return 0;
         uint8_t count = sram[SAV_PARTY_COUNT];
-        if (count > 6) count = 6;
+        if (count == 0 || count > 6 ||
+            sram[SAV_SPECIES_LIST + count] != 0xFF) return 0;
 
         for (uint8_t i = 0; i < count; i++) {
             const uint8_t *pkm = &sram[SAV_POKEMON_DATA + i * SAV_POKEMON_SIZE];
 
             // Species: internal index → Pokedex number
             uint8_t internalIdx = pkm[PKM_SPECIES];
+            if (internalIdx == 0 ||
+                sram[SAV_SPECIES_LIST + i] != internalIdx ||
+                internalToDex[internalIdx] == 0) return 0;
             out[i].dexNum = internalToDex[internalIdx];
 
             // Level (party authoritative)
@@ -600,6 +610,11 @@ public:
 
             // Experience (3 bytes big-endian)
             out[i].totalExp = readBE24(&pkm[PKM_EXP]);
+
+            out[i].identity[0] = pkm[PKM_OT_ID];
+            out[i].identity[1] = pkm[PKM_OT_ID + 1];
+            out[i].identity[2] = pkm[PKM_DVS];
+            out[i].identity[3] = pkm[PKM_DVS + 1];
 
             // Nickname (Gen 1 encoding → ASCII)
             const uint8_t *nickRaw = &sram[SAV_NICKNAMES + i * SAV_NAME_SIZE];
@@ -644,12 +659,13 @@ public:
         // Read current EXP
         uint32_t currentExp = readBE24(&pkm[PKM_EXP]);
 
-        // Add daycare XP
-        uint32_t newExp = currentExp + xpGained;
-
         // Cap at level 100's EXP for this species' growth rate
         uint32_t maxExp = expForLevel(dexNum, 100);
-        if (newExp > maxExp) newExp = maxExp;
+        uint32_t newExp = currentExp;
+        if (currentExp >= maxExp || xpGained > maxExp - currentExp)
+            newExp = maxExp;
+        else
+            newExp += xpGained;
 
         // Calculate new level
         uint8_t newLevel = levelForExp(dexNum, newExp);

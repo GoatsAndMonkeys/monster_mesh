@@ -579,7 +579,7 @@ class NimbleBluetoothServerCallback : public NimBLEServerCallbacks
             // This is the passkey to be entered on peer - we pick a number >100,000 to ensure 6 digits
             passkey = random(100000, 999999);
         }
-        LOG_INFO("*** Enter passkey %d on the peer side ***", passkey);
+        LOG_INFO("Bluetooth passkey display requested");
 
         powerFSM.trigger(EVENT_BLUETOOTH_PAIR);
         meshtastic::BluetoothStatus newStatus(std::to_string(passkey));

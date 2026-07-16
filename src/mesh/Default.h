@@ -36,6 +36,8 @@
 // client and silently drops bursts > ~1 msg/sec — fatal for MMB's chunked
 // party exchange. Our private broker has no rate limits and supports the
 // full QoS spectrum.
+// Use the public hostname so devices outside the home LAN reach the same
+// broker as local clients.  TLS selects the broker's 8883 listener.
 #define default_mqtt_address "mqtt.cableclub.net"
 #define default_mqtt_username "ash"
 #define default_mqtt_password "large4meowth"

@@ -30,7 +30,13 @@
 #endif
 #include <Throttle.h>
 #include <assert.h>
+#include <stdlib.h>
 #include <utility>
+
+#if defined(ARCH_ESP32) && defined(BOARD_HAS_PSRAM) && MQTT_SUPPORTS_TLS
+#include <esp_heap_caps.h>
+#include <mbedtls/platform.h>
+#endif
 
 #include <IPAddress.h>
 #if defined(ARCH_PORTDUINO)
@@ -52,6 +58,10 @@ static uint8_t bytes[meshtastic_MqttClientProxyMessage_size + 30]; // 12 for cha
 
 static bool isMqttServerAddressPrivate = false;
 static bool isConnected = false;
+
+#if defined(ARCH_ESP32) && defined(BOARD_HAS_PSRAM) && MQTT_SUPPORTS_TLS
+static bool mqttTlsSystemAllocatorConfigured = false;
+#endif
 
 inline void onReceiveProto(char *topic, byte *payload, size_t length)
 {
@@ -314,8 +324,7 @@ bool connectPubSub(const PubSubConfig &config, PubSubClient &pubSub, Client &cli
     pubSub.setClient(client);
     pubSub.setServer(config.serverAddr.c_str(), config.serverPort);
 
-    LOG_INFO("Connecting directly to MQTT server %s, port: %d, username: %s, password: %s", config.serverAddr.c_str(),
-             config.serverPort, config.mqttUsername, config.mqttPassword);
+    LOG_INFO("Connecting directly to MQTT server %s, port: %d", config.serverAddr.c_str(), config.serverPort);
 
     // Generate node ID from nodenum for client identification
     std::string nodeId = nodeDB->getNodeId();
@@ -325,7 +334,9 @@ bool connectPubSub(const PubSubConfig &config, PubSubClient &pubSub, Client &cli
         LOG_INFO("MQTT connected");
     } else {
         isConnected = false;
-        LOG_WARN("Failed to connect to MQTT server");
+        // PubSubClient's state code distinguishes transport/TLS failures from
+        // broker-side CONNECT rejection without exposing any credentials.
+        LOG_WARN("Failed to connect to MQTT server (state=%d)", pubSub.state());
     }
     return connected;
 }
@@ -400,6 +411,27 @@ void MQTT::onReceive(char *topic, byte *payload, size_t length)
 void mqttInit()
 {
     new MQTT();
+}
+
+void mqttConfigureTlsMemory()
+{
+#if defined(ARCH_ESP32) && defined(BOARD_HAS_PSRAM) && MQTT_SUPPORTS_TLS
+    // Arduino-ESP32 initializes and adds PSRAM to the system heap before
+    // setup() runs. Its configured 4 KiB threshold makes calloc() prefer
+    // external RAM for mbedTLS's 16 KiB record buffers, with an internal-RAM
+    // fallback. Configure this once, before any TLS context is created: the
+    // mbedTLS allocator hooks are process-global and are not safe to toggle
+    // around individual connections.
+    static bool attempted = false;
+    if (attempted)
+        return;
+    attempted = true;
+
+    if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) == 0)
+        return;
+
+    mqttTlsSystemAllocatorConfigured = (mbedtls_platform_set_calloc_free(::calloc, ::free) == 0);
+#endif
 }
 
 #if HAS_NETWORKING
@@ -527,7 +559,15 @@ void MQTT::reconnect()
 #if MQTT_SUPPORTS_TLS
         if (moduleConfig.mqtt.tls_enabled) {
             mqttClientTLS.setInsecure();
+#if defined(ARCH_ESP32) && defined(BOARD_HAS_PSRAM)
+            if (mqttTlsSystemAllocatorConfigured) {
+                LOG_INFO("Use TLS-encrypted session with PSRAM-backed large buffers");
+            } else {
+                LOG_INFO("Use TLS-encrypted session");
+            }
+#else
             LOG_INFO("Use TLS-encrypted session");
+#endif
             clientConnection = &mqttClientTLS;
         } else {
             LOG_INFO("Use non-TLS-encrypted session");
@@ -542,6 +582,17 @@ void MQTT::reconnect()
             publishNodeInfo();
             sendSubscriptions();
         } else {
+#if MQTT_SUPPORTS_TLS
+            if (moduleConfig.mqtt.tls_enabled) {
+                char tlsError[128] = {};
+                const int tlsErrorCode = mqttClientTLS.lastError(tlsError, sizeof(tlsError));
+                if (tlsErrorCode < 0) {
+                    LOG_WARN("MQTT TLS connect error %d: %s", tlsErrorCode, tlsError);
+                } else {
+                    LOG_WARN("MQTT TLS connect failed without an mbedTLS error (code=%d)", tlsErrorCode);
+                }
+            }
+#endif
 #if HAS_WIFI && !defined(ARCH_PORTDUINO)
             reconnectCount++;
             LOG_ERROR("Failed to contact MQTT server directly (%d/%d)", reconnectCount, reconnectMax);

@@ -15,8 +15,13 @@
 #include "MonsterMeshFileBrowser.h"
 #include "MonsterMeshTerminal.h"
 #include "PokemonDaycare.h"
+#include "DaycareSyncTracker.h"
+#include "BattleSavQueue.h"
 #include "MonsterMeshTextBattle.h"
 #include "LordGyms.h"
+#include "concurrency/Lock.h"
+#include "concurrency/LockGuard.h"
+#include <atomic>
 #ifdef MESHTASTIC_EXCLUDE_MONSTERMESH_DUNGEON
 // Stub no-op stand-ins so MonsterMeshModule still compiles when the
 // roguelike dungeon crawler is excluded from the build. Same API surface
@@ -122,7 +127,42 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     bool     dungeonActive_        = false;
     uint32_t lastDungeonRenderMs_  = 0;
 
-    bool textBattleActive_   = false;
+    // Validated beacons arrive on the router callback while daycare state is
+    // owned by runOnce. Queue value copies so apply/commit cannot race an
+    // arrival event's pending-XP increment.
+    static constexpr uint8_t DAYCARE_BEACON_QUEUE_CAPACITY = 8;
+    concurrency::Lock daycareBeaconQueueLock_;
+    DaycareBeacon daycareBeaconQueue_[DAYCARE_BEACON_QUEUE_CAPACITY] = {};
+    uint8_t daycareBeaconQueueHead_ = 0;
+    uint8_t daycareBeaconQueueTail_ = 0;
+    uint8_t daycareBeaconQueueCount_ = 0;
+    bool enqueueDaycareBeacon(const DaycareBeacon &beacon);
+    bool dequeueDaycareBeacon(DaycareBeacon &beacon);
+    std::atomic<bool> pendingDaycareForceEvent_{false};
+    std::atomic<bool> pendingDaycareForceBeacon_{false};
+
+    // LVGL callbacks run on a different task from runOnce(), which owns and
+    // mutates PokemonDaycare. Publish a value snapshot instead of exposing
+    // daycare's live arrays/references across threads.
+    static constexpr uint8_t DAYCARE_UI_MAX_NEIGHBORS = 16;
+    struct DaycareUiSnapshot {
+        bool active = false;
+        uint64_t achievementFlags = 0;
+        uint8_t neighborCount = 0;
+        DaycareNeighborPokemon neighbors[DAYCARE_UI_MAX_NEIGHBORS] = {};
+        uint32_t neighborLastSeen[DAYCARE_UI_MAX_NEIGHBORS] = {};
+        bool mmbCapable[DAYCARE_UI_MAX_NEIGHBORS] = {};
+        DaycareEvent lastEvent = {};
+        uint32_t lastEventTimeMs = 0;
+        // Per-Pokemon Kanto trips, pre-formatted in the owner task so the LVGL
+        // status path never reads live journey state (finding-7 snapshot rule).
+        char kantoTrips[256] = {};
+    };
+    concurrency::Lock daycareUiSnapshotLock_;
+    DaycareUiSnapshot daycareUiSnapshot_ = {};
+    void refreshDaycareUiSnapshot();
+
+    std::atomic<bool> textBattleActive_{false};
     bool textBattleStartReq_ = false;  // LVGL→runOnce flag to start a local fight
     char fightTargetShortName_[5] = {};  // 4-char short name for `fight N` by-peer; empty = random pick
     bool fightSkipPeers_ = false;        // set by fight 0: use random trainer, skip neighbor pick
@@ -162,19 +202,30 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     // confirmed MonsterMesh PVP peers. mmb uses this to exclude daycare-only
     // neighbors (Pocket Pikachu etc.) that can't fight live PVP.
     static constexpr uint8_t MAX_MMB_CAPABLE = 16;
+    mutable concurrency::Lock mmbCapableLock_;
     uint32_t mmbCapableNodes_[MAX_MMB_CAPABLE] = {};
     uint8_t  mmbCapableCount_ = 0;
 
     void addMmbCapableNode(uint32_t nodeId) {
+        concurrency::LockGuard guard(&mmbCapableLock_);
         for (uint8_t i = 0; i < mmbCapableCount_; ++i)
             if (mmbCapableNodes_[i] == nodeId) return;
         if (mmbCapableCount_ < MAX_MMB_CAPABLE)
             mmbCapableNodes_[mmbCapableCount_++] = nodeId;
     }
     bool isMmbCapable(uint32_t nodeId) const {
+        concurrency::LockGuard guard(&mmbCapableLock_);
         for (uint8_t i = 0; i < mmbCapableCount_; ++i)
             if (mmbCapableNodes_[i] == nodeId) return true;
         return false;
+    }
+    uint8_t takeMmbCapableNodes(uint32_t out[MAX_MMB_CAPABLE]) {
+        concurrency::LockGuard guard(&mmbCapableLock_);
+        const uint8_t count = mmbCapableCount_;
+        memcpy(out, mmbCapableNodes_, count * sizeof(out[0]));
+        memset(mmbCapableNodes_, 0, sizeof(mmbCapableNodes_));
+        mmbCapableCount_ = 0;
+        return count;
     }
 
     // ── MMG gym ladder ─────────────────────────────────────────────────────
@@ -196,18 +247,19 @@ class MonsterMeshModule : public SinglePortModule, public concurrency::OSThread
     bool      bbsLadderBulkActive_     = false; // we're driving the bulk path
     bool      bbsLadderStartPending_   = false; // both bulk packets in; runOnce kicks off battle 0
 
-    bool emulatorActive_     = false;
+    std::atomic<bool> emulatorActive_{false};
     bool terminalActive_     = false;
     uint8_t brightness_      = 255;
-    volatile bool pendingSave_ = false;  // deferred save — done in runOnce() not callback
-    bool browserActive_      = false;
+    std::atomic<bool> pendingSave_{false};  // cross-core deferred save claim
+    std::atomic<uint32_t> nextEmuSaveRetryMs_{0};
+    std::atomic<bool> browserActive_{false};
     bool setupDone_          = false;
     bool kbObserverRegistered_ = false;
     uint8_t setupRetries_ = 0;
     static constexpr uint8_t MAX_SETUP_RETRIES = 10;
     const char *setupStatus_ = "waiting...";
     char setupStatusBuf_[64] = {};
-    bool emuInitialized_  = false;
+    std::atomic<bool> emuInitialized_{false};
 
     // Emulator FreeRTOS task
     TaskHandle_t emuTaskHandle_ = nullptr;
@@ -265,7 +317,7 @@ public:
     // suppresses LVGL flush, clears the screen, builds a CPU rival party,
     // and calls textBattle_.startLocal().
     void requestLocalTextBattle() { textBattleStartReq_ = true; }
-    bool isTextBattleActive() const { return textBattleActive_; }
+    bool isTextBattleActive() const { return textBattleActive_.load(); }
 
     // L3: request a gym battle. gymIdx 0..7, trainerIdx 0..4 (4 = leader).
     // Sets the same kick-off flags as a local battle but flagged as a gym
@@ -351,14 +403,42 @@ public:
     // Set true by LVGL thread when terminal opens; consumed by runOnce on LoRa
     // thread which loads the party from SAV. Keeps the LVGL thread free of
     // SD I/O so the panel paints immediately.
-    volatile bool terminalNeedsParty_ = false;
+    std::atomic<bool> terminalNeedsParty_{false};
+    // Reloads requested after a verified SAV write are strict: they target
+    // that exact image, never fall back to stale WRAM, and retry with backoff
+    // before another battle may start.
+    std::atomic<bool> terminalPartyReloadStrict_{false};
+    std::atomic<bool> terminalSavOwnerReady_{false};
+    // A Boolean alone cannot distinguish a legitimate re-publication from a
+    // stale writer racing a newer invalidation. Gates therefore require the
+    // published generation to match the current owner generation as well.
+    std::atomic<uint32_t> terminalSavOwnerGeneration_{0};
+    std::atomic<uint32_t> terminalSavOwnerPublishedGeneration_{UINT32_MAX};
+    uint32_t nextTerminalPartyLoadRetryMs_ = 0;
+    char strictTerminalReloadSavPath_[256] = {};
+    void requestTerminalPartyLoad() {
+        invalidateTerminalSavOwner();
+        terminalNeedsParty_.store(true);
+    }
+    void requestStrictTerminalPartyReload(const char *savPath);
+    uint32_t invalidateTerminalSavOwner();
+    bool republishTerminalSavOwnerIfUnchanged(uint32_t generation);
+    bool terminalSavOwnerIsReady() const;
 
     // Set by LoRa-thread runOnce after a successful SAV load. The LVGL
     // keypad indev callback (which runs on the LVGL thread) consumes this
     // and pushes the party into terminal_, so all LVGL widget ops happen
     // on the LVGL thread.
     Gen1Party terminalStagedParty_ = {};
-    volatile bool terminalPartyStaged_ = false;
+    // Generation of the durable SAV image represented by the staging slot.
+    // The LVGL consumer may publish only this exact generation; it must not
+    // attach old staged bytes to a newer invalidation generation.
+    std::atomic<uint32_t> terminalStagedPartyGeneration_{UINT32_MAX};
+    std::atomic<bool> terminalPartyStaged_{false};
+    // LVGL could consume a valid slot just as another generation invalidates
+    // it. runOnce owns the retry decision so it can wait for pending XP/save
+    // work instead of hammering SD from the UI task.
+    std::atomic<bool> terminalStagedPublishRetryNeeded_{false};
 
     // Battle-end LVGL cleanup: set true from the LoRa-thread runOnce when
     // a battle wraps up. tryConsumeStagedParty (LVGL thread) drains it and
@@ -384,22 +464,28 @@ public:
     // tick into stagedXp_, and tryConsumeStagedParty (LVGL thread) flushes
     // that into terminal_.creditBattleXp. Keeps SAV writes off the LoRa
     // thread.
-    volatile bool pendingXpAwardCb_ = false;
-    uint32_t      stagedXp_[6]      = {};
+    std::atomic<bool> pendingXpAwardCb_{false};
+    std::atomic<uint32_t> stagedXp_[6] = {};
 
-    // Battle XP write-back to /<rom>.sav on the SD card. Captured at SAV
-    // load, the path lets us write back AFTER a battle ends without
-    // re-scanning the SD card. Gated on !emulatorActive_ + no cart loaded
-    // so we never trample emu state mid-game.
+    // Mutable terminal context for the most recently loaded SAV.
     char          loadedSavPath_[256] = {};
-    volatile bool pendingSavWriteBack_ = false;
+    uint8_t       loadedSavPartyCount_ = 0;
+    uint8_t       loadedSavPartySpecies_[7] = {};
+
+    // The active battle freezes its exact SAV path + slot identities. Earned
+    // XP moves into a per-owner queue so a deferred retry can never follow a
+    // later ROM/party load to another save.
+    monstermesh::BattleSavOwner activeBattleSavOwner_ = {};
+    monstermesh::BattleSavQueue battleSavQueue_;
+    std::atomic<bool> pendingSavWriteBack_{false};
+    uint32_t      nextSavWriteBackRetryMs_ = 0;
 
     // Event-driven daycare-XP → .sav flush. Tracks the last daycare event
     // we've synced; when daycare.getLastEventTime() advances past it (a
     // new event = potential XP change) we flush the .sav once. SD I/O
     // only happens when XP actually moves — typically a couple times per
     // hour at most.
-    uint32_t      lastSavSyncedEventTime_ = 0;
+    DaycareSyncTracker daycareSavSync_;
 
     // T4: simple challenge handshake — sender stores who they're awaiting
     // a reply from, and handleReceived parses any DM from that peer for
@@ -542,8 +628,8 @@ public:
     // drained in runOnce on the LoRa thread. Keeps SD I/O off the LVGL thread.
     // checkOut: stop daycare while emulator/browser owns the SD bus.
     // checkin:  reload party from the (possibly updated) SAV and re-checkin.
-    volatile bool pendingAutoCheckOut_ = false;
-    volatile bool pendingAutoCheckin_  = false;
+    std::atomic<bool> pendingAutoCheckOut_{false};
+    std::atomic<bool> pendingAutoCheckin_{false};
 
     // True when the user has scrolled up to the virtual [Eject Cart] row at
     // the top of the browser (only visible when emuInitialized_ is true).
@@ -553,7 +639,7 @@ public:
     // LoRa thread which then runs RadioLibInterface::startReceive(). The
     // startReceive call goes through setStandby/checkNotification which
     // hangs on the LVGL thread.
-    volatile bool radioNeedsRx_ = false;
+    std::atomic<bool> radioNeedsRx_{false};
 
     // Auto-save tracking
     uint8_t prevBattle_ = 0;
@@ -564,7 +650,7 @@ public:
     // finished any in-progress runFrame + auto-save before we issue our
     // own SAV flush + screen wipe. Avoids the spiLock collisions between
     // emu task SD writes and the LVGL thread.
-    volatile bool emuTaskIdle_ = true;
+    std::atomic<bool> emuTaskIdle_{true};
     // Render task idle signal — set by renderTaskLoop when it's NOT
     // currently inside blitFrame. ALT-exit polls this too so the LVGL
     // thread's fillScreen doesn't race with a mid-blit TFT push (both
@@ -718,12 +804,23 @@ public:
     // on exit. BLE is independent and stays on.
     void enterEmulatorMode();
     void exitEmulatorMode();
-    bool radioParked_ = false;  // tracks current park state to avoid double-toggle
+    std::atomic<bool> radioParked_{false};  // tracks current park state to avoid double-toggle
     bool wifiBooted_  = false;  // deferred WiFi: false until first auto-init or emu-exit
 
     // File browser
     void renderBrowser();
     void launchROM(const char *path);
+    void launchROMNow(const char *path);
+    enum class RomLaunchState : uint8_t { IDLE, QUEUED, CLAIMED };
+    // Protected by s_mmRomLaunchMux in MonsterMeshModule.cpp. The explicit
+    // CLAIMED state linearizes browser cancellation against a committed load.
+    RomLaunchState romLaunchState_ = RomLaunchState::IDLE;
+    bool queueRomLaunch(const char *path, size_t pathLen);
+    bool claimQueuedRomLaunch(char *pathOut, size_t pathCapacity);
+    bool claimImmediateRomLaunch();
+    void completeRomLaunch();
+    bool cancelPendingRomLaunch(bool closeBrowser);
+    char pendingRomLaunchPath_[256] = {};
 
     // ── Deferred LVGL work from LoRa/runOnce threads ───────────────────────
     // All LVGL API calls (printLine, onBbsReply, etc.) must run on the LVGL

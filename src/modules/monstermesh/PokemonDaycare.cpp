@@ -2,6 +2,7 @@
 // NOT wired into build yet — standalone for validation.
 
 #include "PokemonDaycare.h"
+#include "AtomicSdFile.h"
 #include "DaycareData.h"
 #include "FSCommon.h"
 #include <string.h>
@@ -10,7 +11,7 @@
 
 // ── Timing constants ────────────────────────────────────────────────────────
 
-static constexpr uint32_t EVENT_INTERVAL_MS     = 300000;    // 5 min (testing)
+static constexpr uint32_t EVENT_INTERVAL_MS     = 3600000;   // 1 hour
 static constexpr uint32_t BEACON_INTERVAL_MS    = 900000;    // 15 min — light on the airwaves
 static constexpr uint32_t NEIGHBOR_TIMEOUT_MS   = 7200000;   // 2 hours = neighbor gone (generous for LoRa)
 static constexpr uint32_t DECAY_INTERVAL_MS     = 86400000;  // 1 day
@@ -26,23 +27,109 @@ void PokemonDaycare::init() {
     memset(&state_, 0, sizeof(state_));
     state_.magic = DaycareState::MAGIC;
     active_ = false;
+    runtimeStateLoaded_ = false;
+    savOwner_ = {};
+    savOwnerLoaded_ = false;
+    savOwnerLegacy_ = false;
+    clearPendingFlush();
     neighborCount_ = 0;
+}
+
+void PokemonDaycare::clearPendingFlush() {
+    // Avoid materializing a large zeroed aggregate on the ESP32 loopTask
+    // stack. PendingFlush is a POD persistence snapshot.
+    memset(&pendingFlush_, 0, sizeof(pendingFlush_));
+}
+
+bool PokemonDaycare::hasPendingXp() const {
+    // Scan every persisted slot, not only the current party count. A failed
+    // re-check-in must never hide XP merely because the observed party shrank.
+    for (uint8_t i = 0; i < 6; i++) {
+        if (state_.pokemon[i].totalXpGained != 0) return true;
+    }
+    return false;
+}
+
+bool PokemonDaycare::eventDue(uint32_t nowMs) const {
+    return active_ && state_.partyCount != 0 &&
+           nowMs - state_.lastEventMs >= EVENT_INTERVAL_MS;
+}
+
+uint8_t PokemonDaycare::effectiveLevel(uint8_t partyIdx) const {
+    if (partyIdx >= state_.partyCount || partyIdx >= 6) return 0;
+    const auto &pkmn = state_.pokemon[partyIdx];
+    uint32_t totalExp = pkmn.savExp;
+    if (pkmn.totalXpGained > UINT32_MAX - totalExp) {
+        totalExp = UINT32_MAX;
+    } else {
+        totalExp += pkmn.totalXpGained;
+    }
+    return levelForExp(pkmn.speciesDex, totalExp);
+}
+
+void PokemonDaycare::addPendingXp(uint8_t partyIdx, uint16_t requestedXp) {
+    if (partyIdx >= state_.partyCount || partyIdx >= 6 || requestedXp == 0) return;
+
+    auto &pkmn = state_.pokemon[partyIdx];
+    if (pkmn.speciesDex == 0 || pkmn.speciesDex > 151) return;
+
+    uint16_t xpToAdd = requestedXp > 200 ? 200 : requestedXp;
+    uint8_t oldLevel = effectiveLevel(partyIdx);
+
+    uint32_t maxExp = expForLevel(pkmn.speciesDex, 100);
+    uint32_t currentTotal = pkmn.savExp;
+    if (pkmn.totalXpGained > UINT32_MAX - currentTotal) {
+        currentTotal = UINT32_MAX;
+    } else {
+        currentTotal += pkmn.totalXpGained;
+    }
+    if (currentTotal >= maxExp) {
+        xpToAdd = 0;
+    } else if (xpToAdd > maxExp - currentTotal) {
+        xpToAdd = static_cast<uint16_t>(maxExp - currentTotal);
+    }
+
+    pkmn.totalXpGained += xpToAdd;
+    uint8_t newLevel = effectiveLevel(partyIdx);
+    if (newLevel > oldLevel) {
+        uint16_t gained = static_cast<uint16_t>(newLevel - oldLevel);
+        if (gained > static_cast<uint16_t>(UINT16_MAX - pkmn.totalLevelsGained)) {
+            pkmn.totalLevelsGained = UINT16_MAX;
+        } else {
+            pkmn.totalLevelsGained += gained;
+        }
+    }
 }
 
 // ── Check in from SRAM ─────────────────────────────────────────────────────
 
-void PokemonDaycare::checkIn(const uint8_t *sram,
-                              const char *shortName, const char *gameName) {
-    // Try to load saved daycare state first
-    if (!loadState() || state_.magic != DaycareState::MAGIC) {
-        init();
+__attribute__((noinline)) bool PokemonDaycare::checkIn(
+    const uint8_t *sram, const char *shortName, const char *gameName,
+    const char *savPath) {
+    if (!sram || !savPath) return false;
+    // Load persisted counters once per runtime. Subsequent check-ins must keep
+    // the current in-memory flush baseline even if the auxiliary LittleFS file
+    // was stale or its most recent best-effort write failed.
+    if (!runtimeStateLoaded_) {
+        if (!loadState() || state_.magic != DaycareState::MAGIC) init();
+        runtimeStateLoaded_ = true;
     }
-
     // Read party directly from the Game Boy SRAM
     DaycarePartyInfo party[6];
     uint8_t count = DaycareSavPatcher::readParty(sram, party);
+    if (count == 0 || count > 6 ||
+        !ensureSavBinding(savPath, party, count)) {
+        active_ = false;
+        return false;
+    }
+    clearPendingFlush();
+    if (!reconcileFlushJournal(savOwner_.savPath, party, count)) {
+        active_ = false;
+        return false;
+    }
 
     state_.partyCount = count;
+    for (uint8_t i = 0; i < 6; i++) travelerIdx_[i] = NO_TRAVELER;
     for (uint8_t i = 0; i < count; i++) {
         // Only reset species-specific data if the party changed
         if (state_.pokemon[i].speciesDex != party[i].dexNum) {
@@ -58,6 +145,12 @@ void PokemonDaycare::checkIn(const uint8_t *sram,
         state_.pokemon[i].nickname[10] = '\0';
 
         state_.pokemon[i].mood = MOOD_CONTENT;
+
+        // Attach this individual Pokemon to its own Kanto journey. Keyed by
+        // identity (species + nickname + OT), so a mon swapped out and back in
+        // resumes its trip instead of restarting — even though the slot data
+        // above was wiped on a species change.
+        attachJourney(i, party[i].dexNum, party[i].nickname, party[i].otName);
     }
 
     strncpy(shortName_, shortName, 4);
@@ -68,31 +161,52 @@ void PokemonDaycare::checkIn(const uint8_t *sram,
     active_ = true;
     state_.lastEventMs = millis();
     state_.lastBeaconMs = 0;
+    return true;
 }
 
 // ── Legacy check-in for tests (no SRAM) ────────────────────────────────────
 
-void PokemonDaycare::checkIn(const uint8_t *partySpeciesDex,
-                              const uint8_t *partyLevels,
-                              const char nicknames[][11],
-                              uint8_t count,
-                              const char *shortName,
-                              const char *gameName) {
-    if (count > 6) count = 6;
+__attribute__((noinline)) bool PokemonDaycare::checkIn(
+    const uint8_t *partySpeciesDex, const uint8_t *partyLevels,
+    const char nicknames[][11], uint8_t count, const char *shortName,
+    const char *gameName, const uint32_t *partyExp,
+    const uint8_t partyIdentity[][4], const char *savPath) {
+    if (!partySpeciesDex || !partyIdentity || !savPath ||
+        count == 0 || count > 6) return false;
 
-    if (!loadState() || state_.magic != DaycareState::MAGIC) {
-        init();
+    if (!runtimeStateLoaded_) {
+        if (!loadState() || state_.magic != DaycareState::MAGIC) init();
+        runtimeStateLoaded_ = true;
+    }
+    DaycarePartyInfo observed[6] = {};
+    for (uint8_t i = 0; i < count; ++i) {
+        observed[i].dexNum = partySpeciesDex[i];
+        observed[i].level = partyLevels ? partyLevels[i] : 0;
+        observed[i].totalExp = partyExp ? partyExp[i]
+            : (partyLevels ? expForLevel(partySpeciesDex[i], partyLevels[i]) : 0);
+        memcpy(observed[i].identity, partyIdentity[i],
+               sizeof(observed[i].identity));
+    }
+    if (!ensureSavBinding(savPath, observed, count)) {
+        active_ = false;
+        return false;
+    }
+    clearPendingFlush();
+    if (!reconcileFlushJournal(savOwner_.savPath, observed, count)) {
+        active_ = false;
+        return false;
     }
 
     state_.partyCount = count;
+    for (uint8_t i = 0; i < 6; i++) travelerIdx_[i] = NO_TRAVELER;
     for (uint8_t i = 0; i < count; i++) {
         if (state_.pokemon[i].speciesDex != partySpeciesDex[i]) {
             state_.pokemon[i] = {};
             state_.pokemon[i].speciesDex = partySpeciesDex[i];
         }
         state_.pokemon[i].savLevel = partyLevels ? partyLevels[i] : 0;
-        state_.pokemon[i].savExp = partyLevels
-            ? expForLevel(partySpeciesDex[i], partyLevels[i]) : 0;
+        state_.pokemon[i].savExp = partyExp ? partyExp[i]
+            : (partyLevels ? expForLevel(partySpeciesDex[i], partyLevels[i]) : 0);
 
         if (nicknames) {
             strncpy(state_.pokemon[i].nickname, nicknames[i], 10);
@@ -101,6 +215,8 @@ void PokemonDaycare::checkIn(const uint8_t *partySpeciesDex,
             state_.pokemon[i].nickname[0] = '\0';
         }
         state_.pokemon[i].mood = MOOD_CONTENT;
+
+        attachJourney(i, partySpeciesDex[i], state_.pokemon[i].nickname, "");
     }
 
     strncpy(shortName_, shortName, 4);
@@ -111,56 +227,246 @@ void PokemonDaycare::checkIn(const uint8_t *partySpeciesDex,
     active_ = true;
     state_.lastEventMs = millis();
     state_.lastBeaconMs = 0;
+    return true;
 }
 
-// ── Check out — write XP back to SRAM ──────────────────────────────────────
+// ── Transactional XP flush / terminal checkout ─────────────────────────────
 
-void PokemonDaycare::checkOut(uint8_t *sram) {
-    active_ = false;
+bool PokemonDaycare::applyPendingXp(const char *savPath, uint8_t *sram) {
+    if (!sram || !hasPendingXp() || !isBoundToSav(savPath)) return false;
 
-    if (sram) {
-        // Collect XP gained, dex numbers, and pre-patch levels for the patcher.
-        uint8_t  dexNums[6]   = {};
-        uint32_t xpGained[6]  = {};
-        uint8_t  oldLevels[6] = {};
-        uint8_t  n = state_.partyCount < 6 ? state_.partyCount : 6;
-        for (uint8_t i = 0; i < n; i++) {
-            dexNums[i]   = state_.pokemon[i].speciesDex;
-            xpGained[i]  = state_.pokemon[i].totalXpGained;
-            oldLevels[i] = sram[SAV_POKEMON_DATA + i * SAV_POKEMON_SIZE
-                                + PKM_LEVEL_PARTY];
+    uint8_t partyCount = state_.partyCount < 6 ? state_.partyCount : 6;
+    DaycarePartyInfo before[6] = {};
+    if (DaycareSavPatcher::readParty(sram, before) != partyCount ||
+        !partyMatchesSavOwner(before, partyCount)) return false;
+    for (uint8_t i = 0; i < partyCount; i++) {
+        if (state_.pokemon[i].speciesDex == 0 ||
+            state_.pokemon[i].speciesDex != before[i].dexNum) {
+            return false;
         }
-
-        // Patch SRAM: add XP, update levels, recalc stats, fix checksum.
-        DaycareSavPatcher::checkout(sram, dexNums, xpGained, state_.partyCount);
-
-        // Teach the level-up moves that come with those daycare level-ups.  The
-        // game's own learn logic is bypassed by the direct SRAM patch, so do it
-        // here: empty move slots are filled automatically.  Because check-out
-        // runs at ROM-launch with no UI to prompt the player, a Pokemon that
-        // already knows 4 moves auto-forgets its weakest to make room (matches
-        // the "drop the weakest" rule).
-        bool taughtAny = false;
-        for (uint8_t i = 0; i < n; i++) {
-            if (xpGained[i] == 0) continue;
-            uint8_t newLevel = sram[SAV_POKEMON_DATA + i * SAV_POKEMON_SIZE
-                                    + PKM_LEVEL_PARTY];
-            DaycareSavPatcher::MoveLearnResult res;
-            DaycareSavPatcher::learnMoves(sram, i, dexNums[i], oldLevels[i],
-                                          newLevel, res);
-            if (res.learnedCount) taughtAny = true;
-            for (uint8_t k = 0; k < res.pendingCount; k++) {
-                uint8_t slot = DaycareSavPatcher::weakestMoveSlot(sram, i);
-                DaycareSavPatcher::setMove(sram, i, slot, res.pending[k]);
-                taughtAny = true;
-            }
-        }
-        // checkout() already fixed the checksum; re-fix since learnMoves /
-        // setMove mutated move and PP bytes afterwards.
-        if (taughtAny) DaycareSavPatcher::fixChecksum(sram);
     }
 
-    saveState();
+    // A failed persistence attempt retains its original snapshot. New XP may
+    // accrue while background daycare remains active, but it belongs to the
+    // next transaction and must not be cleared by this one.
+    if (!pendingFlush_.staged) {
+        pendingFlush_.partyCount = partyCount;
+        for (uint8_t i = 0; i < partyCount; i++) {
+            pendingFlush_.xp[i] = state_.pokemon[i].totalXpGained;
+            pendingFlush_.species[i] = state_.pokemon[i].speciesDex;
+            memcpy(pendingFlush_.identity[i], before[i].identity,
+                   sizeof(pendingFlush_.identity[i]));
+            pendingFlush_.baseExp[i] = before[i].totalExp;
+        }
+        memcpy(pendingFlush_.savPath, savOwner_.savPath,
+               sizeof(pendingFlush_.savPath));
+        pendingFlush_.staged = true;
+    }
+
+    pendingFlush_.applied = false;
+    if (pendingFlush_.partyCount != partyCount ||
+        strcmp(pendingFlush_.savPath, savOwner_.savPath) != 0) return false;
+
+    bool stagedAny = false;
+    for (uint8_t i = 0; i < partyCount; i++) {
+        if (pendingFlush_.species[i] != state_.pokemon[i].speciesDex ||
+            memcmp(pendingFlush_.identity[i], savOwner_.identity[i],
+                   sizeof(pendingFlush_.identity[i])) != 0 ||
+            pendingFlush_.xp[i] > state_.pokemon[i].totalXpGained) {
+            return false;
+        }
+        stagedAny |= pendingFlush_.xp[i] != 0;
+    }
+    if (!stagedAny) return false;
+
+    // If a prior post-commit rollback failed, the real path may already expose
+    // this exact prepared image.  Recognize it rather than adding the frozen
+    // snapshot a second time.  Any other baseline drift is ambiguous and must
+    // be rejected for a later check-in/reconciliation.
+    bool haveWrittenSnapshot = false;
+    bool alreadyWritten = true;
+    for (uint8_t i = 0; i < partyCount; ++i) {
+        if (pendingFlush_.xp[i] != 0 && pendingFlush_.writtenExp[i] != 0)
+            haveWrittenSnapshot = true;
+        if (before[i].totalExp != pendingFlush_.writtenExp[i])
+            alreadyWritten = false;
+    }
+    if (haveWrittenSnapshot && alreadyWritten) {
+        pendingFlush_.applied = true;
+        return saveFlushJournal(FlushJournalPhase::PREPARED) &&
+               saveFlushJournal(FlushJournalPhase::PREPARED);
+    }
+    for (uint8_t i = 0; i < partyCount; ++i) {
+        if (before[i].totalExp != pendingFlush_.baseExp[i]) return false;
+    }
+
+    if (!DaycareSavPatcher::checkout(sram, pendingFlush_.species,
+                                     pendingFlush_.xp, partyCount)) {
+        return false;
+    }
+
+    // Direct SRAM patching bypasses the game's normal level-up move flow.
+    // Fill empty slots, then apply the existing non-interactive weakest-move
+    // policy for any remaining moves.
+    bool taughtAny = false;
+    for (uint8_t i = 0; i < partyCount; i++) {
+        if (pendingFlush_.xp[i] == 0) continue;
+        uint8_t newLevel = sram[SAV_POKEMON_DATA + i * SAV_POKEMON_SIZE
+                                + PKM_LEVEL_PARTY];
+        DaycareSavPatcher::MoveLearnResult res;
+        DaycareSavPatcher::learnMoves(sram, i, pendingFlush_.species[i],
+                                      before[i].level, newLevel, res);
+        if (res.learnedCount) taughtAny = true;
+        for (uint8_t k = 0; k < res.pendingCount; k++) {
+            uint8_t slot = DaycareSavPatcher::weakestMoveSlot(sram, i);
+            DaycareSavPatcher::setMove(sram, i, slot, res.pending[k]);
+            taughtAny = true;
+        }
+    }
+    if (taughtAny) DaycareSavPatcher::fixChecksum(sram);
+
+    DaycarePartyInfo after[6] = {};
+    if (DaycareSavPatcher::readParty(sram, after) != partyCount) return false;
+    for (uint8_t i = 0; i < partyCount; i++) {
+        if (after[i].dexNum != pendingFlush_.species[i] ||
+            memcmp(after[i].identity, pendingFlush_.identity[i],
+                   sizeof(after[i].identity)) != 0) return false;
+        pendingFlush_.writtenExp[i] = after[i].totalExp;
+        pendingFlush_.writtenLevel[i] = after[i].level;
+    }
+    pendingFlush_.applied = true;
+    // Persist the counters that the PREPARED journal describes before the
+    // caller can promote the SAV.  Without this ordering, a reset after the
+    // journal write but before the next periodic daycare autosave could load
+    // an older state with no pending XP.  The journal recovery path below is
+    // still able to reconstruct the snapshot if this primary later corrupts
+    // and LittleFS falls back to its older .bak.
+    if (!saveState() || !saveState()) {
+        pendingFlush_.applied = false;
+        return false;
+    }
+    // Persist the exact prepared snapshot before the caller can promote the
+    // patched SAV.  This journal closes the reset window between SD rename and
+    // daycare.dat commit and is idempotently reconciled on the next check-in.
+    if (!saveFlushJournal(FlushJournalPhase::PREPARED) ||
+        !saveFlushJournal(FlushJournalPhase::PREPARED)) {
+        pendingFlush_.applied = false;
+        return false;
+    }
+    return true;
+}
+
+bool PokemonDaycare::commitXpFlush(const char *savPath,
+                                   const uint8_t *writtenSram) {
+    if (!writtenSram || !pendingFlush_.staged || !pendingFlush_.applied ||
+        !isBoundToSav(savPath) ||
+        strcmp(pendingFlush_.savPath, savOwner_.savPath) != 0) return false;
+
+    uint8_t partyCount = state_.partyCount < 6 ? state_.partyCount : 6;
+    if (pendingFlush_.partyCount != partyCount) return false;
+
+    DaycarePartyInfo written[6] = {};
+    if (DaycareSavPatcher::readParty(writtenSram, written) != partyCount ||
+        !partyMatchesSavOwner(written, partyCount)) return false;
+
+    // Validate the whole checked-in party before mutating any daycare state.
+    // This makes commit all-or-nothing even if the wrong buffer is supplied.
+    for (uint8_t i = 0; i < partyCount; i++) {
+        if (state_.pokemon[i].speciesDex != pendingFlush_.species[i] ||
+            state_.pokemon[i].totalXpGained < pendingFlush_.xp[i] ||
+            written[i].dexNum != pendingFlush_.species[i] ||
+            memcmp(written[i].identity, pendingFlush_.identity[i],
+                   sizeof(written[i].identity)) != 0 ||
+            written[i].totalExp != pendingFlush_.writtenExp[i] ||
+            written[i].level != pendingFlush_.writtenLevel[i]) {
+            return false;
+        }
+    }
+
+    // Once the caller has verified the promoted SD image, mark that fact
+    // durably before changing in-memory counters.  A reboot can then finish
+    // this exact commit without guessing from unrelated gameplay EXP.
+    if (!saveFlushJournal(FlushJournalPhase::PROMOTED)) return false;
+
+    // Only these three per-party fields change below. Keeping a compact
+    // rollback snapshot avoids placing the 1096-byte DaycareState on the
+    // small ESP32 loopTask stack.
+    struct PartyProgress {
+        uint32_t savExp;
+        uint32_t totalXpGained;
+        uint8_t savLevel;
+    } previous[6] = {};
+    for (uint8_t i = 0; i < partyCount; ++i) {
+        previous[i].savExp = state_.pokemon[i].savExp;
+        previous[i].totalXpGained = state_.pokemon[i].totalXpGained;
+        previous[i].savLevel = state_.pokemon[i].savLevel;
+    }
+
+    for (uint8_t i = 0; i < partyCount; i++) {
+        auto &pkmn = state_.pokemon[i];
+        pkmn.savExp = written[i].totalExp;
+        pkmn.savLevel = written[i].level;
+        pkmn.totalXpGained -= pendingFlush_.xp[i];
+    }
+
+    // daycare.dat is part of the logical transaction.  If its verified atomic
+    // update fails, restore the old in-memory state and leave the staged XP
+    // eligible; the caller will roll the SD file back to its retained .bak.
+    if (!saveState()) {
+        for (uint8_t i = 0; i < partyCount; ++i) {
+            state_.pokemon[i].savExp = previous[i].savExp;
+            state_.pokemon[i].totalXpGained = previous[i].totalXpGained;
+            state_.pokemon[i].savLevel = previous[i].savLevel;
+        }
+        (void)saveFlushJournal(FlushJournalPhase::PREPARED);
+        return false;
+    }
+
+    clearPendingFlush();
+
+    // atomicWriteFile intentionally retains the previous state as .bak.  The
+    // first write above therefore leaves a pre-commit backup that still
+    // contains the staged XP. Rotate the identical committed state once more
+    // so both primary and backup are post-commit before deleting the only
+    // reconciliation evidence. If this redundancy write fails, the primary
+    // commit is still verified; retain the PROMOTED journal so a later
+    // check-in can safely repair either copy.
+    if (saveState()) clearFlushJournal();
+    return true;
+}
+
+bool PokemonDaycare::refreshSavBaseline(const char *savPath,
+                                        const DaycarePartyInfo *party,
+                                        uint8_t count) {
+    if (!party || count == 0 || count > 6 || count != state_.partyCount ||
+        pendingFlush_.staged || !isBoundToSav(savPath) ||
+        !partyMatchesSavOwner(party, count)) {
+        return false;
+    }
+    for (uint8_t i = 0; i < count; ++i) {
+        if (party[i].dexNum == 0 ||
+            party[i].dexNum != state_.pokemon[i].speciesDex) {
+            return false;
+        }
+    }
+
+    for (uint8_t i = 0; i < count; ++i) {
+        state_.pokemon[i].savExp = party[i].totalExp;
+        state_.pokemon[i].savLevel = party[i].level;
+    }
+
+    // Refresh both the primary and retained backup. Even if the second
+    // rotation fails, the in-memory baseline and verified primary remain
+    // usable; the next check-in also derives this baseline from the SAV.
+    if (!saveState()) return false;
+    return saveState();
+}
+
+void PokemonDaycare::checkOut(uint8_t *sram) {
+    if (sram && savOwnerLoaded_)
+        (void)applyPendingXp(savOwner_.savPath, sram);
+    active_ = false;
+    (void)saveState();
 }
 
 // ── Main tick ───────────────────────────────────────────────────────────────
@@ -207,13 +513,22 @@ void PokemonDaycare::tick(uint32_t nowMs) {
 // ── Event cycle ─────────────────────────────────────────────────────────────
 
 void PokemonDaycare::runEventCycle(uint32_t nowMs) {
-    // Increment hours for all party Pokemon
+    // Increment hours for all party Pokemon, and advance each one's personal
+    // Kanto journey a base step. Every boarding mon keeps walking its own trip.
+    static constexpr uint8_t KANTO_BASE_STEP = 10;   // progress pts / cycle
     for (uint8_t i = 0; i < state_.partyCount; i++) {
         state_.pokemon[i].totalHours++;
+        if (travelerIdx_[i] != NO_TRAVELER)
+            journeys_.advance(travelerIdx_[i], KANTO_BASE_STEP);
     }
 
-    // Generate event
+    // Propagate the local trainer identity into the event generator each cycle
+    // (restored from the pre-audit current line — the audit reconciliation
+    // dropped this call, which left generated events without the player's
+    // short/game name). Must run before generate().
     DaycareEventGen::setLocalTrainer(shortName_, gameName_);
+
+    // Generate event
     DaycareEvent evt = DaycareEventGen::generate(
         state_.pokemon, state_.partyCount,
         neighbors_, neighborCount_,
@@ -226,28 +541,15 @@ void PokemonDaycare::runEventCycle(uint32_t nowMs) {
 
     // Apply XP — uses real Gen 1 EXP curve from the SAV file
     if (evt.xp > 0 && evt.targetSpeciesIdx < state_.partyCount) {
-        auto &pkmn = state_.pokemon[evt.targetSpeciesIdx];
-
-        uint16_t xpToAdd = evt.xp;
-        if (xpToAdd > 200) xpToAdd = 200;
-
-        // Cap at level 100's total EXP
-        uint32_t maxExp = expForLevel(pkmn.speciesDex, 100);
-        uint32_t currentTotal = pkmn.savExp + pkmn.totalXpGained;
-        if (currentTotal + xpToAdd > maxExp) {
-            xpToAdd = (currentTotal >= maxExp) ? 0 : (uint16_t)(maxExp - currentTotal);
-        }
-
-        pkmn.totalXpGained += xpToAdd;
-
-        // Calculate effective level from real EXP curve
-        uint8_t oldLevel = pkmn.savLevel + pkmn.totalLevelsGained;
-        uint8_t newLevel = levelForExp(pkmn.speciesDex, pkmn.savExp + pkmn.totalXpGained);
-        if (newLevel > 100) newLevel = 100;
-        if (newLevel > oldLevel) {
-            pkmn.totalLevelsGained = newLevel - pkmn.savLevel;
-        }
+        addPendingXp(evt.targetSpeciesIdx, evt.xp);
     }
+
+    // The Pokemon featured in this cycle's event travelled the most — give its
+    // journey an extra push on top of the base step above.
+    static constexpr uint8_t KANTO_EVENT_STEP = 14;
+    if (evt.targetSpeciesIdx < state_.partyCount &&
+        travelerIdx_[evt.targetSpeciesIdx] != NO_TRAVELER)
+        journeys_.advance(travelerIdx_[evt.targetSpeciesIdx], KANTO_EVENT_STEP);
 
     // Update per-pokemon event counters
     updateEventCounters(evt, evt.targetSpeciesIdx);
@@ -468,7 +770,7 @@ void PokemonDaycare::broadcastBeacon(uint32_t nowMs) {
     beacon.partyCount = state_.partyCount;
     for (uint8_t i = 0; i < state_.partyCount && i < 6; i++) {
         beacon.pokemon[i].species = state_.pokemon[i].speciesDex;
-        beacon.pokemon[i].level = state_.pokemon[i].savLevel + state_.pokemon[i].totalLevelsGained;
+        beacon.pokemon[i].level = effectiveLevel(i);
         strncpy(beacon.pokemon[i].nickname, state_.pokemon[i].nickname, 10);
     }
 
@@ -488,16 +790,7 @@ bool PokemonDaycare::triggerArrivalEvent(const DaycareBeacon &newcomer) {
 
     // Apply XP
     if (evt.xp > 0 && evt.targetSpeciesIdx < state_.partyCount) {
-        auto &pkmn = state_.pokemon[evt.targetSpeciesIdx];
-        uint16_t xpToAdd = evt.xp;
-        if (xpToAdd > 200) xpToAdd = 200;
-        pkmn.totalXpGained += xpToAdd;
-
-        uint8_t newLevel = levelForExp(pkmn.speciesDex, pkmn.savExp + pkmn.totalXpGained);
-        if (newLevel > 100) newLevel = 100;
-        if (newLevel > pkmn.savLevel + pkmn.totalLevelsGained) {
-            pkmn.totalLevelsGained = newLevel - pkmn.savLevel;
-        }
+        addPendingXp(evt.targetSpeciesIdx, evt.xp);
     }
 
     // Store as last event
@@ -595,20 +888,557 @@ bool PokemonDaycare::isNight() const {
 // ── Save / Load (LittleFS via FSCom) ────────────────────────────────────────
 
 static constexpr const char *DAYCARE_STATE_PATH = "/monstermesh/daycare.dat";
+static constexpr const char *DAYCARE_FLUSH_PATH = "/monstermesh/daycare.flush";
+static constexpr const char *DAYCARE_OWNER_PATH = "/monstermesh/daycare.owner";
+
+static bool canonicalizeSavPath(const char *path, char out[256]) {
+    if (!path || !out) return false;
+    if (strncmp(path, "/sd/", 4) == 0) path += 3;
+    if (path[0] != '/') return false;
+    size_t len = strnlen(path, 256);
+    if (len == 0 || len >= 256) return false;
+
+    const char *segment = path + 1;
+    for (const char *p = segment;; ++p) {
+        if (*p == '/' || *p == '\0') {
+            const size_t segmentLen = static_cast<size_t>(p - segment);
+            if (segmentLen == 0 ||
+                (segmentLen == 1 && segment[0] == '.') ||
+                (segmentLen == 2 && segment[0] == '.' && segment[1] == '.')) {
+                return false;
+            }
+            if (*p == '\0') break;
+            segment = p + 1;
+        }
+    }
+    memcpy(out, path, len + 1);
+    return true;
+}
+
+template <typename T>
+static bool readExactFsObject(const char *path, T &object) {
+    auto f = FSCom.open(path, FILE_READ);
+    if (!f) return false;
+    if (f.size() != sizeof(T)) {
+        f.close();
+        return false;
+    }
+    // Callers provide zero-initialized scratch and only inspect it on success.
+    // Reading directly avoids a second object (1096 bytes for DaycareState)
+    // on the constrained loopTask stack.
+    memset(&object, 0, sizeof(object));
+    size_t read = f.read(reinterpret_cast<uint8_t *>(&object), sizeof(object));
+    f.close();
+    return read == sizeof(object);
+}
 
 bool PokemonDaycare::saveState() {
     FSCom.mkdir("/monstermesh");
-    auto f = FSCom.open(DAYCARE_STATE_PATH, FILE_O_WRITE);
-    if (!f) return false;
-    size_t written = f.write(reinterpret_cast<const uint8_t *>(&state_), sizeof(state_));
-    f.close();
-    return written == sizeof(state_);
+    bool ok = monstermesh::atomic_sd_detail::atomicWriteFile(
+        FSCom, DAYCARE_STATE_PATH,
+        reinterpret_cast<const uint8_t *>(&state_), sizeof(state_));
+    // Persist per-Pokemon Kanto journeys to their own file when changed.
+    if (journeys_.dirty()) journeys_.save();
+    return ok;
 }
 
-bool PokemonDaycare::loadState() {
-    auto f = FSCom.open(DAYCARE_STATE_PATH, FILE_O_READ);
-    if (!f) return false;
-    size_t read = f.read(reinterpret_cast<uint8_t *>(&state_), sizeof(state_));
-    f.close();
-    return read == sizeof(state_) && state_.magic == DaycareState::MAGIC;
+bool PokemonDaycare::saveSavOwner() {
+    if (!savOwnerLoaded_ || savOwnerLegacy_ ||
+        savOwner_.magic != SavOwner::MAGIC ||
+        savOwner_.partyCount == 0 || savOwner_.partyCount > 6) return false;
+    FSCom.mkdir("/monstermesh");
+    return monstermesh::atomic_sd_detail::atomicWriteFile(
+        FSCom, DAYCARE_OWNER_PATH,
+        reinterpret_cast<const uint8_t *>(&savOwner_), sizeof(savOwner_));
+}
+
+__attribute__((noinline)) bool PokemonDaycare::loadSavOwner() {
+    (void)monstermesh::atomic_sd_detail::recoverFile(FSCom, DAYCARE_OWNER_PATH);
+    auto validOwner = [](const SavOwner &owner) {
+        char canonical[256] = {};
+        if (owner.magic != SavOwner::MAGIC || owner.partyCount == 0 ||
+            owner.partyCount > 6 ||
+            !canonicalizeSavPath(owner.savPath, canonical) ||
+            strcmp(owner.savPath, canonical) != 0) return false;
+        for (uint8_t i = 0; i < owner.partyCount; ++i)
+            if (owner.species[i] == 0 || owner.species[i] > 151) return false;
+        return true;
+    };
+    auto validLegacyOwner = [](const LegacySavOwner &owner) {
+        char canonical[256] = {};
+        return owner.magic == LegacySavOwner::MAGIC &&
+               canonicalizeSavPath(owner.savPath, canonical) &&
+               strcmp(owner.savPath, canonical) == 0;
+    };
+    auto readCandidate = [&]() {
+        SavOwner candidate = {};
+        if (readExactFsObject(DAYCARE_OWNER_PATH, candidate) &&
+            validOwner(candidate)) {
+            savOwner_ = candidate;
+            savOwnerLoaded_ = true;
+            savOwnerLegacy_ = false;
+            return true;
+        }
+        LegacySavOwner legacy = {};
+        if (readExactFsObject(DAYCARE_OWNER_PATH, legacy) &&
+            validLegacyOwner(legacy)) {
+            savOwner_ = {};
+            memcpy(savOwner_.savPath, legacy.savPath,
+                   sizeof(savOwner_.savPath));
+            savOwnerLoaded_ = true;
+            savOwnerLegacy_ = true;
+            return true;
+        }
+        return false;
+    };
+
+    bool valid = readCandidate();
+    if (!valid &&
+        monstermesh::atomic_sd_detail::restorePreviousFile(
+            FSCom, DAYCARE_OWNER_PATH)) {
+        valid = readCandidate();
+    }
+    return valid;
+}
+
+void PokemonDaycare::setSavBinding(const char *canonicalPath,
+                                   const DaycarePartyInfo *party,
+                                   uint8_t count) {
+    // SavOwner is POD; avoid a 292-byte aggregate temporary on loopTask.
+    memset(&savOwner_, 0, sizeof(savOwner_));
+    savOwner_.magic = SavOwner::MAGIC;
+    memcpy(savOwner_.savPath, canonicalPath, strlen(canonicalPath) + 1);
+    savOwner_.partyCount = count;
+    for (uint8_t i = 0; i < count; ++i) {
+        savOwner_.species[i] = party[i].dexNum;
+        memcpy(savOwner_.identity[i], party[i].identity,
+               sizeof(savOwner_.identity[i]));
+    }
+    savOwnerLoaded_ = true;
+    savOwnerLegacy_ = false;
+}
+
+bool PokemonDaycare::partyMatchesSavOwner(const DaycarePartyInfo *party,
+                                          uint8_t count) const {
+    if (!party || !savOwnerLoaded_ || savOwnerLegacy_ ||
+        count == 0 || count > 6 || count != savOwner_.partyCount) return false;
+    for (uint8_t i = 0; i < count; ++i) {
+        if (party[i].dexNum == 0 || party[i].dexNum > 151 ||
+            party[i].dexNum != savOwner_.species[i] ||
+            memcmp(party[i].identity, savOwner_.identity[i],
+                   sizeof(party[i].identity)) != 0) return false;
+    }
+    return true;
+}
+
+__attribute__((noinline)) bool PokemonDaycare::ensureSavBinding(
+    const char *savPath, const DaycarePartyInfo *party, uint8_t count) {
+    char canonical[256] = {};
+    if (!canonicalizeSavPath(savPath, canonical) || !party ||
+        count == 0 || count > 6) return false;
+    for (uint8_t i = 0; i < count; ++i)
+        if (party[i].dexNum == 0 || party[i].dexNum > 151) return false;
+
+    FlushJournal journal = {};
+    LegacyFlushJournal legacyJournal = {};
+    const bool haveJournal = loadFlushJournal(journal);
+    const bool haveLegacyJournal = loadLegacyFlushJournal(legacyJournal);
+    char journalBackupPath[monstermesh::ATOMIC_SD_SIBLING_PATH_CAPACITY] = {};
+    const bool haveJournalBackupPath =
+        monstermesh::atomic_sd_detail::makeSiblingPath(
+            DAYCARE_FLUSH_PATH, ".bak", journalBackupPath,
+            sizeof(journalBackupPath));
+    const bool haveUnknownJournalEvidence =
+        !haveJournal && !haveLegacyJournal &&
+        (FSCom.exists(DAYCARE_FLUSH_PATH) ||
+         (haveJournalBackupPath && FSCom.exists(journalBackupPath)));
+    if (haveUnknownJournalEvidence &&
+        (hasPendingXp() || pendingFlush_.staged)) return false;
+    if (haveUnknownJournalEvidence) clearFlushJournal();
+    if (hasPendingXp()) {
+        if (state_.partyCount != count) return false;
+        for (uint8_t i = 0; i < count; ++i)
+            if (state_.pokemon[i].speciesDex != party[i].dexNum) return false;
+        for (uint8_t i = count; i < 6; ++i)
+            if (state_.pokemon[i].totalXpGained != 0) return false;
+    }
+    // DCF2 has no OT ID/DV binding. Never infer which same-species Pokemon its
+    // pending XP belonged to.
+    if (haveLegacyJournal) return false;
+
+    auto journalMatches = [&]() {
+        if (!haveJournal || strcmp(journal.savPath, canonical) != 0 ||
+            journal.partyCount != count) return false;
+        for (uint8_t i = 0; i < count; ++i) {
+            if (journal.species[i] != party[i].dexNum ||
+                memcmp(journal.identity[i], party[i].identity,
+                       sizeof(journal.identity[i])) != 0) return false;
+        }
+        return true;
+    };
+    if (haveJournal && !journalMatches()) return false;
+
+    if (!savOwnerLoaded_ && !loadSavOwner()) {
+        // A DCF3 journal contains its exact owner and can recover a missing
+        // sidecar without guessing. Unjournaled pending XP is deliberately
+        // left inactive rather than being attached to whichever ROM loaded.
+        if (!haveJournal && (hasPendingXp() || pendingFlush_.staged)) {
+            return false;
+        }
+        setSavBinding(canonical, party, count);
+        if (!saveSavOwner() || !saveSavOwner()) {
+            savOwnerLoaded_ = false;
+            return false;
+        }
+        return true;
+    }
+
+    // DCO1 has only a path. A DCF3 journal can safely supply its missing party
+    // identity; otherwise only a state with no pending work may be upgraded.
+    if (savOwnerLegacy_) {
+        if ((haveJournal && strcmp(savOwner_.savPath, canonical) != 0) ||
+            (!haveJournal && (hasPendingXp() || pendingFlush_.staged))) {
+            return false;
+        }
+        setSavBinding(canonical, party, count);
+        if (!saveSavOwner() || !saveSavOwner()) {
+            savOwnerLoaded_ = false;
+            return false;
+        }
+        return true;
+    }
+
+    if (strcmp(savOwner_.savPath, canonical) == 0 &&
+        partyMatchesSavOwner(party, count)) return true;
+
+    if (hasPendingXp() || pendingFlush_.staged || haveJournal) {
+        // Preserve both the old path and exact Pokemon binding for retry.
+        return false;
+    }
+    // Invalid/unbound stale journals carry no useful evidence once the old
+    // owner has no pending XP.
+    clearFlushJournal();
+
+    setSavBinding(canonical, party, count);
+    if (!saveSavOwner() || !saveSavOwner()) {
+        savOwnerLoaded_ = false;
+        return false;
+    }
+    return true;
+}
+
+bool PokemonDaycare::isBoundToSav(const char *savPath) const {
+    char canonical[256] = {};
+    return savOwnerLoaded_ && canonicalizeSavPath(savPath, canonical) &&
+           strcmp(savOwner_.savPath, canonical) == 0;
+}
+
+__attribute__((noinline)) bool PokemonDaycare::loadState() {
+    (void)monstermesh::atomic_sd_detail::recoverFile(FSCom, DAYCARE_STATE_PATH);
+    DaycareState candidate = {};
+    auto validMagic = [](const DaycareState &s) {
+        return s.magic == DaycareState::MAGIC ||
+               s.magic == DaycareState::LEGACY_MAGIC ||
+               s.magic == DaycareState::LEGACY_MAGIC_V2;
+    };
+    bool validFile = readExactFsObject(DAYCARE_STATE_PATH, candidate) &&
+                     validMagic(candidate);
+    if (!validFile &&
+        monstermesh::atomic_sd_detail::restorePreviousFile(
+            FSCom, DAYCARE_STATE_PATH)) {
+        validFile = readExactFsObject(DAYCARE_STATE_PATH, candidate) &&
+                    validMagic(candidate);
+    }
+    if (!validFile) return false;
+    state_ = candidate;
+
+    // ── Legacy DACA0002 (audit b58) 8-bit-speciesDex remap ──────────────────
+    // b58 stored speciesDex as a single byte, so within each 44-byte per-Pokemon
+    // record the nickname and savLevel sit ONE byte earlier than this 16-bit
+    // (DACA0003) layout. Because of struct padding, savExp and every field after
+    // it land at identical offsets in both layouts — so `state_ = candidate`
+    // already loaded those correctly, and only speciesDex/nickname/savLevel need
+    // to be re-read from their raw 8-bit positions. (Both layouts are the same
+    // total size, which is exactly why the magic word — not a size check — must
+    // discriminate them.)
+    if (candidate.magic == DaycareState::LEGACY_MAGIC_V2) {
+        for (uint8_t i = 0; i < 6; ++i) {
+            const uint8_t *rec =
+                reinterpret_cast<const uint8_t *>(&candidate.pokemon[i]);
+            state_.pokemon[i].speciesDex = rec[0];                 // 8-bit dex
+            memcpy(state_.pokemon[i].nickname, rec + 1,
+                   sizeof(state_.pokemon[i].nickname));            // nick @ +1
+            state_.pokemon[i].savLevel = rec[12];                 // savLevel @ +12
+        }
+    }
+
+    // Legacy checkout applied totalXpGained to the SAV without clearing it, and
+    // the b58 value additionally cannot be proven un-replayed across the
+    // 8-bit->16-bit change. It is therefore ambiguous on upgrade and must never
+    // be reinterpreted as pending XP. Preserve lifetime achievements/counters,
+    // discard only that ambiguous delta, and stamp the transactional format.
+    if (state_.magic == DaycareState::LEGACY_MAGIC ||
+        state_.magic == DaycareState::LEGACY_MAGIC_V2) {
+        for (uint8_t i = 0; i < 6; ++i) state_.pokemon[i].totalXpGained = 0;
+        state_.magic = DaycareState::MAGIC;
+    }
+
+    bool valid = state_.magic == DaycareState::MAGIC;
+    if (valid) {
+        // Persisted counters are used as loop bounds throughout daycare. Clamp
+        // them at the trust boundary before any caller can observe the state.
+        if (state_.partyCount > 6) state_.partyCount = 6;
+        if (state_.relationshipCount > MAX_RELATIONSHIPS)
+            state_.relationshipCount = MAX_RELATIONSHIPS;
+        if (state_.knownNodeCount > MAX_KNOWN_NODES)
+            state_.knownNodeCount = MAX_KNOWN_NODES;
+        for (uint8_t i = 0; i < 6; ++i)
+            state_.pokemon[i].nickname[10] = '\0';
+    }
+    if (valid) runtimeStateLoaded_ = true;
+    return valid;
+}
+
+bool PokemonDaycare::saveFlushJournal(FlushJournalPhase phase) {
+    if (!pendingFlush_.staged || !savOwnerLoaded_ || savOwnerLegacy_ ||
+        pendingFlush_.partyCount != savOwner_.partyCount ||
+        strcmp(pendingFlush_.savPath, savOwner_.savPath) != 0) return false;
+    for (uint8_t i = 0; i < pendingFlush_.partyCount; ++i) {
+        if (pendingFlush_.species[i] != savOwner_.species[i] ||
+            memcmp(pendingFlush_.identity[i], savOwner_.identity[i],
+                   sizeof(pendingFlush_.identity[i])) != 0) return false;
+    }
+    FlushJournal journal = {};
+    journal.magic = FlushJournal::MAGIC;
+    journal.phase = static_cast<uint8_t>(phase);
+    journal.partyCount = pendingFlush_.partyCount;
+    for (uint8_t i = 0; i < 6; ++i) {
+        journal.species[i] = pendingFlush_.species[i];
+        memcpy(journal.identity[i], pendingFlush_.identity[i],
+               sizeof(journal.identity[i]));
+        journal.writtenLevel[i] = pendingFlush_.writtenLevel[i];
+        journal.baseExp[i] = pendingFlush_.baseExp[i];
+        journal.xp[i] = pendingFlush_.xp[i];
+        journal.writtenExp[i] = pendingFlush_.writtenExp[i];
+    }
+    memcpy(journal.savPath, pendingFlush_.savPath,
+           sizeof(journal.savPath));
+    FSCom.mkdir("/monstermesh");
+    return monstermesh::atomic_sd_detail::atomicWriteFile(
+        FSCom, DAYCARE_FLUSH_PATH,
+        reinterpret_cast<const uint8_t *>(&journal), sizeof(journal));
+}
+
+__attribute__((noinline)) bool PokemonDaycare::loadFlushJournal(
+    FlushJournal &journal) const {
+    (void)monstermesh::atomic_sd_detail::recoverFile(FSCom, DAYCARE_FLUSH_PATH);
+    auto isValid = [](const FlushJournal &j) {
+        char canonical[256] = {};
+        if (j.magic != FlushJournal::MAGIC ||
+            (j.phase != static_cast<uint8_t>(FlushJournalPhase::PREPARED) &&
+             j.phase != static_cast<uint8_t>(FlushJournalPhase::PROMOTED)) ||
+            j.partyCount == 0 || j.partyCount > 6 ||
+            !canonicalizeSavPath(j.savPath, canonical) ||
+            strcmp(j.savPath, canonical) != 0) {
+            return false;
+        }
+        bool any = false;
+        for (uint8_t i = 0; i < j.partyCount; ++i) {
+            if (j.species[i] == 0 || j.species[i] > 151 ||
+                j.writtenExp[i] < j.baseExp[i]) return false;
+            any |= j.xp[i] != 0;
+        }
+        return any;
+    };
+    auto isValidLegacy = [](const LegacyFlushJournal &j) {
+        char canonical[256] = {};
+        if (j.magic != LegacyFlushJournal::MAGIC ||
+            (j.phase != static_cast<uint8_t>(FlushJournalPhase::PREPARED) &&
+             j.phase != static_cast<uint8_t>(FlushJournalPhase::PROMOTED)) ||
+            j.partyCount == 0 || j.partyCount > 6 ||
+            !canonicalizeSavPath(j.savPath, canonical) ||
+            strcmp(j.savPath, canonical) != 0) return false;
+        bool any = false;
+        for (uint8_t i = 0; i < j.partyCount; ++i) {
+            if (j.species[i] == 0 || j.species[i] > 151 ||
+                j.writtenExp[i] < j.baseExp[i]) return false;
+            any |= j.xp[i] != 0;
+        }
+        return any;
+    };
+
+    FlushJournal candidate = {};
+    bool valid = readExactFsObject(DAYCARE_FLUSH_PATH, candidate) &&
+                 isValid(candidate);
+    LegacyFlushJournal legacy = {};
+    if (!valid && readExactFsObject(DAYCARE_FLUSH_PATH, legacy) &&
+        isValidLegacy(legacy)) {
+        // A valid older record is authoritative but cannot be returned through
+        // the identity-bearing DCF3 type. Preserve it for the fail-closed path.
+        return false;
+    }
+    if (!valid &&
+        monstermesh::atomic_sd_detail::restorePreviousFile(
+            FSCom, DAYCARE_FLUSH_PATH)) {
+        valid = readExactFsObject(DAYCARE_FLUSH_PATH, candidate) &&
+                isValid(candidate);
+        if (!valid && readExactFsObject(DAYCARE_FLUSH_PATH, legacy) &&
+            isValidLegacy(legacy)) return false;
+    }
+    if (!valid) return false;
+    journal = candidate;
+    return true;
+}
+
+__attribute__((noinline)) bool PokemonDaycare::loadLegacyFlushJournal(
+    LegacyFlushJournal &journal) const {
+    (void)monstermesh::atomic_sd_detail::recoverFile(FSCom,
+                                                      DAYCARE_FLUSH_PATH);
+    auto isValid = [](const LegacyFlushJournal &j) {
+        char canonical[256] = {};
+        if (j.magic != LegacyFlushJournal::MAGIC ||
+            (j.phase != static_cast<uint8_t>(FlushJournalPhase::PREPARED) &&
+             j.phase != static_cast<uint8_t>(FlushJournalPhase::PROMOTED)) ||
+            j.partyCount == 0 || j.partyCount > 6 ||
+            !canonicalizeSavPath(j.savPath, canonical) ||
+            strcmp(j.savPath, canonical) != 0) return false;
+        bool any = false;
+        for (uint8_t i = 0; i < j.partyCount; ++i) {
+            if (j.species[i] == 0 || j.species[i] > 151 ||
+                j.writtenExp[i] < j.baseExp[i]) return false;
+            any |= j.xp[i] != 0;
+        }
+        return any;
+    };
+    auto currentFormatPresent = []() {
+        FlushJournal current = {};
+        return readExactFsObject(DAYCARE_FLUSH_PATH, current) &&
+               current.magic == FlushJournal::MAGIC;
+    };
+
+    LegacyFlushJournal candidate = {};
+    bool valid = readExactFsObject(DAYCARE_FLUSH_PATH, candidate) &&
+                 isValid(candidate);
+    if (!valid && currentFormatPresent()) return false;
+    if (!valid &&
+        monstermesh::atomic_sd_detail::restorePreviousFile(
+            FSCom, DAYCARE_FLUSH_PATH)) {
+        valid = readExactFsObject(DAYCARE_FLUSH_PATH, candidate) &&
+                isValid(candidate);
+        if (!valid && currentFormatPresent()) return false;
+    }
+    if (!valid) return false;
+    journal = candidate;
+    return true;
+}
+
+void PokemonDaycare::clearFlushJournal() {
+    char tempPath[monstermesh::ATOMIC_SD_SIBLING_PATH_CAPACITY] = {};
+    char backupPath[monstermesh::ATOMIC_SD_SIBLING_PATH_CAPACITY] = {};
+    if (monstermesh::atomic_sd_detail::makeSiblingPath(
+            DAYCARE_FLUSH_PATH, ".tmp", tempPath, sizeof(tempPath))) {
+        if (FSCom.exists(tempPath)) (void)FSCom.remove(tempPath);
+    }
+    if (monstermesh::atomic_sd_detail::makeSiblingPath(
+            DAYCARE_FLUSH_PATH, ".bak", backupPath, sizeof(backupPath))) {
+        if (FSCom.exists(backupPath)) (void)FSCom.remove(backupPath);
+    }
+    if (FSCom.exists(DAYCARE_FLUSH_PATH))
+        (void)FSCom.remove(DAYCARE_FLUSH_PATH);
+}
+
+__attribute__((noinline)) bool PokemonDaycare::reconcileFlushJournal(
+    const char *savPath, const DaycarePartyInfo *party, uint8_t count) {
+    if (!party || count == 0 || count > 6) return false;
+    FlushJournal journal = {};
+    if (!loadFlushJournal(journal)) return true;
+    if (!isBoundToSav(savPath) ||
+        strcmp(journal.savPath, savOwner_.savPath) != 0 ||
+        journal.partyCount != count ||
+        !partyMatchesSavOwner(party, count)) return false;
+
+    const bool prepared =
+        journal.phase == static_cast<uint8_t>(FlushJournalPhase::PREPARED);
+    bool savShowsPromotedImage = true;
+    bool savShowsBaseImage = prepared;
+    for (uint8_t i = 0; i < count; ++i) {
+        if (party[i].dexNum != journal.species[i] ||
+            state_.pokemon[i].speciesDex != journal.species[i] ||
+            memcmp(party[i].identity, journal.identity[i],
+                   sizeof(party[i].identity)) != 0) {
+            return false;
+        }
+        if (prepared) {
+            // PREPARED can mean either "not yet promoted" or a reset in the
+            // narrow SD-promote → journal-promote window. Exact equality is
+            // the only unambiguous evidence in that phase.
+            if (party[i].totalExp != journal.writtenExp[i])
+                savShowsPromotedImage = false;
+            if (party[i].totalExp != journal.baseExp[i])
+                savShowsBaseImage = false;
+        } else if (party[i].totalExp < journal.writtenExp[i]) {
+            savShowsPromotedImage = false;
+        }
+    }
+
+    // Only these fields are changed during reconciliation. A compact rollback
+    // snapshot is enough to preserve all-or-nothing behavior and is more than
+    // two kilobytes smaller than the former full-state copies.
+    struct PartyProgress {
+        uint32_t savExp;
+        uint32_t totalXpGained;
+        uint8_t savLevel;
+    } previous[6] = {};
+    for (uint8_t i = 0; i < count; ++i) {
+        previous[i].savExp = state_.pokemon[i].savExp;
+        previous[i].totalXpGained = state_.pokemon[i].totalXpGained;
+        previous[i].savLevel = state_.pokemon[i].savLevel;
+    }
+
+    // PREPARED + exact base means the SD promotion never happened (or was
+    // rolled back), but the state primary may have fallen back to a backup
+    // written before these counters were autosaved. Reconstruct at least the
+    // frozen journal XP, retain any newer persisted XP, and advance neither
+    // the SAV nor the flush baseline.
+    if (!savShowsPromotedImage) {
+        if (!savShowsBaseImage) return false;
+
+        for (uint8_t i = 0; i < count; ++i) {
+            auto &pkmn = state_.pokemon[i];
+            if (pkmn.totalXpGained < journal.xp[i])
+                pkmn.totalXpGained = journal.xp[i];
+            pkmn.savExp = party[i].totalExp;
+            pkmn.savLevel = party[i].level;
+        }
+    } else {
+        for (uint8_t i = 0; i < count; ++i) {
+            auto &pkmn = state_.pokemon[i];
+            if (pkmn.savExp < journal.writtenExp[i]) {
+                // A stale state backup may predate the pending-XP autosave. In
+                // that case the promoted SAV is the durable proof that the
+                // journal snapshot committed, so there is nothing to subtract
+                // from the older zero/smaller counter.
+                if (pkmn.totalXpGained >= journal.xp[i])
+                    pkmn.totalXpGained -= journal.xp[i];
+                else
+                    pkmn.totalXpGained = 0;
+            }
+            pkmn.savExp = party[i].totalExp;
+            pkmn.savLevel = party[i].level;
+        }
+    }
+
+    if (!saveState()) {
+        for (uint8_t i = 0; i < count; ++i) {
+            state_.pokemon[i].savExp = previous[i].savExp;
+            state_.pokemon[i].totalXpGained = previous[i].totalXpGained;
+            state_.pokemon[i].savLevel = previous[i].savLevel;
+        }
+        return false;
+    }
+    // Only clear the journal after the reconciled state has also become the
+    // retained backup. A failed second rotation leaves the journal available
+    // for another idempotent repair, while the primary remains usable.
+    if (saveState()) clearFlushJournal();
+    return true;
 }

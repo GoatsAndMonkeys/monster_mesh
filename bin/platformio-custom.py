@@ -112,20 +112,55 @@ with open(jsonLoc) as f:
     jsonStr = re.sub("//.*","", f.read(), flags=re.MULTILINE)
     userPrefs = json.loads(jsonStr)
 
-pref_flags = []
-# Pre-process the userPrefs
-for pref in userPrefs:
-    if userPrefs[pref].startswith("{"):
-        pref_flags.append("-D" + pref + "=" + userPrefs[pref])
-    elif userPrefs[pref].lstrip("-").replace(".", "").isdigit():
-        pref_flags.append("-D" + pref + "=" + userPrefs[pref])
-    elif userPrefs[pref] == "true" or userPrefs[pref] == "false":
-        pref_flags.append("-D" + pref + "=" + userPrefs[pref])
-    elif userPrefs[pref].startswith("meshtastic_"):
-        pref_flags.append("-D" + pref + "=" + userPrefs[pref])
-    # If the value is a string, we need to wrap it in quotes
-    else:
-        pref_flags.append("-D" + pref + "=" + env.StringifyMacro(userPrefs[pref]) + "")
+def is_raw_pref_value(value):
+    return (
+        value.startswith("{")
+        or value.lstrip("-").replace(".", "").isdigit()
+        or value in ("true", "false")
+        or value.startswith("meshtastic_")
+    )
+
+
+# Do not put user preference values on compiler command lines: verbose
+# PlatformIO logs echo CCFLAGS verbatim. Generate a private build-directory
+# header instead, then force-include only its path. This keeps build behavior
+# identical while keeping every userPrefs value out of normal and `-v` output.
+pref_display_flags = []
+pref_header_lines = [
+    "#pragma once",
+    "// Generated from userPrefs.jsonc. Do not publish this build artifact.",
+]
+for pref, value in userPrefs.items():
+    header_value = value if is_raw_pref_value(value) else json.dumps(value)
+    # Avoid a redefinition diagnostic exposing the generated source line when
+    # an environment also supplied this macro. userPrefs remains authoritative,
+    # matching its previous position at the end of the compiler flags.
+    pref_header_lines.extend([
+        "#ifdef " + pref,
+        "#undef " + pref,
+        "#endif",
+        "#define " + pref + " " + header_value,
+    ])
+    pref_display_flags.append("-D" + pref + "=<configured>")
+
+userprefs_header = os.path.join(
+    env.subst("$BUILD_DIR"), "generated", "userprefs_autogen.h"
+)
+os.makedirs(os.path.dirname(userprefs_header), exist_ok=True)
+header_contents = "\n".join(pref_header_lines) + "\n"
+old_header_contents = None
+try:
+    with open(userprefs_header, "r", encoding="utf-8") as existing_header:
+        old_header_contents = existing_header.read()
+except OSError:
+    pass
+if old_header_contents != header_contents:
+    with open(userprefs_header, "w", encoding="utf-8") as generated_header:
+        generated_header.write(header_contents)
+try:
+    os.chmod(userprefs_header, 0o600)
+except OSError:
+    pass
 
 # General options that are passed to the C and C++ compilers
 # Calculate unix epoch for current day (midnight)
@@ -227,14 +262,16 @@ flags = [
         "-DMONSTERMESH_BUILD=" + mm_build,
         "-DMONSTERMESH_BRANCH=" + env.StringifyMacro(mm_branch),
         "-DMONSTERMESH_VERSION=" + env.StringifyMacro(mm_version),
-    ] + pref_flags
+    ]
 
-print ("Using flags:")
+print("Using flags:")
 for flag in flags:
+    print(flag)
+for flag in pref_display_flags:
     print(flag)
     
 projenv.Append(
-    CCFLAGS=flags,
+    CCFLAGS=flags + ["-include" + userprefs_header],
 )
 
 for lb in env.GetLibBuilders():

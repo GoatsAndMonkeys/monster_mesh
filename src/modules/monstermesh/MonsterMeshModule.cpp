@@ -21,12 +21,15 @@
 #include "SPILock.h"
 
 #include "PowerFSM.h"
+#include "AtomicSdFile.h"
+#include "MonsterMeshSavPatcher.h"
 #include "MonsterMeshAudio.h"
 #if !MESHTASTIC_EXCLUDE_MQTT
 #include "mqtt/MQTT.h"
 #endif
 #include "modules/NodeInfoModule.h"
 #include "PokemonData.h"
+#include "MonsterMeshBattleValidation.h"
 #include "Gen1Species.h"
 #include "LordRoutes.h"
 #include "LordE4.h"
@@ -63,7 +66,8 @@ static bool g_keyPeekAltSeenLow    = false;
 // needs to call it for the deferred terminal party load.
 static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out,
                                  char *resolvedSavOut, size_t resolvedSavLen,
-                                 char *trainerNameOut, size_t trainerNameLen);
+                                 char *trainerNameOut, size_t trainerNameLen,
+                                 const char *exactSavPath = nullptr);
 
 // Forward decl — direct emu resume in runOnce switches kb back to RAW mode.
 static void kbSetMode(bool raw);
@@ -121,7 +125,20 @@ static void buildPartyFromNeighbor(const DaycareNeighborPokemon &n,
 }
 static bool patchSavOnSdWithDaycareXp(const char *romPath, PokemonDaycare &dc);
 static bool patchSdSavPathWithDaycareXp(const char *sdRel, PokemonDaycare &dc);
-static bool writePartyToSavOnSd(const char *savPath, const Gen1Party &party);
+static bool writeBattleXpToSavOnSd(const char *savPath, uint8_t partyCount,
+                                   const uint8_t internalSpecies[7],
+                                   const uint8_t monIdentity[6][4],
+                                   const uint32_t xp[6],
+                                   DaycarePartyInfo writtenParty[6]);
+
+static void saturatingAtomicAdd(std::atomic<uint32_t> &target, uint32_t add)
+{
+    uint32_t current = target.load();
+    while (true) {
+        const uint32_t desired = monstermesh::saturatingAdd32(current, add);
+        if (target.compare_exchange_weak(current, desired)) return;
+    }
+}
 extern bool initWifi();
 
 // Block (up to maxMs) until the LoRa radio finishes any in-flight transmit.
@@ -266,6 +283,129 @@ MonsterMeshModule::MonsterMeshModule()
     // Register toggle callback for device-ui tools menu button
     monstermesh_set_toggle_cb(mmToggle);
     monstermesh_set_terminal_cb(mmTerminalToggle);
+}
+
+bool MonsterMeshModule::enqueueDaycareBeacon(const DaycareBeacon &beacon)
+{
+    concurrency::LockGuard guard(&daycareBeaconQueueLock_);
+    if (daycareBeaconQueueCount_ >= DAYCARE_BEACON_QUEUE_CAPACITY)
+        return false;
+    daycareBeaconQueue_[daycareBeaconQueueTail_] = beacon;
+    daycareBeaconQueueTail_ =
+        (uint8_t)((daycareBeaconQueueTail_ + 1) % DAYCARE_BEACON_QUEUE_CAPACITY);
+    ++daycareBeaconQueueCount_;
+    return true;
+}
+
+bool MonsterMeshModule::dequeueDaycareBeacon(DaycareBeacon &beacon)
+{
+    concurrency::LockGuard guard(&daycareBeaconQueueLock_);
+    if (daycareBeaconQueueCount_ == 0) return false;
+    beacon = daycareBeaconQueue_[daycareBeaconQueueHead_];
+    daycareBeaconQueueHead_ =
+        (uint8_t)((daycareBeaconQueueHead_ + 1) % DAYCARE_BEACON_QUEUE_CAPACITY);
+    --daycareBeaconQueueCount_;
+    return true;
+}
+
+void MonsterMeshModule::refreshDaycareUiSnapshot()
+{
+    concurrency::LockGuard guard(&daycareUiSnapshotLock_);
+    daycareUiSnapshot_.active = daycare_.isActive();
+    daycareUiSnapshot_.achievementFlags = daycare_.getState().achievementFlags;
+    daycareUiSnapshot_.neighborCount = daycare_.getNeighborCount();
+    if (daycareUiSnapshot_.neighborCount > DAYCARE_UI_MAX_NEIGHBORS)
+        daycareUiSnapshot_.neighborCount = DAYCARE_UI_MAX_NEIGHBORS;
+
+    const DaycareNeighborPokemon *neighbors = daycare_.getNeighbors();
+    const uint32_t *lastSeen = daycare_.getNeighborLastSeen();
+    for (uint8_t i = 0; i < daycareUiSnapshot_.neighborCount; ++i) {
+        daycareUiSnapshot_.neighbors[i] = neighbors[i];
+        daycareUiSnapshot_.neighborLastSeen[i] = lastSeen[i];
+        daycareUiSnapshot_.mmbCapable[i] = isMmbCapable(neighbors[i].nodeId);
+    }
+    for (uint8_t i = daycareUiSnapshot_.neighborCount;
+         i < DAYCARE_UI_MAX_NEIGHBORS; ++i) {
+        daycareUiSnapshot_.neighbors[i] = {};
+        daycareUiSnapshot_.neighborLastSeen[i] = 0;
+        daycareUiSnapshot_.mmbCapable[i] = false;
+    }
+    daycareUiSnapshot_.lastEvent = daycare_.getLastEvent();
+    daycareUiSnapshot_.lastEventTimeMs = daycare_.getLastEventTime();
+
+    // Pre-format each boarding Pokemon's personal Kanto trip here in the owner
+    // task, where reading live journey state is safe; the LVGL status path only
+    // ever prints this frozen buffer.
+    {
+        char *p = daycareUiSnapshot_.kantoTrips;
+        size_t cap = sizeof(daycareUiSnapshot_.kantoTrips), off = 0;
+        p[0] = '\0';
+        const auto &dcState = daycare_.getState();
+        if (daycare_.isActive() && dcState.partyCount > 0) {
+            int w = snprintf(p, cap, "Kanto trips:\n");
+            if (w > 0) off += (size_t)w;
+            for (uint8_t i = 0; i < dcState.partyCount && i < 6 && off < cap - 1; ++i) {
+                const KantoTraveler *t = daycare_.slotTraveler(i);
+                if (!t) continue;
+                uint8_t nextIdx = (t->loc + 1 >= kanto::WAYPOINT_COUNT)
+                                      ? 0 : (uint8_t)(t->loc + 1);
+                const char *nm = dcState.pokemon[i].nickname[0]
+                                     ? dcState.pokemon[i].nickname : "?";
+                if (t->laps > 0)
+                    w = snprintf(p + off, cap - off, "  %s: %s -> %s %u%% (lap %u)\n",
+                                 nm, kanto::waypointName(t->loc),
+                                 kanto::waypointName(nextIdx),
+                                 (unsigned)t->progress, (unsigned)(t->laps + 1));
+                else
+                    w = snprintf(p + off, cap - off, "  %s: %s -> %s %u%%\n",
+                                 nm, kanto::waypointName(t->loc),
+                                 kanto::waypointName(nextIdx), (unsigned)t->progress);
+                if (w > 0) off += (size_t)w;
+            }
+        }
+    }
+}
+
+void MonsterMeshModule::requestStrictTerminalPartyReload(const char *savPath)
+{
+    strictTerminalReloadSavPath_[0] = '\0';
+    if (savPath && savPath[0] &&
+        !monstermesh::canonicalSavPath(
+            savPath, strictTerminalReloadSavPath_)) {
+        LOG_WARN("[MonsterMesh] strict party reload rejected invalid SAV path\n");
+    }
+    // The path is written by runOnce before the release stores. LVGL can
+    // independently request a non-strict initial load but never changes it.
+    invalidateTerminalSavOwner();
+    terminalPartyReloadStrict_.store(true);
+    terminalNeedsParty_.store(true);
+}
+
+uint32_t MonsterMeshModule::invalidateTerminalSavOwner()
+{
+    const uint32_t generation =
+        terminalSavOwnerGeneration_.fetch_add(1) + 1;
+    terminalSavOwnerReady_.store(false);
+    return generation;
+}
+
+bool MonsterMeshModule::republishTerminalSavOwnerIfUnchanged(
+    uint32_t generation)
+{
+    if (terminalSavOwnerGeneration_.load() != generation)
+        return false;
+    terminalSavOwnerPublishedGeneration_.store(generation);
+    terminalSavOwnerReady_.store(true);
+    // A concurrent invalidation between the comparison and ready store is
+    // harmless: the generation mismatch keeps the public gate closed.
+    return terminalSavOwnerIsReady();
+}
+
+bool MonsterMeshModule::terminalSavOwnerIsReady() const
+{
+    return terminalSavOwnerReady_.load() &&
+           terminalSavOwnerPublishedGeneration_.load() ==
+               terminalSavOwnerGeneration_.load();
 }
 
 // ── setup() — called once after mesh is initialized ─────────────────────────
@@ -428,8 +568,9 @@ void MonsterMeshModule::ensureMonsterMeshChannel()
 
     // Canonicalize moduleConfig.mqtt — force the MonsterMesh private EMQX
     // broker on every boot so devices that came from earlier firmware with
-    // mqtt.meshtastic.org credentials auto-migrate without the user touching
-    // the phone app. Anything stuck in NVS gets healed in one cycle.
+    // mqtt.meshtastic.org or cableclub frontend settings auto-migrate without
+    // the user touching the phone app. Anything stuck in NVS gets healed in
+    // one cycle.
     bool mqttDirty = false;
     const char *desiredAddr     = default_mqtt_address;
     const char *desiredUser     = default_mqtt_username;
@@ -533,7 +674,6 @@ bool MonsterMeshModule::wantPacket(const meshtastic_MeshPacket *p)
 
 // Forward decls for the minimal-party PvP wire helpers (definitions below).
 static void packPartyMin(const Gen1Party &src, uint8_t out[109]);
-static void unpackPartyMin(const uint8_t in[109], Gen1Party &dst);
 
 // ── handleReceived() — incoming mesh packet ─────────────────────────────────
 
@@ -565,15 +705,27 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             // doesn't get misrouted as a stray battle-start. Battle-start
             // is exactly BATTLELINK_HDR_SIZE + 14 bytes.
             //
-            // Matches b237 behavior: any TEXT_BATTLE_START with the
-            // correct size from another node auto-launches the receiver
-            // side. Other-agent gauntlet/dungeon code that could emit
-            // stray BATTLE_STARTs is compiled out of t-deck-tft via
-            // MESHTASTIC_EXCLUDE_GAUNTLET / EXCLUDE_MONSTERMESH_DUNGEON,
-            // so we don't need the mmtChallengerPeer_ window any more.
+            // START does not carry a target node, so it is only meaningful
+            // after the direct-message challenge selected a peer.  Once the
+            // receiver is armed, retransmits must keep coming from that peer.
             if ((PktType)bp->type == PktType::TEXT_BATTLE_START &&
                 mp.decoded.payload.size == BATTLELINK_HDR_SIZE + 14 &&
                 mp.from != nodeDB->getNodeNum()) {
+                const uint16_t startSession = bp->sessionId();
+                const bool challengeWindowLive =
+                    mmtChallengerPeer_ == mp.from &&
+                    (mmtChallengerExpireMs_ == 0 ||
+                     (int32_t)(millis() - mmtChallengerExpireMs_) < 0);
+                const bool fromArmedPeer =
+                    pendingMmtBattleAsReceiver_ && mp.from == mmtBattlePeer_;
+                if (startSession == 0 ||
+                    (!fromArmedPeer && !challengeWindowLive) ||
+                    (fromArmedPeer && mmtBattleSession_ != 0 &&
+                     startSession != mmtBattleSession_)) {
+                    LOG_WARN("[MonsterMesh] PvP: dropping unbound START from 0x%08X session=0x%04X\n",
+                             (unsigned)mp.from, (unsigned)startSession);
+                    return ProcessMessage::CONTINUE;
+                }
                 addMmbCapableNode(mp.from);  // confirmed MonsterMesh PVP peer
                 LOG_INFO("[MonsterMesh] PvP: TEXT_BATTLE_START RX from 0x%08X "
                          "(tb=%d recv=%d init=%d) — gate check\n",
@@ -590,14 +742,23 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                                        ((uint32_t)bp->payload[1] << 16) |
                                        ((uint32_t)bp->payload[2] <<  8) |
                                                  bp->payload[3];
-                    if (newSeed != mmtBattleSeed_) {
+                    if (newSeed != mmtBattleSeed_ ||
+                        startSession != mmtBattleSession_) {
                         LOG_INFO("[MonsterMesh] PvP: receiver already armed; "
                                  "updating seed 0x%08X->0x%08X session->0x%04X\n",
                                  (unsigned)mmtBattleSeed_, (unsigned)newSeed,
-                                 (unsigned)bp->sessionId());
+                                 (unsigned)startSession);
                         mmtBattleSeed_    = newSeed;
-                        mmtBattleSession_ = bp->sessionId();
+                        mmtBattleSession_ = startSession;
                     }
+                    // A local Y can bind the peer before START, but no party
+                    // packet is sent with the session-zero placeholder. The
+                    // validated START supplies the session and opens exchange.
+                    mmbPartyTxTarget_ = mp.from;
+                    mmbPartyRxFrom_ = mp.from;
+                    mmbPartyTxStartMs_ = millis();
+                    mmbPartyTxLastMs_ = 0;
+                    mmbPartyTxAttempts_ = 0;
                     return ProcessMessage::CONTINUE;
                 }
                 if (!textBattleActive_ && !pendingMmtBattleAsReceiver_ &&
@@ -608,7 +769,7 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                                               bp->payload[3];
                     mmtBattlePeer_    = mp.from;
                     mmtBattleSeed_    = seed;
-                    mmtBattleSession_ = bp->sessionId();
+                    mmtBattleSession_ = startSession;
                     pendingMmtBattleAsReceiver_  = true;
                     mmtBattleReceivePendingMs_   = millis();
                     // Arm direct party exchange — we owe sender our party,
@@ -650,7 +811,7 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                                                    bp->payload[3];
                         mmtBattlePeer_    = mp.from;
                         mmtBattleSeed_    = seed2;
-                        mmtBattleSession_ = bp->sessionId();
+                        mmtBattleSession_ = startSession;
                         pendingMmtBattleAsReceiver_  = true;
                         mmtBattleReceivePendingMs_   = millis();
                         mmbPartyTxTarget_  = mp.from;
@@ -694,8 +855,14 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                  (PktType)bp->type == PktType::TEXT_BATTLE_ACCEPT_V2    ||
                  (PktType)bp->type == PktType::TEXT_BATTLE_STATE_REQUEST||
                  (PktType)bp->type == PktType::TEXT_BATTLE_FULL_STATE   ||
-                 (PktType)bp->type == PktType::TEXT_BATTLE_READY)       &&
+                (PktType)bp->type == PktType::TEXT_BATTLE_READY)       &&
                 mp.from != nodeDB->getNodeNum()) {
+                if ((PktType)bp->type == PktType::TEXT_BATTLE_CHALLENGE &&
+                    (terminalNeedsParty_ || terminalPartyStaged_ ||
+                     !terminalSavOwnerIsReady())) {
+                    LOG_WARN("[MMB] CHALLENGE dropped until a durable SAV party is ready\n");
+                    return ProcessMessage::CONTINUE;
+                }
                 Serial.printf("[MMB] dispatcher → handlePacket type=0x%02X from=0x%08X len=%u tbActive=%d\n",
                               (unsigned)bp->type, (unsigned)mp.from,
                               (unsigned)mp.decoded.payload.size,
@@ -870,10 +1037,85 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             // evidence the START was lost and AUTO-ARM the receiver path
             // right now. Without this, a lost START silently drops the entire
             // PvP attempt — the user sees nothing happen.
-            if ((PktType)bp->type == PktType::TEXT_BATTLE_PARTY &&
-                mmbPartyRxFrom_ == 0 && mmtChallengerPeer_ == mp.from &&
+            Gen1Party validatedPartyMin = {};
+            uint16_t validatedPartyMinSession = 0;
+            const PktType partyPacketType = (PktType)bp->type;
+            const bool isPartyPacket =
+                partyPacketType == PktType::TEXT_BATTLE_PARTY ||
+                partyPacketType == PktType::TEXT_BATTLE_PARTY_MIN;
+            // TEXT_BATTLE_PARTY is also used by the BBS gym protocol, whose
+            // header session belongs to that request rather than the live-PvP
+            // session.  Classify the packet before enforcing PvP peer/session
+            // binding so the two protocols cannot reject each other.
+            const bool isExpectedBbsParty =
+                partyPacketType == PktType::TEXT_BATTLE_PARTY &&
+                bbsFightAwaitParty_ && mp.from == bbsFightTarget_;
+            const bool noLivePvp =
                 !textBattleActive_ && !pendingMmtBattleAsReceiver_ &&
-                !pendingMmtBattleAsInitiator_) {
+                !pendingMmtBattleAsInitiator_;
+            const bool boundPvpParty =
+                isPartyPacket && !isExpectedBbsParty &&
+                mmbPartyRxFrom_ != 0 && mp.from == mmbPartyRxFrom_ &&
+                (mmtBattlePeer_ == 0 || mp.from == mmtBattlePeer_);
+            const bool receiverFallback =
+                isPartyPacket && !isExpectedBbsParty && noLivePvp &&
+                mmbPartyRxFrom_ == 0 && mmtChallengerPeer_ == mp.from &&
+                mmtAwaitingReplyFrom_ == 0 &&
+                 (mmtChallengerExpireMs_ == 0 ||
+                 (int32_t)(millis() - mmtChallengerExpireMs_) < 0);
+            const bool terminalPartyPublished =
+                !terminalNeedsParty_.load() &&
+                !terminalPartyStaged_.load() &&
+                terminalSavOwnerIsReady();
+            const bool initiatorFallback =
+                isPartyPacket && !isExpectedBbsParty && noLivePvp &&
+                mmbPartyRxFrom_ == 0 && mmtAwaitingReplyFrom_ == mp.from &&
+                terminalPartyPublished && terminal_.hasParty();
+            const bool isPvpParty =
+                boundPvpParty || receiverFallback || initiatorFallback;
+
+            if (isPvpParty) {
+                const uint16_t packetSession = bp->sessionId();
+                // Session zero is never a wire-session value. A selected peer
+                // may supply the first nonzero session only when START was
+                // lost; once adopted, every later packet must match exactly.
+                if (packetSession == 0 ||
+                    (mmtBattleSession_ != 0 &&
+                     packetSession != mmtBattleSession_)) {
+                    LOG_WARN("[MonsterMesh] party packet session mismatch pkt=0x%04X expected=0x%04X\n",
+                             (unsigned)packetSession,
+                             (unsigned)mmtBattleSession_);
+                    return ProcessMessage::CONTINUE;
+                }
+                validatedPartyMinSession = packetSession;
+            }
+            if (isPvpParty &&
+                partyPacketType == PktType::TEXT_BATTLE_PARTY_MIN) {
+                if (mp.decoded.payload.size < BATTLELINK_HDR_SIZE + TB_PARTY_MIN_BYTES) {
+                    LOG_WARN("[MonsterMesh] PARTY_MIN too short: %u B\n",
+                             (unsigned)mp.decoded.payload.size);
+                    return ProcessMessage::CONTINUE;
+                }
+                TbPartyValidationError error = TbPartyValidationError::NONE;
+                if (!tbUnpackAndValidatePartyMin(
+                        bp->payload,
+                        mp.decoded.payload.size - BATTLELINK_HDR_SIZE,
+                        validatedPartyMin, &error)) {
+                    LOG_WARN("[MonsterMesh] PARTY_MIN invalid party error=%u\n",
+                             (unsigned)error);
+                    return ProcessMessage::CONTINUE;
+                }
+            }
+
+            // PARTY_MIN has no non-PvP consumer.  An unexpected sender must
+            // not get a chance to bind itself merely by knowing a session id.
+            if (partyPacketType == PktType::TEXT_BATTLE_PARTY_MIN &&
+                !isPvpParty) {
+                return ProcessMessage::CONTINUE;
+            }
+
+            if ((PktType)bp->type == PktType::TEXT_BATTLE_PARTY &&
+                receiverFallback) {
                 LOG_WARN("[MonsterMesh] PvP: chunk from challenger 0x%08X with "
                          "no armed session — assuming START was lost, "
                          "auto-arming receiver\n", (unsigned)mp.from);
@@ -881,7 +1123,7 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 mmtBattleSeed_    = 1;  // fallback seed; engine will desync if
                                         // real seed wasn't preserved, but
                                         // launching is better than silence
-                mmtBattleSession_ = 0;
+                mmtBattleSession_ = validatedPartyMinSession;
                 pendingMmtBattleAsReceiver_  = true;
                 mmtBattleReceivePendingMs_   = millis();
                 mmbPartyTxTarget_  = mp.from;
@@ -902,9 +1144,7 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             // self-armed and started sending chunks). Symmetric to the
             // receiver self-arm above.
             if ((PktType)bp->type == PktType::TEXT_BATTLE_PARTY &&
-                mmbPartyRxFrom_ == 0 && mmtAwaitingReplyFrom_ == mp.from &&
-                !textBattleActive_ && !pendingMmtBattleAsReceiver_ &&
-                !pendingMmtBattleAsInitiator_ && terminal_.hasParty()) {
+                initiatorFallback) {
                 LOG_WARN("[MonsterMesh] PvP: chunk from awaited peer 0x%08X "
                          "but Y reply was never received — assuming Y was "
                          "lost, auto-arming initiator\n", (unsigned)mp.from);
@@ -912,6 +1152,8 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 pendingMmtAcceptedTx_ = true;
                 mmtAcceptedTxTarget_  = mp.from;
                 mmtAwaitingReplyFrom_ = 0;
+                mmtBattlePeer_       = mp.from;
+                mmtBattleSession_    = validatedPartyMinSession;
                 mmbPartyTxTarget_   = mp.from;
                 mmbPartyRxFrom_     = mp.from;
                 mmbOppPartyReady_   = false;
@@ -926,15 +1168,13 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             // unarmed challenger/awaited peer, treat it as implicit
             // session arming (START or Y was lost).
             if ((PktType)bp->type == PktType::TEXT_BATTLE_PARTY_MIN &&
-                mmbPartyRxFrom_ == 0 && mmtChallengerPeer_ == mp.from &&
-                !textBattleActive_ && !pendingMmtBattleAsReceiver_ &&
-                !pendingMmtBattleAsInitiator_) {
+                receiverFallback) {
                 LOG_WARN("[MonsterMesh] PvP: PARTY_MIN from challenger 0x%08X "
                          "with no armed session — auto-arming receiver\n",
                          (unsigned)mp.from);
                 mmtBattlePeer_    = mp.from;
                 mmtBattleSeed_    = 1;
-                mmtBattleSession_ = 0;
+                mmtBattleSession_ = validatedPartyMinSession;
                 pendingMmtBattleAsReceiver_  = true;
                 mmtBattleReceivePendingMs_   = millis();
                 mmbPartyTxTarget_  = mp.from;
@@ -945,9 +1185,7 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 mmbPartyTxAttempts_ = 0;
             }
             if ((PktType)bp->type == PktType::TEXT_BATTLE_PARTY_MIN &&
-                mmbPartyRxFrom_ == 0 && mmtAwaitingReplyFrom_ == mp.from &&
-                !textBattleActive_ && !pendingMmtBattleAsReceiver_ &&
-                !pendingMmtBattleAsInitiator_ && terminal_.hasParty()) {
+                initiatorFallback) {
                 LOG_WARN("[MonsterMesh] PvP: PARTY_MIN from awaited peer "
                          "0x%08X — auto-arming initiator\n",
                          (unsigned)mp.from);
@@ -955,6 +1193,8 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 pendingMmtAcceptedTx_ = true;
                 mmtAcceptedTxTarget_  = mp.from;
                 mmtAwaitingReplyFrom_ = 0;
+                mmtBattlePeer_       = mp.from;
+                mmtBattleSession_    = validatedPartyMinSession;
                 mmbPartyTxTarget_   = mp.from;
                 mmbPartyRxFrom_     = mp.from;
                 mmbOppPartyReady_   = false;
@@ -962,28 +1202,27 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 mmbPartyTxLastMs_   = 0;
                 mmbPartyTxAttempts_ = 0;
             }
-            if ((PktType)bp->type == PktType::TEXT_BATTLE_PARTY_MIN &&
-                ((mmbPartyRxFrom_ != 0 && mp.from == mmbPartyRxFrom_) ||
-                 (mmtChallengerPeer_ != 0 && mp.from == mmtChallengerPeer_))) {
-                if (mp.decoded.payload.size < BATTLELINK_HDR_SIZE + 109) {
-                    LOG_WARN("[MonsterMesh] PARTY_MIN too short: %u B\n",
-                             (unsigned)mp.decoded.payload.size);
-                    return ProcessMessage::CONTINUE;
-                }
+            if (isPvpParty &&
+                (PktType)bp->type == PktType::TEXT_BATTLE_PARTY_MIN &&
+                mmbPartyRxFrom_ != 0 && mp.from == mmbPartyRxFrom_ &&
+                mp.from == mmtBattlePeer_) {
                 // Session recovery: if our START was lost and we self-armed
                 // (mmtBattleSession_=0), adopt the sender's session_id from
                 // this packet so our ACTION/HASH packets pass the sender's
                 // session filter. Without this, post-launch the engines
                 // deadlock at "Waiting for opponent..." even though both
                 // battle stations opened fine.
-                uint16_t pktSession = bp->sessionId();
-                if (mmtBattleSession_ == 0 && pktSession != 0) {
+                if (mmtBattleSession_ == 0) {
                     LOG_INFO("[MonsterMesh] PvP: adopting session 0x%04X "
                              "from PARTY_MIN (START was lost)\n",
-                             (unsigned)pktSession);
-                    mmtBattleSession_ = pktSession;
+                             (unsigned)validatedPartyMinSession);
+                    mmtBattleSession_ = validatedPartyMinSession;
+                    mmbPartyTxTarget_ = mp.from;
+                    mmbPartyTxStartMs_ = millis();
+                    mmbPartyTxLastMs_ = 0;
+                    mmbPartyTxAttempts_ = 0;
                 }
-                unpackPartyMin(bp->payload, mmbOppParty_);
+                mmbOppParty_ = validatedPartyMin;
                 mmbOppPartyReady_  = true;
                 mmbPartyRxFrom_    = 0;
                 mmbPartyChunkMask_ = 0;
@@ -995,11 +1234,27 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 return ProcessMessage::CONTINUE;
             }
 
-            if ((PktType)bp->type == PktType::TEXT_BATTLE_PARTY &&
-                ((mmbPartyRxFrom_ != 0 && mp.from == mmbPartyRxFrom_) ||
-                 (mmtChallengerPeer_ != 0 && mp.from == mmtChallengerPeer_))) {
+            if (isPvpParty &&
+                (PktType)bp->type == PktType::TEXT_BATTLE_PARTY &&
+                mmbPartyRxFrom_ != 0 && mp.from == mmbPartyRxFrom_ &&
+                mp.from == mmtBattlePeer_) {
                 if (mp.decoded.payload.size < BATTLELINK_HDR_SIZE + 2)
                     return ProcessMessage::CONTINUE;
+                uint16_t pktSession = bp->sessionId();
+                if (pktSession == 0 ||
+                    (mmtBattleSession_ != 0 &&
+                     pktSession != mmtBattleSession_)) {
+                    LOG_WARN("[MonsterMesh] MMB chunk session mismatch pkt=0x%04X expected=0x%04X\n",
+                             (unsigned)pktSession, (unsigned)mmtBattleSession_);
+                    return ProcessMessage::CONTINUE;
+                }
+                if (mmtBattleSession_ == 0) {
+                    mmtBattleSession_ = pktSession;
+                    mmbPartyTxTarget_ = mp.from;
+                    mmbPartyTxStartMs_ = millis();
+                    mmbPartyTxLastMs_ = 0;
+                    mmbPartyTxAttempts_ = 0;
+                }
                 // Lazy-allocate the chunk-assembly buffer in PSRAM the first
                 // time we need it. Keeps it out of heap so emu task stack
                 // alloc can succeed even after long runtime fragmentation.
@@ -1020,10 +1275,14 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 // 237-byte encrypted limit so bidirectional exchange is
                 // reliable on busy channels.
                 const size_t CHUNK = 100;
-                if (partTotal == 0 || partTotal > 8) return ProcessMessage::CONTINUE;
+                const uint8_t expectedTotal =
+                    (uint8_t)((sizeof(Gen1Party) + CHUNK - 1) / CHUNK);
+                if (partTotal != expectedTotal) return ProcessMessage::CONTINUE;
                 if (partIdx >= partTotal)            return ProcessMessage::CONTINUE;
                 size_t off = (size_t)partIdx * CHUNK;
-                if (off + dataLen > MMB_PARTY_CHUNKS_BYTES)
+                const size_t expectedLen =
+                    (sizeof(Gen1Party) - off < CHUNK) ? sizeof(Gen1Party) - off : CHUNK;
+                if (dataLen != expectedLen || off + dataLen > MMB_PARTY_CHUNKS_BYTES)
                     return ProcessMessage::CONTINUE;
                 memcpy(mmbPartyChunks_ + off, bp->payload + 2, dataLen);
                 mmbPartyTotal_     = partTotal;
@@ -1041,8 +1300,18 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                     // All chunks in — parse into Gen1Party. Sender wrote
                     // it as raw memcpy(buf, &party, sizeof(Gen1Party)).
                     if (sizeof(mmbOppParty_) <= MMB_PARTY_CHUNKS_BYTES) {
-                        memcpy(&mmbOppParty_, mmbPartyChunks_,
-                               sizeof(mmbOppParty_));
+                        Gen1Party decoded = {};
+                        memcpy(&decoded, mmbPartyChunks_, sizeof(decoded));
+                        TbPartyValidationError error = TbPartyValidationError::NONE;
+                        if (!tbValidateParty(decoded, &error)) {
+                            LOG_WARN("[MonsterMesh] MMB chunked party invalid error=%u\n",
+                                     (unsigned)error);
+                            mmbPartyChunkMask_ = 0;
+                            mmbPartyTotal_ = 0;
+                            memset(mmbPartyChunks_, 0, MMB_PARTY_CHUNKS_BYTES);
+                            return ProcessMessage::CONTINUE;
+                        }
+                        mmbOppParty_ = decoded;
                         mmbOppPartyReady_ = true;
                         LOG_INFO("[MonsterMesh] MMB party RX complete from 0x%08X "
                                  "count=%u (%u chunks)\n",
@@ -1106,16 +1375,39 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
         // Tolerate older firmware that broadcast the beacon without the
         // trailing ngPlusTier byte. Copy into a local zero-initialized
         // struct so the missing byte reads as tier 0.
-        if (mp.decoded.payload.size >= sizeof(DaycareBeacon) - 1) {
-            DaycareBeacon beaconBuf;
-            memset(&beaconBuf, 0, sizeof(beaconBuf));
+        if (mp.decoded.payload.size == sizeof(DaycareBeacon) ||
+            mp.decoded.payload.size == sizeof(DaycareBeacon) - 1) {
+            DaycareBeacon beaconBuf = {};
             size_t copyLen = mp.decoded.payload.size < sizeof(beaconBuf)
                                  ? mp.decoded.payload.size
                                  : sizeof(beaconBuf);
             memcpy(&beaconBuf, mp.decoded.payload.bytes, copyLen);
             const DaycareBeacon *beacon = &beaconBuf;
             // type=0x60 is the daycare-beacon discriminator (PokemonDaycare.cpp:433).
-            if (beacon->type == 0x60 && beacon->nodeId != nodeDB->getNodeNum()) {
+            bool validBeacon = beacon->type == 0x60 &&
+                               beacon->nodeId == mp.from &&
+                               beacon->nodeId != nodeDB->getNodeNum() &&
+                               beacon->partyCount <= 6 &&
+                               beacon->ngPlusTier <= 5 &&
+                               beacon->requestResponse <= 1;
+            beaconBuf.shortName[4] = '\0';
+            beaconBuf.gameName[7] = '\0';
+            for (uint8_t i = 0; i < 6; ++i) {
+                beaconBuf.pokemon[i].nickname[10] = '\0';
+                if (i >= beaconBuf.partyCount) continue;
+                if (beaconBuf.pokemon[i].species == 0 ||
+                    beaconBuf.pokemon[i].species > 151 ||
+                    beaconBuf.pokemon[i].level == 0 ||
+                    beaconBuf.pokemon[i].level > 100) {
+                    validBeacon = false;
+                }
+                for (uint8_t move = 0; move < 4; ++move) {
+                    uint8_t moveId = beaconBuf.pokemon[i].moves[move];
+                    if (moveId != 0 && gen1Move(moveId) == nullptr)
+                        validBeacon = false;
+                }
+            }
+            if (validBeacon) {
                 LOG_INFO("[MonsterMesh] daycare beacon RX from 0x%08X '%s/%s' party=%u ng+%u\n",
                          (unsigned)beacon->nodeId, beacon->shortName,
                          beacon->gameName, (unsigned)beacon->partyCount,
@@ -1124,19 +1416,12 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 // running MonsterMesh with an active save — mark PVP capable.
                 if (beacon->partyCount > 0 && beacon->gameName[0] != '\0')
                     addMmbCapableNode(beacon->nodeId);
-                uint8_t prevCount = daycare_.getNeighborCount();
-                daycare_.handleBeacon(*beacon);
-                // New trainer arrived — fire an arrival event. The event is
-                // safe (state mutation only, no TX). Its DM is dispatched in
-                // runOnce via the lastDmedEventTime_ watermark; we never send
-                // from this router-context handler.
-                if (daycare_.getNeighborCount() > prevCount) {
-                    daycare_.triggerArrivalEvent(*beacon);
-                    // Reciprocal beacon: ask runOnce to broadcast our own
-                    // beacon so the new peer learns about us within seconds
-                    // instead of waiting up to 15 min for our next periodic
-                    // BEACON_INTERVAL_MS broadcast.
-                    pendingReplyBeacon_ = true;
+                // Router callbacks can overlap the module run loop. Queue a
+                // value copy and let runOnce own the neighbor + arrival-event
+                // mutation so it cannot race daycare's XP prepare/commit RMW.
+                if (!enqueueDaycareBeacon(*beacon)) {
+                    LOG_WARN("[MonsterMesh] daycare beacon queue full; dropping 0x%08X\n",
+                             (unsigned)beacon->nodeId);
                 }
                 // MQTT-only response: if this is a user-triggered beacon
                 // (boot/manual), echo a beacon + NodeInfo back via MQTT
@@ -1148,9 +1433,10 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                              (unsigned)beacon->nodeId);
                 }
             } else {
-                LOG_INFO("[MonsterMesh] PRIVATE_APP not daycare beacon (type=0x%02X self=%d)\n",
+                LOG_INFO("[MonsterMesh] PRIVATE_APP invalid/not daycare beacon (type=0x%02X self=%d fromMatch=%d)\n",
                          (unsigned)beacon->type,
-                         (int)(beacon->nodeId == nodeDB->getNodeNum()));
+                         (int)(beacon->nodeId == nodeDB->getNodeNum()),
+                         (int)(beacon->nodeId == mp.from));
             }
         }
     }
@@ -1193,6 +1479,18 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
             containsIgnoreCase(txt, len, "battle in MonsterMesh", 21) ||
             containsIgnoreCase(txt, len, "MMB ON", 6);
         if (isChallenge) {
+            // Do not let a later DM replace the peer selected for an active
+            // or half-completed party exchange.  The challenge sender becomes
+            // authoritative only while the protocol is otherwise idle.
+            if (textBattleActive_ || pendingMmtBattleAsReceiver_ ||
+                pendingMmtBattleAsInitiator_ || mmbPartyRxFrom_ != 0 ||
+                mmbPartyTxTarget_ != 0 || mmtAwaitingReplyFrom_ != 0) {
+                LOG_WARN("[MonsterMesh] mmt: ignoring challenge DM from 0x%08X while PvP is busy\n",
+                         (unsigned)mp.from);
+                return ProcessMessage::CONTINUE;
+            }
+            mmtBattlePeer_        = 0;
+            mmtBattleSession_     = 0;
             mmtChallengerPeer_     = mp.from;
             mmtChallengerExpireMs_ = millis() + 600000;
             pendingOpenTerminal_   = true;
@@ -1245,6 +1543,8 @@ ProcessMessage MonsterMeshModule::handleReceived(const meshtastic_MeshPacket &mp
                 pendingMmtAcceptedTx_ = true;
                 mmtAcceptedTxTarget_  = mp.from;
                 mmtAwaitingReplyFrom_ = 0;
+                mmtBattlePeer_        = mp.from;
+                mmtBattleSession_     = 0;
                 // Arm direct party exchange — we owe peer our party, and we
                 // expect their party in chunks. Reset reassembly state.
                 mmbPartyTxTarget_   = mp.from;
@@ -1296,10 +1596,13 @@ void MonsterMeshModule::onLocalYReply()
     mmtBattlePeer_    = mmtChallengerPeer_;
     mmtBattleSeed_    = 1;          // fallback seed; overwritten when real
                                     // TEXT_BATTLE_START packet arrives
+    // Session remains unset until a validated nonzero START (or, for the
+    // existing lost-START recovery, a nonzero party packet) arrives from the
+    // already-bound peer. Never transmit a session-zero party packet.
     mmtBattleSession_ = 0;
     pendingMmtBattleAsReceiver_  = true;
     mmtBattleReceivePendingMs_   = millis();
-    mmbPartyTxTarget_  = mmtChallengerPeer_;
+    mmbPartyTxTarget_  = 0;
     mmbPartyRxFrom_    = mmtChallengerPeer_;
     mmbOppPartyReady_  = false;
     mmbPartyChunkMask_ = 0;
@@ -1402,6 +1705,11 @@ void MonsterMeshModule::challengePeerByShortName(const char *peerShort)
         terminal_.printLine("mmb: empty target");
         return;
     }
+    if (terminalNeedsParty_.load() || terminalPartyStaged_.load() ||
+        !terminalSavOwnerIsReady()) {
+        terminal_.printLine("mmb: waiting for verified SAV party");
+        return;
+    }
     // Nuke any stuck PvP state from a prior failed handshake so a fresh
     // `mmb <peer>` always restarts cleanly. Without this, a stale
     // pendingMmtBattleAsInitiator_ from a previous attempt blocks the new
@@ -1452,6 +1760,10 @@ void MonsterMeshModule::challengePeerByShortName(const char *peerShort)
     terminal_.printLine(buf);
     LOG_INFO("[MonsterMesh] mmt: challenging %s = 0x%08X\n",
              matchedShort, (unsigned)resolved);
+    mmtBattlePeer_        = 0;
+    mmtBattleSession_     = 0;
+    mmtChallengerPeer_    = 0;
+    mmtChallengerExpireMs_ = 0;
     mmtOnTxTarget_       = resolved;
     pendingMmtOnTx_      = true;
     mmtAwaitingReplyFrom_ = resolved;
@@ -1463,10 +1775,8 @@ void MonsterMeshModule::challengePeerByShortName(const char *peerShort)
     // match because their `buildPartyFromNeighbor` lookup found no entry
     // for our node ID. Beacons are cheap (~150 bytes broadcast) and the
     // BEACON_INTERVAL_MS is 15 min — too slow for ad-hoc challenges.
-    if (daycare_.isActive()) {
-        daycare_.forceBeacon();
-        LOG_INFO("[MonsterMesh] mmb: forced beacon so peer has our party data\n");
-    }
+    pendingDaycareForceBeacon_.store(true);
+    LOG_INFO("[MonsterMesh] mmb: queued beacon so peer has our party data\n");
 }
 
 // Server-authoritative challenge — terminal command `mmb2 <short>`.
@@ -1478,6 +1788,11 @@ void MonsterMeshModule::challengePeerByShortName(const char *peerShort)
 // "[MMB] server-auth CHALLENGE" log line).
 void MonsterMeshModule::challengePeerByShortNameV2(const char *peerShort)
 {
+    if (terminalNeedsParty_.load() || terminalPartyStaged_.load() ||
+        !terminalSavOwnerIsReady()) {
+        terminal_.printLine("mmb2: waiting for verified SAV party");
+        return;
+    }
     if (!terminal_.hasParty()) {
         terminal_.printLine("mmb2: no party loaded — load a SAV first");
         return;
@@ -1549,7 +1864,13 @@ void MonsterMeshModule::sendMmbBattleStart(uint32_t seed)
     // mismatch what the receiver captured from this START packet and get
     // dropped on receipt. Same value flows: module session var → START
     // packet → receiver captures from packet → both engines pin to it.
-    mmtBattleSession_ = (uint16_t)(millis() & 0xFFFF);
+    // A lost-Y fallback may already have adopted the receiver's provisional
+    // session from its party packet.  Preserve it so START and both engines
+    // converge on one session instead of generating a second value here.
+    if (mmtBattleSession_ == 0) {
+        mmtBattleSession_ = (uint16_t)(millis() & 0xFFFF);
+        if (mmtBattleSession_ == 0) mmtBattleSession_ = 1;
+    }
     bp->setSessionId(mmtBattleSession_);
     bp->seq = 0;
     bp->payload[0] = (seed >> 24) & 0xFF;
@@ -1587,40 +1908,6 @@ static void packPartyMin(const Gen1Party &src, uint8_t out[109])
         memcpy(p + 10, m.spdExp, 2);
         memcpy(p + 12, m.spcExp, 2);
         memcpy(p + 14, m.moves,  4);
-    }
-}
-
-// Inverse of packPartyMin. Reconstructs a Gen1Party with zeroed names,
-// current HP=0 (initBattlePokeFromSave falls through to maxHp), status=0,
-// and PP filled from the canonical move table so initBattlePokeFromSave's
-// memcpy(dst.pp, src.pp, 4) copies the right values. species[] header is
-// rebuilt from mons[].species for any consumer that still inspects it.
-static void unpackPartyMin(const uint8_t in[109], Gen1Party &dst)
-{
-    memset(&dst, 0, sizeof(dst));
-    dst.count = in[0];
-    if (dst.count > 6) dst.count = 6;
-    for (uint8_t i = 0; i < 6; ++i) {
-        const uint8_t *p = in + 1 + (size_t)i * 18;
-        Gen1Pokemon &m = dst.mons[i];
-        m.species  = p[0];
-        m.level    = p[1];
-        m.boxLevel = p[1];
-        m.dvs[0]   = p[2];
-        m.dvs[1]   = p[3];
-        memcpy(m.hpExp,  p +  4, 2);
-        memcpy(m.atkExp, p +  6, 2);
-        memcpy(m.defExp, p +  8, 2);
-        memcpy(m.spdExp, p + 10, 2);
-        memcpy(m.spcExp, p + 12, 2);
-        memcpy(m.moves,  p + 14, 4);
-        for (uint8_t k = 0; k < 4; ++k) {
-            const Gen1MoveData *md = gen1Move(m.moves[k]);
-            m.pp[k] = md ? md->pp : 0;
-        }
-    }
-    for (uint8_t i = 0; i < 7; ++i) {
-        dst.species[i] = (i < dst.count) ? dst.mons[i].species : 0xFF;
     }
 }
 
@@ -1691,17 +1978,18 @@ void MonsterMeshModule::achievementsString(char *buf, size_t bufLen)
         } \
     } while (0)
 
-    const auto &st = daycare_.getState();
+    concurrency::LockGuard snapshotGuard(&daycareUiSnapshotLock_);
+    const uint64_t achievementFlags = daycareUiSnapshot_.achievementFlags;
     uint8_t earned = 0;
     for (uint8_t i = 0; i < ACH_COUNT; ++i) {
-        if (st.achievementFlags & (1ULL << i)) ++earned;
+        if (achievementFlags & (1ULL << i)) ++earned;
     }
     ACH_APPEND("Achievements: %u/%u\n", (unsigned)earned, (unsigned)ACH_COUNT);
     if (earned == 0) {
         ACH_APPEND("(none yet -- keep playing)\n");
     } else {
         for (uint8_t i = 0; i < ACH_COUNT; ++i) {
-            if (st.achievementFlags & (1ULL << i)) {
+            if (achievementFlags & (1ULL << i)) {
                 ACH_APPEND("  %s\n", achievementDefs[i].name);
             }
         }
@@ -1722,11 +2010,12 @@ void MonsterMeshModule::daycareStatusString(char *buf, size_t bufLen)
         } \
     } while (0)
 
-    DC_APPEND("Daycare: %s\n", daycare_.isActive() ? "active" : "idle");
+    concurrency::LockGuard snapshotGuard(&daycareUiSnapshotLock_);
+    DC_APPEND("Daycare: %s\n", daycareUiSnapshot_.active ? "active" : "idle");
 
-    uint8_t nc = daycare_.getNeighborCount();
+    uint8_t nc = daycareUiSnapshot_.neighborCount;
     DC_APPEND("Neighbors: %u\n", (unsigned)nc);
-    const auto *ns = daycare_.getNeighbors();
+    const auto *ns = daycareUiSnapshot_.neighbors;
     for (uint8_t i = 0; i < nc && i < 6; ++i) {
         char tierLabel[8];
         if (ns[i].ngPlusTier == 0) snprintf(tierLabel, sizeof(tierLabel), "Kanto");
@@ -1739,9 +2028,12 @@ void MonsterMeshModule::daycareStatusString(char *buf, size_t bufLen)
                   tierLabel);
     }
 
-    const auto &evt = daycare_.getLastEvent();
+    if (daycareUiSnapshot_.kantoTrips[0])
+        DC_APPEND("%s", daycareUiSnapshot_.kantoTrips);
+
+    const auto &evt = daycareUiSnapshot_.lastEvent;
     if (evt.message[0]) {
-        uint32_t ago = (millis() - daycare_.getLastEventTime()) / 1000;
+        uint32_t ago = (millis() - daycareUiSnapshot_.lastEventTimeMs) / 1000;
         DC_APPEND("Last event %us ago:\n", (unsigned)ago);
         DC_APPEND("  %s\n", evt.message);
         if (evt.xp) DC_APPEND("  +%u xp\n", (unsigned)evt.xp);
@@ -1752,16 +2044,17 @@ void MonsterMeshModule::daycareStatusString(char *buf, size_t bufLen)
     #undef DC_APPEND
 }
 
-void MonsterMeshModule::daycareCheckInFromStagedParty()
+__attribute__((noinline)) void MonsterMeshModule::daycareCheckInFromStagedParty()
 {
     // Use the most recently-staged party (loaded from SAV) to check in.
-    if (!terminalPartyStaged_ && !terminal_.hasParty()) return;
-    const Gen1Party &p = terminalPartyStaged_ ? terminalStagedParty_ : terminal_.getParty();
+    const Gen1Party &p = terminalStagedParty_;
     if (p.count == 0 || p.count > 6) return;
 
     // Compose simple parallel arrays for the legacy checkIn signature.
     uint8_t species[6] = {};
     uint8_t levels[6]  = {};
+    uint32_t exp[6]    = {};
+    uint8_t identity[6][4] = {};
     char    nicks[6][11] = {};
     for (uint8_t i = 0; i < p.count; ++i) {
         // Gen 1 SAV stores species as the internal hex code (0x01-0xBE), NOT
@@ -1771,13 +2064,26 @@ void MonsterMeshModule::daycareCheckInFromStagedParty()
         uint8_t internal = p.species[i];
         species[i] = internalToDex[internal];
         levels[i]  = p.mons[i].level;
+        exp[i] = ((uint32_t)p.mons[i].exp[0] << 16) |
+                 ((uint32_t)p.mons[i].exp[1] << 8) |
+                  (uint32_t)p.mons[i].exp[2];
+        identity[i][0] = p.mons[i].otId[0];
+        identity[i][1] = p.mons[i].otId[1];
+        identity[i][2] = p.mons[i].dvs[0];
+        identity[i][3] = p.mons[i].dvs[1];
         gen1NameToAscii(p.nicknames[i], 11, nicks[i], sizeof(nicks[i]));
     }
     const char *shortName = (owner.short_name[0] != '\0') ? owner.short_name : "MM";
     const char *gameName  = (stagedTrainerName_[0] != '\0') ? stagedTrainerName_ : nicks[0];
-    daycare_.checkIn(species, levels, nicks, p.count, shortName, gameName);
-    LOG_INFO("[MonsterMesh] daycare: checked in %u pokemon as %s/%s\n",
-             (unsigned)p.count, shortName, gameName);
+    const bool checkedIn = daycare_.checkIn(
+        species, levels, nicks, p.count, shortName, gameName, exp,
+        identity, loadedSavPath_);
+    if (checkedIn) {
+        LOG_INFO("[MonsterMesh] daycare: checked in %u pokemon as %s/%s sav='%s'\n",
+                 (unsigned)p.count, shortName, gameName, loadedSavPath_);
+    } else {
+        LOG_WARN("[MonsterMesh] daycare: check-in refused; pending XP belongs to another SAV\n");
+    }
 }
 
 // ── runOnce() — OSThread periodic drain of tx queue ─────────────────────────
@@ -1805,6 +2111,18 @@ int32_t MonsterMeshModule::runOnce()
             transport_.begin();
             transport_.setNodeId(nodeDB->getNodeNum());
             textBattle_.setMyNodeNum(nodeDB->getNodeNum());
+            textBattle_.setLocalPartyReadyFn(
+                [](void *ctx) {
+                    auto *self = static_cast<MonsterMeshModule *>(ctx);
+                    return self && self->terminalSavOwnerIsReady() &&
+                           !self->terminalNeedsParty_.load() &&
+                           !self->terminalPartyStaged_.load() &&
+                           !self->pendingSave_.load() &&
+                           !self->pendingSavWriteBack_.load() &&
+                           !self->emulatorActive_.load() &&
+                           !self->browserActive_.load();
+                },
+                this);
             dungeon_.begin();
         }
 
@@ -1890,13 +2208,15 @@ int32_t MonsterMeshModule::runOnce()
         // early-boot PacketAPI/NodeInfo window caused a ~10s reset loop. The
         // periodic beacon timer fires on its own cadence later.
         daycare_.init();
+        refreshDaycareUiSnapshot();
         terminal_.setDaycareStatusFn(
             [](void *ctx, char *buf, size_t n) {
                 static_cast<MonsterMeshModule *>(ctx)->daycareStatusString(buf, n);
             }, this);
         terminal_.setDaycareForceEventFn(
             [](void *ctx) {
-                static_cast<MonsterMeshModule *>(ctx)->daycare_.forceEvent();
+                static_cast<MonsterMeshModule *>(ctx)
+                    ->pendingDaycareForceEvent_.store(true);
             }, this);
         terminal_.setDaycareAchievementsFn(
             [](void *ctx, char *buf, size_t n) {
@@ -1907,7 +2227,7 @@ int32_t MonsterMeshModule::runOnce()
                 auto *self = static_cast<MonsterMeshModule *>(ctx);
                 // Manual beacon → ask peers to respond MQTT-only.
                 self->nextBeaconRequestsResponse_ = true;
-                self->daycare_.forceBeacon();
+                self->pendingDaycareForceBeacon_.store(true);
                 // Also re-emit NodeInfo on the MM channel so peers across
                 // MQTT pick up our pubkey + short_name without waiting
                 // for the 15-min periodic refresh. User-triggered
@@ -1946,9 +2266,11 @@ int32_t MonsterMeshModule::runOnce()
                     else snprintf(out, outLen, "%uh ago", (unsigned)(elapsedSec / 3600));
                 };
                 uint32_t nowMs = millis();
-                uint8_t nc = self->daycare_.getNeighborCount();
-                const auto *neigh = self->daycare_.getNeighbors();
-                const uint32_t *lastSeen = self->daycare_.getNeighborLastSeen();
+                concurrency::LockGuard snapshotGuard(&self->daycareUiSnapshotLock_);
+                uint8_t nc = self->daycareUiSnapshot_.neighborCount;
+                const auto *neigh = self->daycareUiSnapshot_.neighbors;
+                const uint32_t *lastSeen = self->daycareUiSnapshot_.neighborLastSeen;
+                const bool *mmbCapable = self->daycareUiSnapshot_.mmbCapable;
                 static const uint32_t LIVE_WINDOW_MS = 3600000UL;  // 1 hour
                 uint8_t shown = 0;
                 if (nc == 0) {
@@ -1963,7 +2285,7 @@ int32_t MonsterMeshModule::runOnce()
                             // not confirmed MonsterMesh PVP capable.
                             if (mmbOnly && (nowMs - lastSeen[i]) > LIVE_WINDOW_MS)
                                 continue;
-                            if (mmbOnly && !self->isMmbCapable(neigh[i].nodeId))
+                            if (mmbOnly && !mmbCapable[i])
                                 continue;
                             const char *sn = neigh[i].shortName[0]
                                                ? neigh[i].shortName : nullptr;
@@ -2065,12 +2387,8 @@ int32_t MonsterMeshModule::runOnce()
                 out->channel         = MONSTERMESH_CHANNEL;
                 out->want_ack        = false;
                 out->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
-                uint8_t buf[BATTLELINK_HDR_SIZE];
-                BattlePacket *pkt = (BattlePacket *)buf;
-                memset(buf, 0, sizeof(buf));
-                pkt->type = (uint8_t)PktType::BBS_PING;
-                pkt->setSessionId(0);
-                pkt->seq = 0;
+                uint8_t buf[BATTLELINK_HDR_SIZE] = {};
+                writeBattlePacketHeader(buf, PktType::BBS_PING, 0);
                 memcpy(out->decoded.payload.bytes, buf, sizeof(buf));
                 out->decoded.payload.size = sizeof(buf);
                 service->sendToMesh(out, RX_SRC_LOCAL, true);
@@ -2086,6 +2404,12 @@ int32_t MonsterMeshModule::runOnce()
         terminal_.setBbsFightFn(
             [](void *ctx, uint32_t gymNodeNum) {
                 auto *self = static_cast<MonsterMeshModule *>(ctx);
+                if (self->terminalNeedsParty_.load() ||
+                    self->terminalPartyStaged_.load() ||
+                    !self->terminalSavOwnerIsReady()) {
+                    self->terminal_.printLine("waiting for verified SAV party");
+                    return;
+                }
                 if (!self->terminal_.hasParty()) {
                     self->terminal_.printLine("no party loaded — load a SAV first");
                     return;
@@ -2105,12 +2429,9 @@ int32_t MonsterMeshModule::runOnce()
                 out->want_ack        = false;
                 out->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
 
-                uint8_t buf[BATTLELINK_HDR_SIZE];
-                BattlePacket *pkt = (BattlePacket *)buf;
-                memset(buf, 0, sizeof(buf));
-                pkt->type = (uint8_t)PktType::BBS_LADDER_REQUEST;
-                pkt->setSessionId((uint16_t)(millis() & 0xFFFF));
-                pkt->seq = 0;
+                uint8_t buf[BATTLELINK_HDR_SIZE] = {};
+                writeBattlePacketHeader(buf, PktType::BBS_LADDER_REQUEST,
+                                        (uint16_t)(millis() & 0xFFFF));
                 memcpy(out->decoded.payload.bytes, buf, sizeof(buf));
                 out->decoded.payload.size = sizeof(buf);
                 service->sendToMesh(out, RX_SRC_LOCAL, true);
@@ -2216,6 +2537,79 @@ int32_t MonsterMeshModule::runOnce()
         setupStatus_ = "SD ready";
         LOG_INFO("[MonsterMesh] SD ready — press ALT to open ROM browser\n");
     }
+
+    // runOnce is the sole daycare-state writer. Router callbacks enqueue
+    // validated beacons and LVGL callbacks enqueue manual actions, preventing
+    // arrival XP or force-event XP from racing a background apply/commit.
+    if (setupDone_ && !textBattleActive_.load()) {
+        bool daycareMutationGuarded = false;
+        bool restorePublishedParty = false;
+        uint32_t guardedGeneration = 0;
+        auto guardDaycareMutation = [&]() {
+            if (daycareMutationGuarded) return;
+            restorePublishedParty = terminalSavOwnerIsReady();
+            guardedGeneration = invalidateTerminalSavOwner();
+            daycareMutationGuarded = true;
+        };
+        DaycareBeacon queuedBeacon = {};
+        while (dequeueDaycareBeacon(queuedBeacon)) {
+            const uint8_t previousCount = daycare_.getNeighborCount();
+            daycare_.handleBeacon(queuedBeacon);
+            if (daycare_.getNeighborCount() > previousCount) {
+                // triggerArrivalEvent() may award XP. Revoke battle
+                // publication before entering it, not after it returns.
+                guardDaycareMutation();
+                (void)daycare_.triggerArrivalEvent(queuedBeacon);
+                pendingReplyBeacon_ = true;
+            }
+        }
+        if (pendingDaycareForceEvent_.exchange(false) && daycare_.isActive()) {
+            guardDaycareMutation();
+            daycare_.forceEvent();
+        }
+        if (pendingDaycareForceBeacon_.exchange(false) && daycare_.isActive())
+            daycare_.forceBeacon();
+
+        // Flavor-only events can leave the durable party unchanged. A
+        // generation-qualified publication restores the prior gate without
+        // letting this older operation override any concurrent invalidation.
+        if (daycareMutationGuarded && restorePublishedParty &&
+            !daycare_.hasPendingXp() && !pendingSave_.load() &&
+            !pendingSavWriteBack_.load() &&
+            !terminalNeedsParty_.load() && !terminalPartyStaged_.load() &&
+            !emulatorActive_.load() && !browserActive_.load() &&
+            loadedSavPath_[0] != '\0') {
+            republishTerminalSavOwnerIfUnchanged(guardedGeneration);
+        }
+    }
+    // A terminal party is battle-ready only while it exactly represents the
+    // durable SAV. Invalidate before any queued writer or new daycare XP can
+    // interleave with a router CHALLENGE; readiness returns only after the
+    // verified image is reloaded and installed by the LVGL consumer.
+    if (pendingSave_.load() || pendingSavWriteBack_.load() ||
+        daycare_.hasPendingXp()) {
+        invalidateTerminalSavOwner();
+    }
+    // A staging slot can be invalidated after its disk read but before LVGL
+    // consumes it. The UI task records that fact; only runOnce knows whether
+    // pending XP/save work makes an immediate reload unsafe. Wait for those
+    // operations (and their strict reload) instead of retrying SD every frame.
+    if (terminalStagedPublishRetryNeeded_.load()) {
+        if (terminalNeedsParty_.load() || terminalPartyReloadStrict_.load()) {
+            terminalStagedPublishRetryNeeded_.store(false);
+        } else if (setupDone_ && loadedSavPath_[0] != '\0' &&
+                   !daycare_.hasPendingXp() && !pendingSave_.load() &&
+                   !pendingSavWriteBack_.load() &&
+                   !pendingAutoCheckOut_.load() &&
+                   !pendingAutoCheckin_.load() &&
+                   !terminalPartyStaged_.load() &&
+                   !emulatorActive_.load() && !browserActive_.load() &&
+                   !textBattleActive_.load() &&
+                   terminalStagedPublishRetryNeeded_.exchange(false)) {
+            requestTerminalPartyLoad();
+            LOG_INFO("[MonsterMesh] retrying SAV party load after stale staging slot\n");
+        }
+    }
     // Trackball press toggle is handled in handleInputEvent() via INPUT_BROKER_SELECT
 
     // Keep keyboard hook installed at all times. installKeyboardHook is now
@@ -2320,23 +2714,51 @@ int32_t MonsterMeshModule::runOnce()
     // radio while a 32KB SD write is mid-flight was freezing the device.
     if (pendingForgetMmb_) {
         pendingForgetMmb_ = false;
-        for (uint8_t i = 0; i < mmbCapableCount_; ++i) {
+        uint32_t forgotten[MAX_MMB_CAPABLE] = {};
+        const uint8_t forgottenCount = takeMmbCapableNodes(forgotten);
+        for (uint8_t i = 0; i < forgottenCount; ++i) {
             LOG_INFO("[MonsterMesh] forget mmb: removing node 0x%08x\n",
-                     (unsigned)mmbCapableNodes_[i]);
-            nodeDB->removeNodeByNum(mmbCapableNodes_[i]);
+                     (unsigned)forgotten[i]);
+            nodeDB->removeNodeByNum(forgotten[i]);
         }
-        mmbCapableCount_ = 0;
         nextBeaconRequestsResponse_ = true;
         daycare_.forceBeacon();
     }
 
-    if (pendingSave_) {
-        pendingSave_ = false;
+    bool savTransactionAttemptedThisLoop = false;
+    const uint32_t deferredRetryAt = nextEmuSaveRetryMs_.load();
+    if (pendingSave_.load() && !emulatorActive_ && emuTaskIdle_.load() &&
+        (deferredRetryAt == 0 ||
+         (int32_t)(millis() - deferredRetryAt) >= 0) &&
+        pendingSave_.exchange(false)) {
+        // Claim before I/O.  A newer request raised while writing remains set
+        // and is not erased by this attempt's success.
+        savTransactionAttemptedThisLoop = true;
         uint32_t saveStart = millis();
         LOG_INFO("[MonsterMesh] deferred SAV save: start\n");
-        emu_.save();
-        LOG_INFO("[MonsterMesh] deferred SAV save: done (%ums)\n",
-                 (unsigned)(millis() - saveStart));
+        if (emu_.save()) {
+            nextEmuSaveRetryMs_ = 0;
+            LOG_INFO("[MonsterMesh] deferred SAV save: done (%ums)\n",
+                     (unsigned)(millis() - saveStart));
+        } else {
+            nextEmuSaveRetryMs_.store(millis() + 30000);
+            pendingSave_.store(true);
+            LOG_WARN("[MonsterMesh] deferred SAV save failed; retrying in 30000 ms\n");
+        }
+    }
+
+    // A browser selection that replaces an existing cart waits here until
+    // the emulation task is quiescent and every old-cart save request has
+    // completed successfully. MonsterMeshEmulator::begin() frees/replaces the
+    // current core and SRAM, so launching sooner could race runFrame() or
+    // retarget a failed save retry to the newly selected ROM.
+    if (!pendingSave_.load() && emuTaskIdle_.load()) {
+        char selectedPath[sizeof(pendingRomLaunchPath_)] = {};
+        if (claimQueuedRomLaunch(selectedPath, sizeof(selectedPath))) {
+            emuInitialized_ = false;
+            launchROMNow(selectedPath);
+            completeRomLaunch();
+        }
     }
 
     // Radio + WiFi state sync on the LoRa thread. LVGL thread only flips
@@ -2572,7 +2994,10 @@ int32_t MonsterMeshModule::runOnce()
         }
     }
     // T4 reply drain: peer's Y/N to our outstanding challenge.
-    if (pendingMmtAccepted_) {
+    const bool terminalPartyPublishedForAccept =
+        !terminalNeedsParty_.load() && !terminalPartyStaged_.load() &&
+        terminalSavOwnerIsReady();
+    if (pendingMmtAccepted_ && terminalPartyPublishedForAccept) {
         pendingMmtAccepted_ = false;
         // NOTE: do NOT call terminal_.printLine() here. runOnce is on the
         // LoRa task; printLine allocates LVGL labels on that thread and can
@@ -2581,11 +3006,12 @@ int32_t MonsterMeshModule::runOnce()
         // anyway, so the user wouldn't see the line either way.
         LOG_INFO("[MonsterMesh] mmt accept from %s — kicking off PvP\n",
                  mmtPeerShort_[0] ? mmtPeerShort_ : "(?)");
+        const bool hasAcceptedParty = terminal_.hasParty();
         LOG_INFO("[MonsterMesh] mmt accept gate: target=0x%08X hasParty=%d "
                  "emu=%d br=%d tb=%d\n",
-                 (unsigned)mmtAcceptedTxTarget_, (int)terminal_.hasParty(),
+                 (unsigned)mmtAcceptedTxTarget_, (int)hasAcceptedParty,
                  (int)emulatorActive_, (int)browserActive_, (int)textBattleActive_);
-        if (mmtAcceptedTxTarget_ && terminal_.hasParty()) {
+        if (mmtAcceptedTxTarget_ && hasAcceptedParty) {
             mmtBattlePeer_ = mmtAcceptedTxTarget_;
             // Pre-compute seed and send TEXT_BATTLE_START right now so the
             // receiver arms its party-RX state machine before our chunks
@@ -2600,7 +3026,7 @@ int32_t MonsterMeshModule::runOnce()
         } else {
             LOG_WARN("[MonsterMesh] mmt: launch SKIPPED — target=%u hasParty=%d\n",
                      (unsigned)(mmtAcceptedTxTarget_ ? 1 : 0),
-                     (int)terminal_.hasParty());
+                     (int)hasAcceptedParty);
         }
     }
     if (pendingMmtDeclined_) {
@@ -2623,30 +3049,66 @@ int32_t MonsterMeshModule::runOnce()
 
     // Event-driven daycare-XP flush to .sav. Daycare bumps its
     // lastEventTime each time runEventCycle fires (the only path that can
-    // change totalXpGained). When that timestamp moves past our high-
-    // watermark, sync once. SD only spins up on real XP change.
+    // change pending XP). A failed transaction leaves both the event and XP
+    // pending, with a short backoff so runOnce() cannot hammer the SD card.
     {
         bool cartLoaded = emuInitialized_;  // see writeback gate below re: not ORing isRunning()
         uint32_t evtTime = daycare_.getLastEventTime();
+        const bool unsyncedDaycareXp =
+            daycare_.hasPendingXp() || daycareSavSync_.needsSync(evtTime);
         if (!emulatorActive_ && !browserActive_ && !cartLoaded &&
+            !pendingSave_ && !savTransactionAttemptedThisLoop &&
             daycare_.isActive() && loadedSavPath_[0] &&
-            evtTime != 0 && evtTime != lastSavSyncedEventTime_) {
-            lastSavSyncedEventTime_ = evtTime;
-            const char *sdRel = loadedSavPath_;
-            if (strncmp(sdRel, "/sd", 3) == 0) sdRel += 3;
-            // NO LockGuard here — patchSdSavPathWithDaycareXp takes spiLock
-            // internally. spiLock is a NON-RECURSIVE binary semaphore: taking
-            // it here and again inside was a self-deadlock that hung the whole
-            // main OSThread loop (frozen UI, TASK_WDT reset ~90 s later).
-            if (patchSdSavPathWithDaycareXp(sdRel, daycare_)) {
-                LOG_INFO("[MonsterMesh] daycare→sav flush: '%s'\n", sdRel);
+            unsyncedDaycareXp) {
+            if (!daycare_.hasPendingXp()) {
+                // Flavor-only event: there is nothing durable to write.
+                daycareSavSync_.recordSuccess(evtTime);
+            } else if (daycareSavSync_.retryReady(millis())) {
+                // Serialize the two logical SAV writers across this runOnce
+                // iteration.  A battle writeback may be queued by another
+                // task while the daycare transaction holds spiLock; defer it
+                // to the next loop so it cannot overwrite the just-flushed XP.
+                savTransactionAttemptedThisLoop = true;
+                const char *sdRel = loadedSavPath_;
+                if (strncmp(sdRel, "/sd/", 4) == 0) sdRel += 3;
+                invalidateTerminalSavOwner();
+                // NO LockGuard here — patchSdSavPathWithDaycareXp takes
+                // spiLock internally. spiLock is a NON-RECURSIVE binary
+                // semaphore, so an outer lock would self-deadlock.
+                const bool persisted =
+                    patchSdSavPathWithDaycareXp(sdRel, daycare_);
+                const bool pendingAfter = daycare_.hasPendingXp();
+                static constexpr uint32_t RETRY_BACKOFF_MS = 30000;
+                const bool eventConsumed = daycareSavSync_.finishPersistenceAttempt(
+                    evtTime, millis(), persisted, pendingAfter,
+                    RETRY_BACKOFF_MS, 1000);
+                if (persisted) {
+                    // The in-memory terminal party predates the fresh-SAV
+                    // merge. Reload before another battle can start so its
+                    // level/stats include the daycare baseline.
+                    requestStrictTerminalPartyReload(sdRel);
+                }
+                if (eventConsumed) {
+                    LOG_INFO("[MonsterMesh] daycare→sav flush: '%s'\n", sdRel);
+                } else if (persisted) {
+                        // XP can arrive while an older failed snapshot is
+                        // staged. That transaction committed successfully,
+                        // but the newer remainder still belongs to this event
+                        // watermark and must be flushed before consuming it.
+                    LOG_INFO("[MonsterMesh] daycare→sav partial flush: '%s'\n", sdRel);
+                } else {
+                    LOG_WARN("[MonsterMesh] daycare→sav flush failed; retry after %u ms\n",
+                             (unsigned)RETRY_BACKOFF_MS);
+                }
             }
         }
     }
 
 
-    if (pendingSavWriteBack_) {
-        pendingSavWriteBack_ = false;
+    if (!savTransactionAttemptedThisLoop && !pendingSave_ &&
+        pendingSavWriteBack_ &&
+        (nextSavWriteBackRetryMs_ == 0 ||
+         (int32_t)(millis() - nextSavWriteBackRetryMs_) >= 0)) {
         // Cart-loaded gate: only touch the SAV when NO cart is in memory,
         // otherwise the emu's next writeSaveFile would clobber our XP patch.
         // Use emuInitialized_ alone — it is set true at ROM launch and false
@@ -2656,17 +3118,58 @@ int32_t MonsterMeshModule::runOnce()
         // true forever after the first ROM launch — which silently blocked
         // every terminal battle-XP writeback, even after ejecting the cart.
         bool cartLoaded = emuInitialized_;
-        if (!emulatorActive_ && !browserActive_ &&
-            !cartLoaded && terminal_.hasParty() &&
-            loadedSavPath_[0]) {
-            const Gen1Party &p = terminal_.getParty();
-            concurrency::LockGuard g(spiLock);
-            (void)writePartyToSavOnSd(loadedSavPath_, p);
+        monstermesh::BattleSavBatch *batch = battleSavQueue_.front();
+        if (!batch) {
+            pendingSavWriteBack_.store(false);
+            nextSavWriteBackRetryMs_ = 0;
+        } else if (!emulatorActive_ && !browserActive_ && !cartLoaded &&
+                   (!daycare_.isActive() || !daycare_.hasPendingXp())) {
+            auto *writtenParty = static_cast<DaycarePartyInfo *>(
+                heap_caps_calloc(6, sizeof(DaycarePartyInfo),
+                                 MALLOC_CAP_8BIT));
+            bool wrote = false;
+            invalidateTerminalSavOwner();
+            if (writtenParty) {
+                concurrency::LockGuard g(spiLock);
+                wrote = writeBattleXpToSavOnSd(
+                    batch->owner.path, batch->owner.partyCount,
+                    batch->owner.species, batch->owner.monIdentity,
+                    batch->xp, writtenParty);
+            }
+            if (wrote) {
+                // The UI party used an approximate live XP calculation and
+                // may predate other serialized SAV changes. Reload the fully
+                // patched disk image before another battle can start.
+                requestStrictTerminalPartyReload(batch->owner.path);
+                if (daycare_.isActive() &&
+                    daycare_.isBoundToSav(batch->owner.path) &&
+                    !daycare_.refreshSavBaseline(
+                        batch->owner.path, writtenParty,
+                        batch->owner.partyCount)) {
+                    // The SAV delta is already durable and must never be
+                    // replayed. A later check-in derives the same baseline
+                    // from disk if this auxiliary-state refresh failed.
+                    LOG_WARN("[MonsterMesh] battle XP saved; daycare baseline refresh failed\n");
+                }
+                // Consume the immutable owner only after every use above.
+                battleSavQueue_.complete(batch);
+                pendingSavWriteBack_.store(!battleSavQueue_.empty());
+                nextSavWriteBackRetryMs_ = 0;
+            } else {
+                // The immutable batch remains untouched for retry. In
+                // particular, a later terminal load cannot retarget it.
+                pendingSavWriteBack_.store(true);
+                nextSavWriteBackRetryMs_ = millis() + 30000;
+                LOG_WARN("[MonsterMesh] battle XP writeback failed for '%s'; retrying in 30000 ms\n",
+                         batch->owner.path);
+            }
+            free(writtenParty);
         } else {
-            LOG_INFO("[MonsterMesh] sav writeback: skipped (emu=%d br=%d cart=%d hasParty=%d path=%d)\n",
+            nextSavWriteBackRetryMs_ = millis() + 1000;
+            LOG_INFO("[MonsterMesh] sav writeback: skipped (emu=%d br=%d cart=%d daycareXp=%d)\n",
                      (int)emulatorActive_, (int)browserActive_,
-                     (int)cartLoaded, (int)terminal_.hasParty(),
-                     (int)(loadedSavPath_[0] != 0));
+                     (int)cartLoaded,
+                     (int)daycare_.hasPendingXp());
         }
     }
 
@@ -2674,57 +3177,111 @@ int32_t MonsterMeshModule::runOnce()
     // Deferred terminal party load — runs on the LoRa thread so the LVGL
     // thread can paint the terminal panel immediately without waiting on
     // SD reinit + directory scan.
-    if (terminalNeedsParty_) {
-        terminalNeedsParty_ = false;
-        Gen1Party p = {};
-        bool loaded = false;
-        char resolvedSav[256] = {};
-        char trainerName[8] = {};
-        {
-            concurrency::LockGuard g(spiLock);
-            loaded = loadPartyFromSavOnSd(emu_.romPath(),
-                                          p, resolvedSav, sizeof(resolvedSav),
-                                          trainerName, sizeof(trainerName));
+    const bool terminalPartyRetryReady =
+        nextTerminalPartyLoadRetryMs_ == 0 ||
+        (int32_t)(millis() - nextTerminalPartyLoadRetryMs_) >= 0;
+    if (terminalPartyRetryReady && !pendingSave_.load() &&
+        !emulatorActive_.load() && !browserActive_.load() &&
+        (!emuInitialized_.load() || emuTaskIdle_.load()) &&
+        !terminalPartyStaged_ &&
+        !textBattleActive_ && !textBattle_.isActive() &&
+        !pendingSavWriteBack_.load() && !pendingXpAwardCb_.load() &&
+        terminalNeedsParty_.exchange(false)) {
+        const bool strictReload = terminalPartyReloadStrict_.exchange(false);
+        const uint32_t loadGeneration = invalidateTerminalSavOwner();
+        struct TerminalPartyLoadScratch {
+            char exactSavPath[256];
+            Gen1Party party;
+            char resolvedSav[256];
+            char trainerName[8];
+        };
+        auto *scratch = static_cast<TerminalPartyLoadScratch *>(
+            heap_caps_calloc(1, sizeof(TerminalPartyLoadScratch),
+                             MALLOC_CAP_8BIT));
+        if (!scratch) {
+            // Preserve the consumed request for a later low-memory retry.
+            terminalPartyReloadStrict_.store(strictReload);
+            terminalNeedsParty_.store(true);
+            nextTerminalPartyLoadRetryMs_ = millis() + 1000;
+            LOG_WARN("[MonsterMesh] terminal SAV load: scratch allocation failed; retrying\n");
+        } else {
+            if (strictReload) {
+                strncpy(scratch->exactSavPath, strictTerminalReloadSavPath_,
+                        sizeof(scratch->exactSavPath) - 1);
+            }
+            bool loaded = false;
+            {
+                concurrency::LockGuard g(spiLock);
+                loaded = loadPartyFromSavOnSd(
+                    emu_.romPath(), scratch->party, scratch->resolvedSav,
+                    sizeof(scratch->resolvedSav), scratch->trainerName,
+                    sizeof(scratch->trainerName),
+                    scratch->exactSavPath[0] ? scratch->exactSavPath : nullptr);
+            }
+            Gen1Party &p = scratch->party;
+            if (!loaded && !strictReload && emuInitialized_ && emu_.isRunning()) {
+                p.count = emu_.readWRAM(Gen1::wPartyCount);
+                if (p.count > 6) p.count = 6;
+                emu_.readWRAMRange(Gen1::wPartySpecies,  p.species,                7);
+                emu_.readWRAMRange(Gen1::wPartyMons,     (uint8_t *)p.mons,        sizeof(p.mons));
+                emu_.readWRAMRange(Gen1::wPartyMonOT,    (uint8_t *)p.otNames,     sizeof(p.otNames));
+                emu_.readWRAMRange(Gen1::wPartyMonNicks, (uint8_t *)p.nicknames,   sizeof(p.nicknames));
+                loaded = true;
+            }
+            if (loaded) {
+                nextTerminalPartyLoadRetryMs_ = 0;
+                if (strictReload)
+                    strictTerminalReloadSavPath_[0] = '\0';
+                terminalStagedParty_ = p;
+                // Remember where the SAV came from so battle XP can be written
+                // back after a fight (gated on !emulatorActive_ in runOnce).
+                strncpy(loadedSavPath_, scratch->resolvedSav,
+                        sizeof(loadedSavPath_) - 1);
+                loadedSavPath_[sizeof(loadedSavPath_) - 1] = '\0';
+                loadedSavPartyCount_ = p.count;
+                memcpy(loadedSavPartySpecies_, p.species,
+                       sizeof(loadedSavPartySpecies_));
+                // Stash the decoded trainer name so the daycare check-in can use
+                // it instead of falling back to party[0]'s nickname.
+                strncpy(stagedTrainerName_, scratch->trainerName,
+                        sizeof(stagedTrainerName_) - 1);
+                stagedTrainerName_[sizeof(stagedTrainerName_) - 1] = '\0';
+                // First successful SAV load doubles as daycare check-in: the
+                // background beacons advertise this party to the mesh. The very
+                // first beacon TX is deferred to the runOnce 30s gate above.
+                daycareCheckInFromStagedParty();
+                if (daycare_.hasPendingXp())
+                    invalidateTerminalSavOwner();
+                // Publish the fully prepared staging slot last. The LVGL task
+                // receives both the bytes and the generation of the exact SAV
+                // read; it may never attach them to a later generation.
+                terminalStagedPartyGeneration_.store(loadGeneration);
+                terminalPartyStaged_.store(true);
+            } else if (strictReload) {
+                // A verified SAV mutation must reach the terminal before the next
+                // battle. Keep the exact owner queued and never substitute WRAM.
+                requestStrictTerminalPartyReload(scratch->exactSavPath[0]
+                                                     ? scratch->exactSavPath
+                                                     : nullptr);
+                nextTerminalPartyLoadRetryMs_ = millis() + 1000;
+                LOG_WARN("[MonsterMesh] strict terminal SAV reload failed; retrying in 1000 ms\n");
+            }
+            LOG_INFO("[MonsterMesh] terminal party load: loaded=%d count=%d sav='%s' rom='%s'\n",
+                     (int)loaded, (int)p.count,
+                     scratch->resolvedSav[0] ? scratch->resolvedSav : "(none)",
+                     emu_.romPath()[0] ? emu_.romPath() : "(none)");
+            free(scratch);
         }
-        if (!loaded && emu_.isRunning()) {
-            p.count = emu_.readWRAM(Gen1::wPartyCount);
-            if (p.count > 6) p.count = 6;
-            emu_.readWRAMRange(Gen1::wPartySpecies,  p.species,                7);
-            emu_.readWRAMRange(Gen1::wPartyMons,     (uint8_t *)p.mons,        sizeof(p.mons));
-            emu_.readWRAMRange(Gen1::wPartyMonOT,    (uint8_t *)p.otNames,     sizeof(p.otNames));
-            emu_.readWRAMRange(Gen1::wPartyMonNicks, (uint8_t *)p.nicknames,   sizeof(p.nicknames));
-            loaded = true;
-        }
-        if (loaded) {
-            terminalStagedParty_ = p;
-            // Remember where the SAV came from so battle XP can be written
-            // back after a fight (gated on !emulatorActive_ in runOnce).
-            strncpy(loadedSavPath_, resolvedSav, sizeof(loadedSavPath_) - 1);
-            loadedSavPath_[sizeof(loadedSavPath_) - 1] = '\0';
-            // Stash the decoded trainer name so the daycare check-in can use
-            // it instead of falling back to party[0]'s nickname.
-            strncpy(stagedTrainerName_, trainerName, sizeof(stagedTrainerName_) - 1);
-            stagedTrainerName_[sizeof(stagedTrainerName_) - 1] = '\0';
-            terminalPartyStaged_ = true;  // LVGL thread will pick this up
-            // First successful SAV load doubles as daycare check-in: the
-            // background beacons advertise this party to the mesh. The very
-            // first beacon TX is deferred to the runOnce 30s gate above.
-            daycareCheckInFromStagedParty();
-        }
-        LOG_INFO("[MonsterMesh] terminal party load: loaded=%d count=%d sav='%s' rom='%s'\n",
-                 (int)loaded, (int)p.count,
-                 resolvedSav[0] ? resolvedSav : "(none)",
-                 emu_.romPath()[0] ? emu_.romPath() : "(none)");
     }
 
     // Auto-load the party as soon as SD is mounted. SAV reading is just an
     // SD read — no LoRa traffic — so it's safe before the PacketAPI/NodeInfo
     // window settles. The first beacon TX is deferred separately below.
     if (setupDone_ && !autoPartyLoadDone_ && !terminalNeedsParty_ &&
-        !terminal_.hasParty() &&
-        !emulatorActive_ && !browserActive_) {
+        !terminalPartyStaged_.load() && !emulatorActive_ && !browserActive_ &&
+        !terminal_.hasParty()) {
         autoPartyLoadDone_ = true;
-        terminalNeedsParty_ = true;
+        requestTerminalPartyLoad();
         LOG_INFO("[MonsterMesh] auto party load triggered (SD ready)\n");
     }
 
@@ -2738,8 +3295,7 @@ int32_t MonsterMeshModule::runOnce()
     // when it next saves on its own. Only write when no ROM has been
     // launched this session, OR the cart has been ejected (emuInitialized_
     // false). Otherwise, just stop daycare cleanly.
-    if (pendingAutoCheckOut_) {
-        pendingAutoCheckOut_ = false;
+    if (pendingAutoCheckOut_.exchange(false)) {
         if (daycare_.isActive()) {
             const char *romPath = emu_.romPath();
             bool cartLoaded = emuInitialized_;  // not || isRunning(): that flag never resets
@@ -2751,11 +3307,11 @@ int32_t MonsterMeshModule::runOnce()
                 // TASK_WDT). See matching note at the daycare→sav flush.
                 patched = patchSavOnSdWithDaycareXp(romPath, daycare_);
             }
-            if (!patched) {
-                // Cart loaded, no ROM path, or write failed — stop daycare
-                // cleanly without touching the SAV.
-                daycare_.checkOut(nullptr);
-            }
+            // Entering the emulator/browser is a terminal lifecycle action:
+            // stop daycare even if there was no path or persistence failed.
+            // A failed transaction deliberately leaves pending XP available
+            // for a later retry/check-in.
+            daycare_.checkOut(nullptr);
             LOG_INFO("[MonsterMesh] daycare auto checked-out (cart=%d patched=%d)\n",
                      (int)cartLoaded, (int)patched);
         }
@@ -2763,10 +3319,13 @@ int32_t MonsterMeshModule::runOnce()
 
     // Auto-checkIn on emulator/browser exit — reload SAV and re-checkin so
     // beacons reflect any XP/level changes earned during the play session.
-    if (pendingAutoCheckin_ && setupDone_ && !emulatorActive_ && !browserActive_) {
-        pendingAutoCheckin_ = false;
+    if (setupDone_ && !emulatorActive_ && !browserActive_ &&
+        pendingAutoCheckin_.exchange(false)) {
         if (!daycare_.isActive()) {
-            terminalNeedsParty_ = true;  // forces fresh SAV read + checkIn
+            // Prefer the currently loaded cart. loadedSavPath_ may still be
+            // the terminal owner from a different ROM selected earlier.
+            requestStrictTerminalPartyReload(
+                emu_.romPath()[0] ? nullptr : loadedSavPath_);
             LOG_INFO("[MonsterMesh] daycare auto check-in queued (emulator exit)\n");
         }
     }
@@ -2966,8 +3525,28 @@ int32_t MonsterMeshModule::runOnce()
     // when both fire at once Red's radio queue wedged (b104-pattern) and
     // the ACCEPT never made it to Blue.
     if (setupDone_ && !emulatorActive_ && !browserActive_ &&
-        !textBattle_.isActive() && daycare_.isActive()) {
-        daycare_.tick(millis());
+        !textBattleActive_.load() && daycare_.isActive()) {
+        const uint32_t daycareNow = millis();
+        const bool eventDue = daycare_.eventDue(daycareNow);
+        const bool restorePublishedParty =
+            eventDue && terminalSavOwnerIsReady();
+        const uint32_t guardedGeneration =
+            eventDue ? invalidateTerminalSavOwner() : 0;
+
+        // A router CHALLENGE can become active between the outer gate and
+        // this point. If so, defer the entire tick. If it arrives later, the
+        // pre-event invalidation makes its final ACCEPT readiness check fail.
+        if (!textBattleActive_.load())
+            daycare_.tick(daycareNow);
+
+        if (eventDue && restorePublishedParty &&
+            !daycare_.hasPendingXp() && !pendingSave_.load() &&
+            !pendingSavWriteBack_.load() &&
+            !terminalNeedsParty_.load() && !terminalPartyStaged_.load() &&
+            !emulatorActive_.load() && !browserActive_.load() &&
+            loadedSavPath_[0] != '\0') {
+            (void)republishTerminalSavOwnerIfUnchanged(guardedGeneration);
+        }
     }
 
     // ── T4 phase 3: live PvP battle launch ────────────────────────────────
@@ -2975,6 +3554,11 @@ int32_t MonsterMeshModule::runOnce()
     // auto-launch is now gated by the mmtChallengerPeer_ window (set when
     // the sender's challenge DM lands), so stray TEXT_BATTLE_START packets
     // from other-agent code can't bounce us into spurious PvP.
+    const bool terminalPartyPublishedForBattle =
+        !terminalNeedsParty_.load() && !terminalPartyStaged_.load() &&
+        terminalSavOwnerIsReady();
+    const bool terminalHasPublishedParty =
+        terminalPartyPublishedForBattle && terminal_.hasParty();
     // Drain pending MMB party TX (point-to-point). Sender sets this on Y
     // receipt; receiver sets it on TEXT_BATTLE_START receipt. We re-publish
     // the chunk burst every MMB_PARTY_RETRY_INTERVAL_MS until either the
@@ -2982,7 +3566,8 @@ int32_t MonsterMeshModule::runOnce()
     // elapses — needed because the MQTT bridge is QoS 0 and a peer's WiFi
     // outage drops chunks silently. mmbOppPartyReady_ is the *receive*
     // signal; the opposite direction has no ACK, so we just keep firing.
-    if (mmbPartyTxTarget_ != 0 && terminal_.hasParty()) {
+    if (mmbPartyTxTarget_ != 0 && mmtBattleSession_ != 0 &&
+        terminalHasPublishedParty) {
         uint32_t now = millis();
         if (mmbPartyTxStartMs_ != 0 &&
             (now - mmbPartyTxStartMs_) >= MMB_PARTY_RETRY_TIMEOUT_MS) {
@@ -3016,7 +3601,7 @@ int32_t MonsterMeshModule::runOnce()
     // to once a second so we don't spam the serial.
     if ((pendingMmtBattleAsInitiator_ || pendingMmtBattleAsReceiver_) &&
         (textBattleActive_ || !setupDone_ || emulatorActive_ ||
-         browserActive_ || !terminal_.hasParty() || !mmbOppPartyReady_)) {
+         browserActive_ || !terminalHasPublishedParty || !mmbOppPartyReady_)) {
         static uint32_t lastBlockLogMs = 0;
         uint32_t now = millis();
         if (now - lastBlockLogMs > 1000) {
@@ -3027,7 +3612,7 @@ int32_t MonsterMeshModule::runOnce()
                      (int)pendingMmtBattleAsReceiver_,
                      (int)textBattleActive_, (int)setupDone_,
                      (int)emulatorActive_, (int)browserActive_,
-                     (int)terminal_.hasParty(),
+                     (int)terminalHasPublishedParty,
                      (int)mmbOppPartyReady_);
         }
     }
@@ -3130,7 +3715,7 @@ int32_t MonsterMeshModule::runOnce()
     // can't tell whether the launch fired or got eaten by a gate.
     if (pendingMmb2Initiator_ &&
         (textBattleActive_ || !setupDone_ ||
-         emulatorActive_ || browserActive_ || !terminal_.hasParty())) {
+         emulatorActive_ || browserActive_ || !terminalHasPublishedParty)) {
         static uint32_t lastMmb2BlockedMs = 0;
         uint32_t now = millis();
         if (now - lastMmb2BlockedMs > 1000) {
@@ -3139,11 +3724,11 @@ int32_t MonsterMeshModule::runOnce()
                      "emu=%d br=%d hasParty=%d\n",
                      (int)textBattleActive_, (int)setupDone_,
                      (int)emulatorActive_, (int)browserActive_,
-                     (int)terminal_.hasParty());
+                     (int)terminalHasPublishedParty);
         }
     }
     if (pendingMmb2Initiator_ && !textBattleActive_ && setupDone_ &&
-        !emulatorActive_ && !browserActive_ && terminal_.hasParty()) {
+        !emulatorActive_ && !browserActive_ && terminalHasPublishedParty) {
         pendingMmb2Initiator_ = false;
         uint32_t target = pendingMmb2Target_;
         char     peerShort[12];
@@ -3166,7 +3751,7 @@ int32_t MonsterMeshModule::runOnce()
 
     if ((pendingMmtBattleAsInitiator_ || pendingMmtBattleAsReceiver_) &&
         !textBattleActive_ && setupDone_ && !emulatorActive_ &&
-        !browserActive_ && terminal_.hasParty() && mmbOppPartyReady_) {
+        !browserActive_ && terminalHasPublishedParty && mmbOppPartyReady_) {
         bool asInitiator = pendingMmtBattleAsInitiator_;
         pendingMmtBattleAsInitiator_ = false;
         pendingMmtBattleAsReceiver_  = false;
@@ -3243,7 +3828,7 @@ int32_t MonsterMeshModule::runOnce()
 
     // ── MMG bulk ladder: kick off battle 0 once both reply packets in ─────
     if (bbsLadderStartPending_ && !textBattleActive_ && setupDone_ &&
-        !emulatorActive_ && !browserActive_ && terminal_.hasParty()) {
+        !emulatorActive_ && !browserActive_ && terminalHasPublishedParty) {
         bbsLadderStartPending_ = false;
         bbsLadderTrainerIdx_ = 0;
         // P2.28.5: vestigial flush_cb park + lgfx fillScreen REMOVED.
@@ -3273,12 +3858,9 @@ int32_t MonsterMeshModule::runOnce()
             out->channel         = MONSTERMESH_CHANNEL;
             out->want_ack        = false;
             out->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
-            uint8_t buf[BATTLELINK_HDR_SIZE];
-            BattlePacket *pkt = (BattlePacket *)buf;
-            memset(buf, 0, sizeof(buf));
-            pkt->type = (uint8_t)PktType::BBS_FIGHT_REQUEST;
-            pkt->setSessionId((uint16_t)(millis() & 0xFFFF));
-            pkt->seq = 0;
+            uint8_t buf[BATTLELINK_HDR_SIZE] = {};
+            writeBattlePacketHeader(buf, PktType::BBS_FIGHT_REQUEST,
+                                    (uint16_t)(millis() & 0xFFFF));
             memcpy(out->decoded.payload.bytes, buf, sizeof(buf));
             out->decoded.payload.size = sizeof(buf);
             service->sendToMesh(out, RX_SRC_LOCAL, true);
@@ -3313,7 +3895,7 @@ int32_t MonsterMeshModule::runOnce()
     // startLocal here on the main loop (LovyanGFX must be touched from this
     // thread, same as the regular fight path below).
     if (bbsBattleStartPending_ && !textBattleActive_ && setupDone_ &&
-        !emulatorActive_ && !browserActive_ && terminal_.hasParty()) {
+        !emulatorActive_ && !browserActive_ && terminalHasPublishedParty) {
         bbsBattleStartPending_ = false;
         // P2.28.5: vestigial flush_cb park + lgfx fillScreen REMOVED.
         // The LVGL-native battle screen (loaded by showLvBattleScreen
@@ -3362,6 +3944,7 @@ int32_t MonsterMeshModule::runOnce()
                               (int)staleServer, (int)staleClient, (int)staleNetworked);
                 textBattle_.exit();
                 textBattleActive_ = false;
+                activeBattleSavOwner_ = {};
                 pendingBattleEndCleanup_ = true;
             }
         }
@@ -3370,7 +3953,7 @@ int32_t MonsterMeshModule::runOnce()
     // LVGL flush the same way the emulator path does, clear the screen, and
     // hand the staged party + a CPU mirror-match to startLocal().
     if (textBattleStartReq_ && !textBattleActive_ && setupDone_ &&
-        !emulatorActive_ && !browserActive_ && terminal_.getParty().count >= 1) {
+        !emulatorActive_ && !browserActive_ && terminalHasPublishedParty) {
         textBattleStartReq_ = false;
         pendingBattleEndCleanup_ = false;  // cancel any stale cleanup so it doesn't hide this new fight
         hideLvBattleScreen();              // reset lvBattleActive_ so takeover fires next tick
@@ -3584,6 +4167,16 @@ int32_t MonsterMeshModule::runOnce()
         textBattleActive_ = true;
     }
 
+    // Freeze the SAV owner before this battle can award XP. The owner remains
+    // stable across ROM/terminal reloads and across multi-trainer chains.
+    if (textBattle_.isActive() && !activeBattleSavOwner_.valid) {
+        if (!monstermesh::makeBattleSavOwner(
+                loadedSavPath_, terminal_.getParty(),
+                activeBattleSavOwner_)) {
+            LOG_WARN("[MonsterMesh] battle has no valid SAV owner; durable XP will be held out of writeback\n");
+        }
+    }
+
     // Drive textBattle_.tick() any time the state machine is alive —
     // independently of whether we've taken over the screen. The SERVER
     // sits in awaitingAccept_ (textBattle_.isActive()==true) BEFORE the
@@ -3613,59 +4206,42 @@ int32_t MonsterMeshModule::runOnce()
             textBattle_.setEndPrompt("");
         }
         textBattle_.tick(millis());
-        // P2.28: LVGL-native battle screen. State changes push into
-        // LVGL widget content; LVGL handles all drawing on its own
-        // timer. No more lgfx-direct render, no more flush_cb park,
-        // no more recovery sweep. Update only on dirty.
-        if (textBattle_.dirty()) {
-            // P2.39b: REMOVED runOnce-side updateLvBattleScreen call.
-            // It races with the LVGL render task (we mutate 20+ widgets
-            // while LVGL is reading them on its own thread) and is the
-            // root cause of the mid-PvP crashes (~30-90 s after CHALLENGE
-            // is sent). The key-press path at the bottom of the file
-            // already refreshes the screen from the LVGL thread on
-            // every keypress — same-thread, safe. State changes that
-            // happen between keypresses (CHALLENGE retx logs, ACCEPT
-            // ack, "Battle begins!" line) won't appear until the next
-            // key press, which is an acceptable trade vs. random freeze.
-            textBattle_.clearDirty();
-        }
-#if HAS_TFT
-        // P2.29: re-assert the battle screen if Meshtastic's DeviceUI
-        // (notification toast, frame switch on incoming DM, etc.)
-        // lv_screen_load'd its home screen back over us. Throttled to
-        // 500 ms so we don't get into a tight fight-loop with DeviceUI
-        // — when an incoming DM continuously triggers their screen-load,
-        // an unthrottled per-tick re-assert can starve LVGL and crash
-        // the deck.
-        {
-            static uint32_t lastReassertMs = 0;
-            uint32_t now = millis();
-            if (lvBattleActive_ && lvBattleScreen_ &&
-                now - lastReassertMs >= 500 &&
-                lv_screen_active() != (lv_obj_t *)lvBattleScreen_) {
-                lv_screen_load((lv_obj_t *)lvBattleScreen_);
-                // Skip the full updateLvBattleScreen on re-assert —
-                // widget content is already correct, we just need to
-                // get our screen on top again. Doing 20+ label updates
-                // here under load (user spamming keys) was freezing
-                // the deck.
-                lastReassertMs = now;
-            }
-        }
-#endif
+        // LVGL's own timer consumes the atomic dirty flag, updates widgets,
+        // and re-asserts the screen. This task must not clear the notification
+        // or call LVGL while the render task may be active.
         // Drain per-faint XP that the engine accumulated this turn. The
         // LVGL thread (tryConsumeStagedParty) credits each slot directly
         // to the saved party — no further splitting.
+        bool xpPersistenceDeferred = false;
         uint32_t xp[6] = {};
         if (textBattle_.consumePendingXp(xp)) {
-            for (uint8_t i = 0; i < 6; ++i) stagedXp_[i] += xp[i];
-            pendingXpAwardCb_ = true;
+            bool anyXp = false;
+            for (uint8_t i = 0; i < 6; ++i) {
+                anyXp |= xp[i] != 0;
+            }
+            if (anyXp) {
+                if (activeBattleSavOwner_.valid &&
+                    battleSavQueue_.enqueue(activeBattleSavOwner_, xp)) {
+                    // Enqueue the immutable durable owner first. Only then
+                    // publish the matching UI credit; a queue failure rolls
+                    // the engine drain back instead of losing earned XP.
+                    invalidateTerminalSavOwner();
+                    for (uint8_t i = 0; i < 6; ++i) {
+                        if (xp[i]) saturatingAtomicAdd(stagedXp_[i], xp[i]);
+                    }
+                    pendingXpAwardCb_.store(true);
+                    pendingSavWriteBack_.store(true);
+                } else {
+                    textBattle_.restorePendingXp(xp);
+                    xpPersistenceDeferred = true;
+                    LOG_ERROR("[MonsterMesh] battle XP enqueue deferred; engine balance restored for retry\n");
+                }
+            }
         }
         // Battle ended — gym gauntlet chains to the next trainer with a full
         // heal between fights (matches RPi behavior). End callback only fires
         // when the player loses or clears the leader.
-        if (!textBattle_.isActive()) {
+        if (!textBattle_.isActive() && !xpPersistenceDeferred) {
             bool gauntletContinue = false;
             if (activeGymBattle_ < 8) {
                 bool won = (textBattle_.engineResult() ==
@@ -3769,15 +4345,12 @@ int32_t MonsterMeshModule::runOnce()
                                 (self && self->has_user) ? self->user.short_name : "anon";
                             uint8_t nameLen = (uint8_t)strlen(name);
                             if (nameLen > 12) nameLen = 12;
-                            uint8_t buf[BATTLELINK_HDR_SIZE + 14];
-                            BattlePacket *pkt = (BattlePacket *)buf;
-                            memset(buf, 0, sizeof(buf));
-                            pkt->type = (uint8_t)PktType::BBS_FIGHT_RESULT;
-                            pkt->setSessionId(0);
-                            pkt->seq = 0;
-                            pkt->payload[0] = 1;
-                            pkt->payload[1] = nameLen;
-                            memcpy(pkt->payload + 2, name, nameLen);
+                            uint8_t buf[BATTLELINK_HDR_SIZE + 14] = {};
+                            writeBattlePacketHeader(buf, PktType::BBS_FIGHT_RESULT, 0);
+                            uint8_t *payload = buf + BATTLELINK_HDR_SIZE;
+                            payload[0] = 1;
+                            payload[1] = nameLen;
+                            memcpy(payload + 2, name, nameLen);
                             size_t total = BATTLELINK_HDR_SIZE + 2 + nameLen;
                             memcpy(out->decoded.payload.bytes, buf, total);
                             out->decoded.payload.size = total;
@@ -3815,15 +4388,12 @@ int32_t MonsterMeshModule::runOnce()
                                 (self && self->has_user) ? self->user.short_name : "anon";
                             uint8_t nameLen = (uint8_t)strlen(name);
                             if (nameLen > 12) nameLen = 12;
-                            uint8_t buf[BATTLELINK_HDR_SIZE + 14];
-                            BattlePacket *pkt = (BattlePacket *)buf;
-                            memset(buf, 0, sizeof(buf));
-                            pkt->type = (uint8_t)PktType::BBS_FIGHT_RESULT;
-                            pkt->setSessionId(0);
-                            pkt->seq = 0;
-                            pkt->payload[0] = won ? 1 : 0;
-                            pkt->payload[1] = nameLen;
-                            memcpy(pkt->payload + 2, name, nameLen);
+                            uint8_t buf[BATTLELINK_HDR_SIZE + 14] = {};
+                            writeBattlePacketHeader(buf, PktType::BBS_FIGHT_RESULT, 0);
+                            uint8_t *payload = buf + BATTLELINK_HDR_SIZE;
+                            payload[0] = won ? 1 : 0;
+                            payload[1] = nameLen;
+                            memcpy(payload + 2, name, nameLen);
                             size_t total = BATTLELINK_HDR_SIZE + 2 + nameLen;
                             memcpy(out->decoded.payload.bytes, buf, total);
                             out->decoded.payload.size = total;
@@ -3883,6 +4453,7 @@ int32_t MonsterMeshModule::runOnce()
                 // flag so the next render shows the new opponent.
             } else {
                 textBattleActive_ = false;
+                activeBattleSavOwner_ = {};
                 if (!pendingBattleEndedCb_) {
                     // Pure PvP (MMB) battle — stage party/XP display for the LVGL thread.
                     stagedEndKind_ = StagedEndKind::FIGHT;
@@ -3929,12 +4500,9 @@ int32_t MonsterMeshModule::runOnce()
                 // here corrupted LVGL state and left the terminal textarea
                 // unable to receive keypresses after a battle ended.
                 pendingBattleEndCleanup_ = true;
-                // Schedule SAV write-back of the (possibly XP-leveled)
-                // party. The drain in this same runOnce loop checks that
-                // the emulator isn't running and no cart is loaded so we
-                // never trample emu state. Win or lose — XP earned this
-                // fight is permanent.
-                if (loadedSavPath_[0]) pendingSavWriteBack_ = true;
+                // Per-faint consumePendingXp() above owns durable battle-XP
+                // queuing. Do not schedule an absolute party write here: the
+                // LVGL party snapshot may predate a daycare flush.
 #endif
                 LOG_INFO("[MonsterMesh] text battle: ended\n");
             }
@@ -4050,6 +4618,9 @@ int32_t MonsterMeshModule::runOnce()
             }
         }
     }
+
+    if (setupDone_)
+        refreshDaycareUiSnapshot();
 
     drainTxQueue();
     // While the browser is open, run runOnce more often so the buffered
@@ -4494,6 +5065,7 @@ void MonsterMeshModule::ejectROM()
     // eject via the [Eject Cart] entry that the browser surfaces when a cart
     // is loaded.
     LOG_INFO("[MonsterMesh] Pause to ROM browser — cart kept loaded\n");
+    invalidateTerminalSavOwner();
     if (emu_.isRunning()) {
         pendingSave_ = true;
     }
@@ -4504,39 +5076,37 @@ void MonsterMeshModule::ejectROM()
 }
 
 // ── D6 — write daycare-earned XP back to the SAV on SD ─────────────────────
-// Reads the .sav next to `romPath`, hands it to PokemonDaycare::checkOut()
-// for additive XP patching (the patcher only ever increases EXP — it reads
-// the live SRAM value and adds the daycare delta on top, then recalcs level
-// + 5 stat fields and fixes the checksum byte). Writes the patched 32KB
-// back. If anything fails along the way, the original .sav is untouched.
-//
-// Returns true if the SAV was both read and re-written successfully. Even
-// then the patcher may have been a no-op (no XP gained). False ⇒ skipped.
-// Patches the daycare-side accumulated XP into the .sav file at savPath
-// (an SD-relative or "/sd/..." absolute path). Caller is responsible for
-// the cart-loaded gate. Returns true if dc.checkOut() actually wrote
-// changes to the SRAM image.
+// Transactionally patch the daycare-side pending XP into a SAV. The caller is
+// responsible for the cart-loaded gate; this helper owns both spiLock phases.
 static bool patchSdSavPathWithDaycareXp(const char *sdRel, PokemonDaycare &dc);
 
 static bool patchSavOnSdWithDaycareXp(const char *romPath, PokemonDaycare &dc)
 {
     if (!romPath || !romPath[0]) return false;
 
-    // Convert "/sd/foo.gb" → "/foo.sav" the same way the loader does.
+    // Convert "/sd/foo.gb" → "/foo.sav" without permitting truncation.
     char savPath[256] = {};
-    strncpy(savPath, romPath, sizeof(savPath) - 1);
-    char *dot = strrchr(savPath, '.');
-    if (!dot) return false;
-    if (sizeof(savPath) - (dot - savPath) < 5) return false;
-    strcpy(dot, ".sav");
+    const char *dot = strrchr(romPath, '.');
+    const char *slash = strrchr(romPath, '/');
+    if (!dot || (slash && dot < slash)) return false;
+    size_t stemLen = static_cast<size_t>(dot - romPath);
+    if (stemLen + sizeof(".sav") > sizeof(savPath)) return false;
+    memcpy(savPath, romPath, stemLen);
+    memcpy(savPath + stemLen, ".sav", sizeof(".sav"));
     const char *sdRel = savPath;
-    if (strncmp(sdRel, "/sd", 3) == 0) sdRel += 3;
+    if (strncmp(sdRel, "/sd/", 4) == 0) sdRel += 3;
     return patchSdSavPathWithDaycareXp(sdRel, dc);
 }
 
 static bool patchSdSavPathWithDaycareXp(const char *sdRel, PokemonDaycare &dc)
 {
     if (!sdRel || !sdRel[0]) return false;
+    if (!dc.hasPendingXp()) return true;
+    if (!dc.isBoundToSav(sdRel)) {
+        LOG_WARN("[MonsterMesh] D6 SAV write: daycare owner mismatch for '%s'\n",
+                 sdRel);
+        return false;
+    }
     // SD shares the SPI bus with the radio and TFT, so both SD phases below
     // hold spiLock. TWO hard-won rules:
     //  1. Callers must NOT hold spiLock. It is a NON-RECURSIVE binary
@@ -4544,9 +5114,8 @@ static bool patchSdSavPathWithDaycareXp(const char *sdRel, PokemonDaycare &dc)
     //     the main OSThread loop (frozen UI, dead keyboard, TASK_WDT reset
     //     ~90 s later). This was the "loader freezes after emulator + eject
     //     + terminal battle" bug.
-    //  2. The lock is NOT held across dc.checkOut(): that call persists
-    //     daycare state to internal-flash LittleFS, and stalling the
-    //     display/radio on the SPI bus for a flash write is pointless.
+    //  2. The lock is NOT held across daycare prepare/commit. Commit persists
+    //     auxiliary state to LittleFS, which does not need the SD SPI lock.
 
     // Standard Gen 1 SAV is 32KB.
     constexpr size_t SAV_SIZE = 32 * 1024;
@@ -4567,9 +5136,17 @@ static bool patchSdSavPathWithDaycareXp(const char *sdRel, PokemonDaycare &dc)
             free(sram);
             return false;
         }
+        (void)monstermesh::atomic_sd_detail::recoverFile(SD, sdRel);
         File f = SD.open(sdRel, FILE_READ);
         if (!f) {
             LOG_WARN("[MonsterMesh] D6 SAV write: SD.open('%s') for read failed\n", sdRel);
+            free(sram);
+            return false;
+        }
+        if (f.size() != SAV_SIZE) {
+            LOG_WARN("[MonsterMesh] D6 SAV write: unexpected size (%u/%u)\n",
+                     (unsigned)f.size(), (unsigned)SAV_SIZE);
+            f.close();
             free(sram);
             return false;
         }
@@ -4583,15 +5160,18 @@ static bool patchSdSavPathWithDaycareXp(const char *sdRel, PokemonDaycare &dc)
         }
     }
 
-    // checkOut() patches in-place (additive only) and zeroes totalXpGained
-    // so the next checkout doesn't double-count. Only the EXP / level / 5
-    // stat fields per party slot + the checksum byte are touched. Runs
-    // WITHOUT spiLock (rule 2 above).
-    dc.checkOut(sram);
+    // Prepare only: this patches a frozen XP snapshot but deliberately leaves
+    // daycare active and pending counters intact until the SD transaction is
+    // verified. Runs WITHOUT spiLock (rule 2 above).
+    if (!dc.applyPendingXp(sdRel, sram)) {
+        LOG_WARN("[MonsterMesh] D6 SAV write: daycare prepare failed\n");
+        free(sram);
+        return false;
+    }
 
-    // Phase 2 — write it back (spiLock held). Fresh SD reinit: another bus
-    // user (LVGL flush, radio) may have transacted between the phases.
-    size_t written = 0;
+    // Phase 2 — atomically replace it (spiLock held). Fresh SD reinit: another
+    // bus user may have transacted between the read and write phases.
+    bool persisted = false;
     {
         concurrency::LockGuard g(spiLock);
         SD.end();
@@ -4601,24 +5181,36 @@ static bool patchSdSavPathWithDaycareXp(const char *sdRel, PokemonDaycare &dc)
             free(sram);
             return false;
         }
-        // Truncate-on-write so we don't leave stale bytes if the file shrunk.
-        File w = SD.open(sdRel, FILE_WRITE);
-        if (!w) {
-            LOG_WARN("[MonsterMesh] D6 SAV write: SD.open('%s') for write failed\n", sdRel);
-            free(sram);
-            return false;
-        }
-        written = w.write(sram, SAV_SIZE);
-        w.close();
+        persisted = monstermesh::atomic_sd_detail::atomicWriteFile(
+            SD, sdRel, sram, SAV_SIZE);
     }
-    free(sram);
-    if (written != SAV_SIZE) {
-        LOG_WARN("[MonsterMesh] D6 SAV write: short write (%u/%u)\n",
-                 (unsigned)written, (unsigned)SAV_SIZE);
+    if (!persisted) {
+        LOG_WARN("[MonsterMesh] D6 SAV write: atomic replacement failed for '%s'\n", sdRel);
+        free(sram);
         return false;
     }
+
+    // Only a verified SD image authorizes the in-memory baseline advance and
+    // pending-XP subtraction.
+    if (!dc.commitXpFlush(sdRel, sram)) {
+        bool restored = false;
+        {
+            concurrency::LockGuard g(spiLock);
+            SD.end();
+            SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+            if (SD.begin(SDCARD_CS, SPI)) {
+                restored = monstermesh::atomic_sd_detail::restorePreviousFile(
+                    SD, sdRel);
+            }
+        }
+        LOG_WARN("[MonsterMesh] D6 SAV write: daycare commit validation failed; "
+                 "backup restore=%d\n", (int)restored);
+        free(sram);
+        return false;
+    }
+    free(sram);
     LOG_INFO("[MonsterMesh] D6 SAV write: patched '%s' (%u bytes)\n",
-             sdRel, (unsigned)written);
+             sdRel, (unsigned)SAV_SIZE);
     return true;
 }
 
@@ -4646,6 +5238,13 @@ static bool findFirstSavOnSd(char *out, size_t outLen)
         size_t nlen = name ? strlen(name) : 0;
         if (!entry.isDirectory() && nlen >= 4 &&
             strcasecmp(name + nlen - 4, ".sav") == 0) {
+            const size_t required = nlen + (name[0] == '/' ? 0 : 1) + 1;
+            if (required > outLen) {
+                LOG_WARN("[MonsterMesh] sav scan: skipping overlong path (%u bytes)\n",
+                         (unsigned)required);
+                entry.close();
+                continue;
+            }
             // SD library returns names with leading "/" already on this build.
             if (name[0] == '/') {
                 strncpy(out, name, outLen - 1);
@@ -4667,23 +5266,32 @@ static bool findFirstSavOnSd(char *out, size_t outLen)
 // ROM. This works even when the emulator isn't currently running — gives the
 // terminal a usable party from "the last save used" rather than only when
 // emulator memory is live. If `romPath` is empty, scans SD for any .sav file.
-static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out,
-                                 char *resolvedSavOut, size_t resolvedSavLen,
-                                 char *trainerNameOut, size_t trainerNameLen)
+static __attribute__((noinline)) bool loadPartyFromSavOnSd(
+    const char *romPath, Gen1Party &out, char *resolvedSavOut,
+    size_t resolvedSavLen, char *trainerNameOut, size_t trainerNameLen,
+    const char *exactSavPath)
 {
     char savPath[256] = {};
     const char *sdRel = nullptr;
 
-    if (romPath && romPath[0]) {
+    if (exactSavPath && exactSavPath[0]) {
+        if (!monstermesh::canonicalSavPath(exactSavPath, savPath)) {
+            LOG_WARN("[MonsterMesh] terminal SAV load: invalid exact path\n");
+            return false;
+        }
+        sdRel = savPath;
+    } else if (romPath && romPath[0]) {
         // SAV file lives next to the ROM with .sav extension. romPath is the VFS
         // path like "/sd/pokemon.gb" — convert to "/sd/pokemon.sav".
-        strncpy(savPath, romPath, sizeof(savPath) - 1);
-        char *dot = strrchr(savPath, '.');
-        if (!dot) return false;
-        if (sizeof(savPath) - (dot - savPath) < 5) return false;
-        strcpy(dot, ".sav");
+        const char *dot = strrchr(romPath, '.');
+        const char *slash = strrchr(romPath, '/');
+        if (!dot || (slash && dot < slash)) return false;
+        size_t stemLen = static_cast<size_t>(dot - romPath);
+        if (stemLen + sizeof(".sav") > sizeof(savPath)) return false;
+        memcpy(savPath, romPath, stemLen);
+        memcpy(savPath + stemLen, ".sav", sizeof(".sav"));
         sdRel = savPath;
-        if (strncmp(sdRel, "/sd", 3) == 0) sdRel += 3;
+        if (strncmp(sdRel, "/sd/", 4) == 0) sdRel += 3;
     }
 
     // Same reinit dance the emulator does — SD library state is "ended" after
@@ -4706,6 +5314,7 @@ static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out,
         // findFirstSavOnSd already calls SD.end()+SD.begin() — reopen state ok.
     }
 
+    (void)monstermesh::atomic_sd_detail::recoverFile(SD, sdRel);
     LOG_INFO("[MonsterMesh] terminal SAV load: trying '%s'\n", sdRel);
     File f = SD.open(sdRel, FILE_READ);
     if (!f) {
@@ -4719,6 +5328,7 @@ static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out,
     static constexpr uint16_t SAV_PARTY_COUNT  = 0x2F2C;
     static constexpr uint16_t SAV_SPECIES_LIST = 0x2F2D;
     static constexpr uint16_t SAV_POKEMON_DATA = 0x2F34;
+    static constexpr uint16_t SAV_OT_NAMES     = 0x303C;
     static constexpr uint16_t SAV_NICKNAMES    = 0x307E;
     static constexpr uint8_t  SAV_NAME_SIZE    = 11;
     static constexpr uint8_t  SAV_TERMINATOR   = 0x50;
@@ -4734,11 +5344,26 @@ static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out,
 
     memset(&out, 0, sizeof(out));
     uint8_t count = buf[SAV_PARTY_COUNT];
-    if (count > 6) count = 6;
+    if (count == 0 || count > 6 ||
+        buf[SAV_SPECIES_LIST + count] != 0xFF) {
+        free(buf);
+        return false;
+    }
+    for (uint8_t i = 0; i < count; ++i) {
+        const uint8_t internal = buf[SAV_SPECIES_LIST + i];
+        const uint8_t recordSpecies =
+            buf[SAV_POKEMON_DATA + (size_t)i * 44];
+        if (internal == 0 || internalToDex[internal] == 0 ||
+            recordSpecies != internal) {
+            free(buf);
+            return false;
+        }
+    }
     out.count = count;
     memcpy(out.species,   &buf[SAV_SPECIES_LIST],  7);
     memcpy((uint8_t *)out.mons, &buf[SAV_POKEMON_DATA], (size_t)count * 44);
     for (uint8_t i = 0; i < count; ++i) {
+        memcpy(out.otNames[i], &buf[SAV_OT_NAMES + i * SAV_NAME_SIZE], SAV_NAME_SIZE);
         const uint8_t *nick = &buf[SAV_NICKNAMES + i * SAV_NAME_SIZE];
         for (int j = 0; j < SAV_NAME_SIZE; ++j) {
             out.nicknames[i][j] = nick[j];
@@ -4746,9 +5371,9 @@ static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out,
         }
     }
     // Heal the in-memory party for on-deck play. HP → maxHp, clear status,
-    // PP → canonical max for each move. The SAV's original values stay
-    // untouched on disk: writePartyToSavOnSd snapshots HP/status/PP from
-    // the existing SAV bytes before writing and restores them.
+    // PP → canonical max for each move. Battle persistence applies only its
+    // earned XP delta to a fresh SAV image, so these UI-only healed fields can
+    // never leak back over the player's on-disk HP/status/PP.
     for (uint8_t i = 0; i < count; ++i) {
         Gen1Pokemon &p = out.mons[i];
         p.hp[0] = p.maxHp[0];
@@ -4781,34 +5406,36 @@ static bool loadPartyFromSavOnSd(const char *romPath, Gen1Party &out,
     return true;
 }
 
-// Write the player's party block back to the on-SD .sav file at the same
-// offsets loadPartyFromSavOnSd reads from. Only the party region is touched
-// (0x2F2C..0x30E3 inclusive, plus a fresh checksum at 0x3523) — trainer
-// name, badges, items, and everything else stays untouched. Returns true
-// on success. Caller must hold spiLock.
-static bool writePartyToSavOnSd(const char *savPath, const Gen1Party &party)
+// Apply a frozen batch of battle XP to the freshest on-SD SAV. The party
+// identity captured at load time binds each slot, but no absolute terminal
+// record is copied: daycare EXP/stats and unrelated gameplay bytes therefore
+// remain authoritative. Caller must hold spiLock.
+static bool writeBattleXpToSavOnSd(const char *savPath, uint8_t partyCount,
+                                   const uint8_t internalSpecies[7],
+                                   const uint8_t monIdentity[6][4],
+                                   const uint32_t xp[6],
+                                   DaycarePartyInfo writtenParty[6])
 {
-    if (!savPath || !savPath[0]) return false;
+    if (!savPath || !savPath[0] || partyCount == 0 || partyCount > 6 ||
+        !internalSpecies || !monIdentity || !xp || !writtenParty) {
+        return false;
+    }
 
     SD.end();
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
     if (!SD.begin(SDCARD_CS, SPI)) return false;
 
-    // SAV mirror block layout (gen 1, party half):
-    static constexpr uint16_t SAV_PARTY_COUNT  = 0x2F2C;
-    static constexpr uint16_t SAV_SPECIES_LIST = 0x2F2D;
-    static constexpr uint16_t SAV_POKEMON_DATA = 0x2F34;
-    static constexpr uint16_t SAV_OT_NAMES     = 0x303C;  // 6 × 11 bytes
-    static constexpr uint16_t SAV_NICKNAMES    = 0x307E;  // 6 × 11 bytes
-    static constexpr uint16_t SAV_NAME_BLOCK_END = 0x30E4;
-    static constexpr uint16_t SAV_CHECKSUM_OFFSET = 0x3523;
-    static constexpr uint16_t SAV_CHECKSUM_START  = 0x2598;
-    static constexpr uint16_t SAV_CHECKSUM_END    = 0x3522;
-    static constexpr uint8_t  SAV_NAME_SIZE    = 11;
+    (void)monstermesh::atomic_sd_detail::recoverFile(SD, savPath);
+
     static constexpr size_t   SAV_FILE_SIZE    = 32 * 1024;  // 32 KB
 
     File f = SD.open(savPath, FILE_READ);
     if (!f) { LOG_WARN("[MonsterMesh] sav writeback: open '%s' (read) failed\n", savPath); return false; }
+    if (f.size() != SAV_FILE_SIZE) {
+        LOG_WARN("[MonsterMesh] sav writeback: unexpected size %u\n", (unsigned)f.size());
+        f.close();
+        return false;
+    }
 
     uint8_t *buf = (uint8_t *)heap_caps_malloc(SAV_FILE_SIZE, MALLOC_CAP_8BIT);
     if (!buf) { f.close(); return false; }
@@ -4820,65 +5447,26 @@ static bool writePartyToSavOnSd(const char *savPath, const Gen1Party &party)
         free(buf); return false;
     }
 
-    // Patch the party block in-place.
-    uint8_t count = party.count > 6 ? 6 : party.count;
-    buf[SAV_PARTY_COUNT] = count;
-    memcpy(&buf[SAV_SPECIES_LIST], party.species, 7);
-
-    // Snapshot per-mon HP / status / PP from the existing SAV before
-    // overwriting the block. We DON'T want our in-deck "fully healed"
-    // values written back — the SAV should reflect whatever HP/status/PP
-    // state the player left the game in. Level / EXP / stat changes from
-    // battles still propagate (those fields come from party.mons[i]).
-    // Gen1Pokemon layout (44 bytes): hp at 1-2, status at 4, pp at 29-32.
-    struct PreservedMonFields { uint8_t hpHi, hpLo, status, pp0, pp1, pp2, pp3; };
-    PreservedMonFields snap[6] = {};
-    for (uint8_t i = 0; i < count; ++i) {
-        const uint8_t *m = &buf[SAV_POKEMON_DATA + i * 44];
-        snap[i].hpHi   = m[1];
-        snap[i].hpLo   = m[2];
-        snap[i].status = m[4];
-        snap[i].pp0    = m[29];
-        snap[i].pp1    = m[30];
-        snap[i].pp2    = m[31];
-        snap[i].pp3    = m[32];
-    }
-    memcpy(&buf[SAV_POKEMON_DATA], (const uint8_t *)party.mons, (size_t)count * 44);
-    // Restore the snapshot — HP / status / PP stay as the SAV had them.
-    for (uint8_t i = 0; i < count; ++i) {
-        uint8_t *m = &buf[SAV_POKEMON_DATA + i * 44];
-        m[1]  = snap[i].hpHi;
-        m[2]  = snap[i].hpLo;
-        m[4]  = snap[i].status;
-        m[29] = snap[i].pp0;
-        m[30] = snap[i].pp1;
-        m[31] = snap[i].pp2;
-        m[32] = snap[i].pp3;
-    }
-    for (uint8_t i = 0; i < count; ++i) {
-        memcpy(&buf[SAV_OT_NAMES   + i * SAV_NAME_SIZE],
-               party.otNames[i],   SAV_NAME_SIZE);
-        memcpy(&buf[SAV_NICKNAMES + i * SAV_NAME_SIZE],
-               party.nicknames[i], SAV_NAME_SIZE);
-    }
-    (void)SAV_NAME_BLOCK_END;
-
-    // Recompute the SAV checksum.
-    uint8_t sum = 0;
-    for (uint32_t i = SAV_CHECKSUM_START; i <= SAV_CHECKSUM_END; ++i) sum += buf[i];
-    buf[SAV_CHECKSUM_OFFSET] = (uint8_t)~sum;
-
-    File w = SD.open(savPath, FILE_WRITE);
-    if (!w) { LOG_WARN("[MonsterMesh] sav writeback: open '%s' (write) failed\n", savPath); free(buf); return false; }
-    w.seek(0);
-    size_t wrote = w.write(buf, SAV_FILE_SIZE);
-    w.close();
-    free(buf);
-    if (wrote != SAV_FILE_SIZE) {
-        LOG_WARN("[MonsterMesh] sav writeback: short write %u\n", (unsigned)wrote);
+    if (!monstermesh::applyBattleXpToSav(buf, SAV_FILE_SIZE, partyCount,
+                                         internalSpecies, monIdentity, xp)) {
+        LOG_WARN("[MonsterMesh] battle XP writeback: party mismatch/patch failure\n");
+        free(buf);
         return false;
     }
-    LOG_INFO("[MonsterMesh] sav writeback: wrote party + checksum to '%s'\n", savPath);
+
+    if (DaycareSavPatcher::readParty(buf, writtenParty) != partyCount) {
+        free(buf);
+        return false;
+    }
+
+    bool wrote = monstermesh::atomic_sd_detail::atomicWriteFile(
+        SD, savPath, buf, SAV_FILE_SIZE);
+    free(buf);
+    if (!wrote) {
+        LOG_WARN("[MonsterMesh] battle XP writeback: atomic replacement failed for '%s'\n", savPath);
+        return false;
+    }
+    LOG_INFO("[MonsterMesh] battle XP writeback: atomically applied deltas to '%s'\n", savPath);
     return true;
 }
 
@@ -4902,24 +5490,15 @@ void MonsterMeshModule::tryConsumeStagedParty()
     // Per-faint XP draining — flush whatever the engine accumulated since
     // last tick into the saved party. Runs ahead of the battle-end
     // callback so XP from the killing blow lands before the news entry.
-    if (pendingXpAwardCb_) {
-        pendingXpAwardCb_ = false;
+    if (pendingXpAwardCb_.exchange(false)) {
         uint32_t xp[6];
         bool any = false;
         for (uint8_t i = 0; i < 6; ++i) {
-            xp[i] = stagedXp_[i];
+            xp[i] = stagedXp_[i].exchange(0);
             if (xp[i]) any = true;
-            stagedXp_[i] = 0;
         }
         if (any) {
             terminal_.creditBattleXpPerSlot(xp);
-            // P2.40: re-arm the SAV write-back AFTER XP is credited so that
-            // the updated exp/level lands in the save file.  The write-back
-            // that was set at battle-end (line ~3733) fires on runOnce() /
-            // Core 1 before this LVGL-thread XP credit runs, so it was
-            // always saving the pre-level-up party.  A second trigger here
-            // guarantees a post-XP flush on the next runOnce() tick.
-            pendingSavWriteBack_ = true;
         }
     }
     // Battle-result callback (terminal_.on*BattleEnded) — runs after the
@@ -4938,7 +5517,13 @@ void MonsterMeshModule::tryConsumeStagedParty()
                 break;
             case StagedEndKind::FIGHT:
                 terminal_.printLine(stagedEndWon_ ? "You won!" : "You blacked out.");
-                terminal_.refreshParty();
+                // The post-XP SAV reload (staged-party commit below) will
+                // refresh the party with authoritative post-battle levels.
+                // Only refresh here when no writeback/reload is pending (e.g. a
+                // zero-XP flee), otherwise the party gets listed twice.
+                if (!pendingSavWriteBack_.load() && !pendingXpAwardCb_.load() &&
+                    !terminalNeedsParty_.load() && !terminalPartyStaged_.load())
+                    terminal_.refreshParty();
                 break;
             default: break;
         }
@@ -4970,7 +5555,9 @@ void MonsterMeshModule::tryConsumeStagedParty()
 #endif
     }
 
-    if (!terminalPartyStaged_) return;
+    if (!terminalPartyStaged_.load()) return;
+    const uint32_t stagedGeneration =
+        terminalStagedPartyGeneration_.load();
     // Always commit the staged party into the terminal's data model so
     // hasParty() flips true and downstream features (PvP launch gate,
     // daycare check-in, gym fights) work even before the user has
@@ -4988,7 +5575,26 @@ void MonsterMeshModule::tryConsumeStagedParty()
                                  ? owner.short_name : "MM";
         textBattle_.setMyTbParty(terminalStagedParty_, ourShort);
     }
-    terminalPartyStaged_ = false;
+    // Publish battle eligibility only after both LVGL-owned party models have
+    // installed the exact staged value. The generation captured with the SAV
+    // read must still be current; a later daycare/save/mode invalidation can
+    // never be adopted by this older staging slot. Keep staged=true until the
+    // publication attempt finishes so all external launch gates remain shut.
+    const bool noQueuedWriter =
+        !pendingSave_.load() && !pendingSavWriteBack_.load() &&
+        !pendingXpAwardCb_.load() && !terminalNeedsParty_.load() &&
+        !terminalPartyReloadStrict_.load();
+    const bool publishable = loadedSavPath_[0] != '\0' && noQueuedWriter &&
+                             !emulatorActive_.load() &&
+                             !browserActive_.load();
+    const bool published = publishable &&
+        republishTerminalSavOwnerIfUnchanged(stagedGeneration);
+    const bool needsRetry = !published && loadedSavPath_[0] != '\0';
+    terminalStagedPublishRetryNeeded_.store(needsRetry);
+    terminalPartyStaged_.store(false);
+    if (!published) {
+        LOG_INFO("[MonsterMesh] staged SAV party installed but kept battle-ineligible\n");
+    }
 }
 
 // ── LVGL-native battle screen (Phase 1) ────────────────────────────────
@@ -5172,10 +5778,9 @@ void MonsterMeshModule::buildLvBattleScreen()
                           (int)self->textBattle_.dirty(),
                           (int)self->textBattle_.isActive());
         }
-        if (self->textBattle_.dirty() && self->lvBattleActive_) {
+        if (self->lvBattleActive_ && self->textBattle_.consumeDirty()) {
             Serial.printf("[MMB] refreshCb: calling updateLvBattleScreen\n");
             self->updateLvBattleScreen();
-            self->textBattle_.clearDirty();
         }
     };
     if (!lvBattleRefreshTimer_) {
@@ -5710,7 +6315,7 @@ void MonsterMeshModule::toggleTerminal()
         // initial load + check-in, leave the scrollback alone so re-entries
         // don't reprint the party every visit.
         if (!terminal_.hasParty()) {
-            terminalNeedsParty_ = true;
+            requestTerminalPartyLoad();
         }
     }
 #endif
@@ -5721,6 +6326,11 @@ void MonsterMeshModule::clearCart()
     // [Eject Cart] entry inside the browser: actually unload the ROM. Stay
     // in browser afterward so the user can pick another cart.
     LOG_INFO("[MonsterMesh] Eject cart — unloading ROM\n");
+    if (!cancelPendingRomLaunch(false)) {
+        LOG_INFO("[MonsterMesh] Eject ignored: ROM launch already committed\n");
+        return;
+    }
+    invalidateTerminalSavOwner();
     if (emu_.isRunning()) pendingSave_ = true;
     emuInitialized_ = false;
     browser_.markDirty();  // redraw without [Eject Cart] row
@@ -5790,9 +6400,25 @@ void MonsterMeshModule::emuTaskLoop()
         // ── Auto-save on battle end ───────────────────────────────────────
         uint8_t curBattle = emu_.readWRAM(Gen1::wIsInBattle);
         if (prevBattle_ != 0 && curBattle == 0) {
-            emu_.save();
+            pendingSave_ = true;
         }
         prevBattle_ = curBattle;
+
+        // Active-cart retries stay on the emulator task so cartRam_ cannot be
+        // mutated by runFrame() on one core while another core serializes it.
+        const uint32_t activeRetryAt = nextEmuSaveRetryMs_.load();
+        if (pendingSave_.load() &&
+            (activeRetryAt == 0 ||
+             (int32_t)(millis() - activeRetryAt) >= 0) &&
+            pendingSave_.exchange(false)) {
+            if (emu_.save()) {
+                nextEmuSaveRetryMs_ = 0;
+            } else {
+                nextEmuSaveRetryMs_.store(millis() + 30000);
+                pendingSave_.store(true);
+                LOG_WARN("[MonsterMesh] active-cart SAV save failed; retrying in 30000 ms\n");
+            }
+        }
 
         // Yield briefly every few frames so other Core-1 tasks (MonsterMesh
         // runOnce, PacketAPI, RadioLib worker) aren't starved. Without ANY
@@ -6052,7 +6678,10 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
             // Meshtastic's panels actually repaint instead of filling in
             // one widget at a time as the user taps.
             LOG_INFO("[MonsterMesh] ALT-exit browser: returning to Meshtastic\n");
-            browserActive_ = false;
+            if (!cancelPendingRomLaunch(true)) {
+                LOG_INFO("[MonsterMesh] browser exit ignored: ROM launch already committed\n");
+                return;
+            }
             exitEmulatorMode();  // emulatorActive_ already false
 #if HAS_TFT
             lv_display_t *disp = lv_display_get_default();
@@ -6187,7 +6816,10 @@ void MonsterMeshModule::handleKeyPress(uint8_t ascii)
         // Backspace exits browser → Meshtastic UI (since mic button is
         // disabled in browser mode to avoid eating keypresses)
         if (ascii == 0x08) {
-            browserActive_ = false;
+            if (!cancelPendingRomLaunch(true)) {
+                LOG_INFO("[MonsterMesh] browser back ignored: ROM launch already committed\n");
+                return;
+            }
             exitEmulatorMode();  // browser → Meshtastic UI
 #if HAS_TFT
             lv_display_t *disp2 = lv_display_get_default();
@@ -6364,7 +6996,111 @@ void MonsterMeshModule::renderBrowser()
 
 // ── launchROM() — load selected ROM and start emulator ──────────────────────
 
+// Only metadata/path copies live inside this critical section. The slow ROM
+// load runs after a CLAIMED transition, which makes cancellation linearizable
+// without holding a spinlock across SD I/O.
+static portMUX_TYPE s_mmRomLaunchMux = portMUX_INITIALIZER_UNLOCKED;
+
+bool MonsterMeshModule::queueRomLaunch(const char *path, size_t pathLen)
+{
+    bool queued = false;
+    portENTER_CRITICAL(&s_mmRomLaunchMux);
+    if (browserActive_.load() && romLaunchState_ == RomLaunchState::IDLE &&
+        path && pathLen > 0 && pathLen < sizeof(pendingRomLaunchPath_)) {
+        memcpy(pendingRomLaunchPath_, path, pathLen + 1);
+        romLaunchState_ = RomLaunchState::QUEUED;
+        queued = true;
+    }
+    portEXIT_CRITICAL(&s_mmRomLaunchMux);
+    return queued;
+}
+
+bool MonsterMeshModule::claimQueuedRomLaunch(char *pathOut,
+                                              size_t pathCapacity)
+{
+    bool claimed = false;
+    portENTER_CRITICAL(&s_mmRomLaunchMux);
+    if (browserActive_.load() && romLaunchState_ == RomLaunchState::QUEUED &&
+        pathOut && pathCapacity > 0) {
+        strncpy(pathOut, pendingRomLaunchPath_, pathCapacity - 1);
+        pathOut[pathCapacity - 1] = '\0';
+        pendingRomLaunchPath_[0] = '\0';
+        romLaunchState_ = RomLaunchState::CLAIMED;
+        claimed = true;
+    }
+    portEXIT_CRITICAL(&s_mmRomLaunchMux);
+    return claimed;
+}
+
+bool MonsterMeshModule::claimImmediateRomLaunch()
+{
+    bool claimed = false;
+    portENTER_CRITICAL(&s_mmRomLaunchMux);
+    if (browserActive_.load() && romLaunchState_ == RomLaunchState::IDLE) {
+        romLaunchState_ = RomLaunchState::CLAIMED;
+        claimed = true;
+    }
+    portEXIT_CRITICAL(&s_mmRomLaunchMux);
+    return claimed;
+}
+
+void MonsterMeshModule::completeRomLaunch()
+{
+    portENTER_CRITICAL(&s_mmRomLaunchMux);
+    if (romLaunchState_ == RomLaunchState::CLAIMED)
+        romLaunchState_ = RomLaunchState::IDLE;
+    portEXIT_CRITICAL(&s_mmRomLaunchMux);
+}
+
+bool MonsterMeshModule::cancelPendingRomLaunch(bool closeBrowser)
+{
+    bool cancelled = false;
+    portENTER_CRITICAL(&s_mmRomLaunchMux);
+    if (romLaunchState_ != RomLaunchState::CLAIMED) {
+        romLaunchState_ = RomLaunchState::IDLE;
+        pendingRomLaunchPath_[0] = '\0';
+        if (closeBrowser)
+            browserActive_.store(false);
+        cancelled = true;
+    }
+    portEXIT_CRITICAL(&s_mmRomLaunchMux);
+    return cancelled;
+}
+
 void MonsterMeshModule::launchROM(const char *path)
+{
+    if (!path || !path[0]) return;
+    const size_t pathLen = strnlen(path, sizeof(pendingRomLaunchPath_));
+    if (pathLen == 0 || pathLen >= sizeof(pendingRomLaunchPath_)) {
+        LOG_WARN("[MonsterMesh] ROM launch rejected overlong path\n");
+        return;
+    }
+
+    const bool saveAlreadyPending = pendingSave_.load();
+    const bool replacingCart = emuInitialized_ || saveAlreadyPending;
+    if (replacingCart || !emuTaskIdle_.load()) {
+        emulatorActive_ = false;
+        if (replacingCart && emu_.isRunning() && !saveAlreadyPending) {
+            nextEmuSaveRetryMs_.store(0);
+            pendingSave_.store(true);
+        }
+        if (queueRomLaunch(path, pathLen)) {
+            LOG_INFO("[MonsterMesh] ROM launch queued behind old-cart save/quiesce\n");
+        } else {
+            LOG_INFO("[MonsterMesh] ROM launch cancelled before queue publication\n");
+        }
+        return;
+    }
+
+    if (!claimImmediateRomLaunch()) {
+        LOG_INFO("[MonsterMesh] ROM launch cancelled before claim\n");
+        return;
+    }
+    launchROMNow(path);
+    completeRomLaunch();
+}
+
+void MonsterMeshModule::launchROMNow(const char *path)
 {
     // Browser returns SD-relative paths like "/pokemon.gb"
     // POSIX fopen needs VFS path "/sd/pokemon.gb"
@@ -6408,9 +7144,7 @@ void MonsterMeshModule::launchROM(const char *path)
         return;
     }
 
-    emuInitialized_ = true;
-    browserActive_ = false;
-    emulatorActive_ = true;
+    emuInitialized_.store(true);
 
     // Allocate PSRAM framebuffer for rendering (320x240 RGB565 = 153,600 bytes)
     if (!frameBuf_) {
@@ -6474,6 +7208,10 @@ void MonsterMeshModule::launchROM(const char *path)
 
     kbSetMode(true);  // RAW mode for held-key d-pad input
     setupStatus_ = "Playing!";
+    // Publish the active mode last, after the emulator, framebuffer, tasks,
+    // display state, and input mode are ready for the other cores.
+    browserActive_.store(false);
+    emulatorActive_.store(true);
     LOG_INFO("[MonsterMesh] ROM loaded, emulator started\n");
 }
 
@@ -6492,6 +7230,7 @@ static portMUX_TYPE s_mmModeMux = portMUX_INITIALIZER_UNLOCKED;
 
 void MonsterMeshModule::enterEmulatorMode()
 {
+    invalidateTerminalSavOwner();
     portENTER_CRITICAL(&s_mmModeMux);
     bool already = radioParked_;
     if (!already) radioParked_ = true;
@@ -6505,7 +7244,7 @@ void MonsterMeshModule::enterEmulatorMode()
     // Daycare yields the SD bus to the emulator. Defer the actual checkOut()
     // call to runOnce on the LoRa thread — SD/SPI work on the LVGL thread
     // would race with the LGFX flush we just suppressed.
-    pendingAutoCheckOut_ = true;
+    pendingAutoCheckOut_.store(true);
     // Snappy path: gate flags + radio sleep ONLY (~few ms). WiFi deinit (~50ms+)
     // is deferred to runOnce on the LoRa thread so the user sees the browser
     // come up instantly after pressing ALT.
@@ -6531,6 +7270,7 @@ void MonsterMeshModule::exitEmulatorMode()
         LOG_INFO("MonsterMesh: exitEmulatorMode already in progress — skip\n");
         return;
     }
+    invalidateTerminalSavOwner();
 
     LOG_INFO("MonsterMesh: exiting emulator mode — bringing radios back\n");
     // LVGL thread: only the cheap atomic flag flips. The actual radio
@@ -6545,7 +7285,7 @@ void MonsterMeshModule::exitEmulatorMode()
     // Re-arm daycare. runOnce will reload the party from the (possibly
     // updated) SAV and call checkIn → forceBeacon, picking up any XP/level
     // changes the user earned in-game during this session.
-    pendingAutoCheckin_ = true;
+    pendingAutoCheckin_.store(true);
 }
 
 #endif // T_DECK && !MESHTASTIC_EXCLUDE_MONSTERMESH

@@ -140,4 +140,12 @@ class MQTT : private concurrency::OSThread
 
 void mqttInit();
 
+/**
+ * Select the ESP32 system allocator for mbedTLS before any TLS session is
+ * created. On PSRAM-equipped targets this lets large TLS record buffers use
+ * external RAM while preserving the normal internal-RAM preference for small
+ * allocations.
+ */
+void mqttConfigureTlsMemory();
+
 extern MQTT *mqtt;

@@ -343,6 +343,19 @@ struct BattlePacket {
 static_assert(sizeof(BattlePacket) == BATTLELINK_MAX_PKT,
               "BattlePacket must be exactly 200 bytes");
 
+// Write only the fixed four-byte wire header. Use this for short packets whose
+// backing buffer is smaller than BattlePacket: casting such a buffer to the
+// full 200-byte type is C++ object-bounds undefined behavior even when the
+// code touches header fields only.
+static inline void writeBattlePacketHeader(uint8_t *buffer, PktType type,
+                                           uint16_t sessionId, uint8_t seq = 0)
+{
+    buffer[0] = static_cast<uint8_t>(type);
+    buffer[1] = static_cast<uint8_t>(sessionId >> 8);
+    buffer[2] = static_cast<uint8_t>(sessionId);
+    buffer[3] = seq;
+}
+
 static constexpr uint8_t SERIAL_DATA_MAX    = BATTLELINK_MAX_PAYLOAD - 1;
 static constexpr uint32_t SERIAL_BATCH_MS = 500;  // LoRa can't keep up with 50ms — 2 pkt/s max
 static constexpr uint32_t BATTLE_REQUEST_INTERVAL_MS = 10000; // 10s — don't flood router TX queue

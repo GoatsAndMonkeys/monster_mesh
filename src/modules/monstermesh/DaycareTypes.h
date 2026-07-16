@@ -247,13 +247,13 @@ inline const char *rivalryTierName(uint8_t rivalry) {
 // ── Per-Pokemon daycare state ────────────────────────────────────────────────
 
 struct DaycarePokemonState {
-    uint16_t speciesDex;         // national dex (1-386)
+    uint16_t speciesDex;          // national dex (1-386)
     char     nickname[11];        // Player-set nickname (10 + null), empty = use species name
     uint8_t  savLevel;            // Level read from SAV file at check-in
     uint32_t savExp;              // Total EXP read from SAV file at check-in
     uint32_t totalHours;
-    uint32_t totalXpGained;       // Daycare XP accumulated (added to savExp on checkout)
-    uint16_t totalLevelsGained;   // Levels gained in daycare (for display/achievements)
+    uint32_t totalXpGained;       // Uncommitted daycare XP pending a durable SAV flush
+    uint16_t totalLevelsGained;   // Lifetime levels gained (display/achievements; never a level offset)
     DaycareMood mood;
     uint8_t  escapeCount;
     uint16_t dreamCount;
@@ -268,8 +268,17 @@ static constexpr uint8_t MAX_RELATIONSHIPS = 32;
 static constexpr uint8_t MAX_KNOWN_NODES   = 32;
 
 struct DaycareState {
-    uint32_t magic;               // 0xDACA0001 for version check
-    static constexpr uint32_t MAGIC = 0xDACA0001;
+    uint32_t magic;               // persistence format/version marker
+    // Format history (all three are sizeof()==identical, so ONLY the magic word
+    // discriminates them — a size check cannot):
+    //   DACA0001  pre-audit current line — 16-bit speciesDex (this exact layout)
+    //   DACA0002  audit b58 line — 8-bit speciesDex, so nickname/savLevel sit one
+    //             byte earlier inside each per-Pokemon record
+    //   DACA0003  current — 16-bit speciesDex + transactional flush + dual-legacy
+    //             migration that fails closed on ambiguous legacy pending XP
+    static constexpr uint32_t LEGACY_MAGIC    = 0xDACA0001;  // 16-bit, direct read
+    static constexpr uint32_t LEGACY_MAGIC_V2 = 0xDACA0002;  // 8-bit, needs field remap
+    static constexpr uint32_t MAGIC           = 0xDACA0003;
 
     // Per-Pokemon (6 party slots)
     DaycarePokemonState pokemon[6];

@@ -51,6 +51,16 @@ public:
     // only those addressed to this node.
     void setMyNodeNum(uint32_t n) { myNodeNum_ = n; }
 
+    // Revalidate the locally staged SAV party at the last responsible moment
+    // before a CLIENT ACCEPT carries it onto the wire. Daycare/save writers can
+    // invalidate the party after the CHALLENGE overlay was opened (finding 5);
+    // if this returns false the ACCEPT is converted to a clean decline.
+    using LocalPartyReadyFn = bool (*)(void *ctx);
+    void setLocalPartyReadyFn(LocalPartyReadyFn fn, void *ctx) {
+        localPartyReadyFn_  = fn;
+        localPartyReadyCtx_ = ctx;
+    }
+
     // ── Lifecycle ───────────────────────────────────────────────────────────
     // ── Server-authoritative PvP entry point ──────────────────────────────
     // Initiator's only call. Stages our party, generates a session id, and
@@ -209,6 +219,9 @@ public:
     bool dirty() const { return dirty_; }
     void clearDirty() { dirty_ = false; }
     void setDirty()   { dirty_ = true; }
+    // Atomic read-and-clear so the LVGL refresh timer consumes the dirty flag
+    // exactly once per change (finding-7 dirty-notification hardening).
+    bool consumeDirty() { bool r = dirty_; dirty_ = false; return r; }
 
     // ── LVGL render accessors ──────────────────────────────────────────
     // For the upcoming LVGL-widget battle screen (replacing the lgfx-
@@ -309,6 +322,18 @@ public:
         pendingXpDrops_ = 0;
         return any;
     }
+    // Transactional drain rollback: if the module cannot bind/enqueue the XP
+    // with its immutable SAV owner, restore it for the next runOnce attempt
+    // (saturating so a rollback can never overflow the accumulator).
+    void restorePendingXp(const uint32_t xp[6]) {
+        if (!xp) return;
+        for (uint8_t i = 0; i < 6; ++i) {
+            pendingXpPerSlot_[i] =
+                xp[i] > UINT32_MAX - pendingXpPerSlot_[i]
+                    ? UINT32_MAX
+                    : pendingXpPerSlot_[i] + xp[i];
+        }
+    }
 private:
 
     // Scrolling text log — circular buffer.
@@ -323,6 +348,8 @@ private:
     char endPromptOverride_[48] = {};
 
     uint32_t myNodeNum_ = 0;   // set via setMyNodeNum(); used to filter CHALLENGEs
+    LocalPartyReadyFn localPartyReadyFn_ = nullptr;  // last-moment party revalidation
+    void             *localPartyReadyCtx_ = nullptr;
 
     // Timeouts
     uint32_t lastRecvMs_ = 0;
@@ -430,8 +457,8 @@ private:
     // CLIENT helpers (implemented in P3).
     void clientAuthOnChallengePkt(uint32_t fromId,
                                   const uint8_t *buf, size_t len);
-    void clientAuthOnUpdatePkt(const uint8_t *buf, size_t len);
-    void clientAuthOnFullStatePkt(const uint8_t *buf, size_t len);
+    void clientAuthOnUpdatePkt(uint32_t fromId, const uint8_t *buf, size_t len);
+    void clientAuthOnFullStatePkt(uint32_t fromId, const uint8_t *buf, size_t len);
     void clientAuthSendAccept(bool accepted);
     void clientAuthSendActionV2(uint8_t actionType, uint8_t index);
     void clientAuthSendStateRequest();

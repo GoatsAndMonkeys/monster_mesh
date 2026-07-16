@@ -84,7 +84,7 @@ class BluetoothStatus : public Status
             // Debug only:
             switch (state) {
             case ConnectionState::PAIRING:
-                LOG_DEBUG("BluetoothStatus PAIRING, key=%s", passkey.c_str());
+                LOG_DEBUG("BluetoothStatus PAIRING");
                 break;
             case ConnectionState::CONNECTED:
                 LOG_DEBUG("BluetoothStatus CONNECTED");

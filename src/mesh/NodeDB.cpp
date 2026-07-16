@@ -622,7 +622,7 @@ void NodeDB::installDefaultConfig(bool preserveKey = false)
     if (shouldPreserveKey) {
         config.security.private_key.size = 32;
         memcpy(config.security.private_key.bytes, private_key_temp, config.security.private_key.size);
-        printBytes("Restored key", config.security.private_key.bytes, config.security.private_key.size);
+        LOG_DEBUG("Restored private key");
     } else {
         config.security.private_key.size = 0;
     }

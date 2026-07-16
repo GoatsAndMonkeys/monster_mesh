@@ -256,7 +256,7 @@ void NRF52Bluetooth::setup()
                                 ? config.bluetooth.fixed_pin
                                 : random(100000, 999999);
         auto pinString = std::to_string(configuredPasskey);
-        LOG_INFO("Bluetooth pin set to '%i'", configuredPasskey);
+        LOG_INFO("Bluetooth PIN configured");
         Bluefruit.Security.setPIN(pinString.c_str());
         Bluefruit.Security.setIOCaps(true, false, false);
         Bluefruit.Security.setPairPasskeyCallback(NRF52Bluetooth::onPairingPasskey);
@@ -323,9 +323,7 @@ void NRF52Bluetooth::onConnectionSecured(uint16_t conn_handle)
 }
 bool NRF52Bluetooth::onPairingPasskey(uint16_t conn_handle, uint8_t const passkey[6], bool match_request)
 {
-    char passkey1[4] = {passkey[0], passkey[1], passkey[2], '\0'};
-    char passkey2[4] = {passkey[3], passkey[4], passkey[5], '\0'};
-    LOG_INFO("BLE pair process started with passkey %s %s", passkey1, passkey2);
+    LOG_INFO("BLE pair process started");
     powerFSM.trigger(EVENT_BLUETOOTH_PAIR);
 
     // Get passkey as string

@@ -3,6 +3,7 @@
 
 #include "MonsterMeshTerminal.h"
 #include "Gen1Species.h"
+#include "DaycareSavPatcher.h"   // internalToDex[], levelForExp(), expForLevel()
 #include "LordLogic.h"
 #include "LordGyms.h"
 #include "LordRoutes.h"
@@ -290,12 +291,19 @@ void MonsterMeshTerminal::creditBattleXpPerSlot(const uint32_t xp[6])
         uint32_t exp = ((uint32_t)p.exp[0] << 16) |
                        ((uint32_t)p.exp[1] << 8)  |
                        (uint32_t)p.exp[2];
+        // p.species is the Gen-1 internal index; convert to national dex so we
+        // pick the correct growth curve. Mewtwo (Slow, 5n^3/4) was levelled on
+        // the medium-fast (n^3) curve, inflating its level by ~6 (72 shown as 78)
+        // until the SAV patcher recomputed the true level from exp.
+        uint8_t dex = internalToDex[p.species];
+        uint32_t maxExp = dex ? expForLevel(dex, 100) : 1000000u;
         uint32_t newExp = exp + add;
-        if (newExp > 1000000u) newExp = 1000000u;
+        if (newExp > maxExp) newExp = maxExp;
         p.exp[0] = (newExp >> 16) & 0xFF;
         p.exp[1] = (newExp >> 8)  & 0xFF;
         p.exp[2] =  newExp        & 0xFF;
-        uint8_t newLevel = levelFromExpMediumFast(newExp);
+        uint8_t newLevel = dex ? levelForExp(dex, newExp)
+                               : levelFromExpMediumFast(newExp);
         if (newLevel > p.level) {
             // party_.nicknames[i] is in Gen 1 charset (PIKACHU = 0x8F88898081...),
             // not ASCII. Without conversion the level-up message showed "P grew

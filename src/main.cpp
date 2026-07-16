@@ -298,6 +298,14 @@ void printInfo()
 #ifndef PIO_UNIT_TESTING
 void setup()
 {
+#if defined(T_DECK) && defined(BOARD_HAS_PSRAM) && !MESHTASTIC_EXCLUDE_MQTT
+    // Arduino has initialized PSRAM before setup(). Configure mbedTLS before
+    // NodeDB, modules, WiFi, or any other application TLS user can allocate a
+    // context. This is required for MonsterMesh to keep its emulator task
+    // stacks resident at the same time as an MQTT TLS session.
+    mqttConfigureTlsMemory();
+#endif
+
 #if defined(R1_NEO)
     pinMode(DCDC_EN_HOLD, OUTPUT);
     digitalWrite(DCDC_EN_HOLD, HIGH);

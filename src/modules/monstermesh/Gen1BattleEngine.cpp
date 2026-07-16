@@ -911,7 +911,9 @@ void Gen1BattleEngine::applyMove(uint8_t side, uint8_t targetSide,
             break;
         }
         case EFF_PSYWAVE: {
-            uint16_t d = 1 + (rand32() % (user.level * 3 / 2));
+            uint16_t divisor = ((uint16_t)user.level * 3u) / 2u;
+            if (divisor == 0) divisor = 1;
+            uint16_t d = 1 + (rand32() % divisor);
             if (target.hp <= d) target.hp = 0; else target.hp -= d;
             break;
         }

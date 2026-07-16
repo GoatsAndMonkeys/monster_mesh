@@ -41,7 +41,7 @@ public:
     void    readWRAMRange(uint16_t gbAddr, uint8_t *buf, size_t len) const;
 
     bool isRunning() const { return running_; }
-    void save() { if (running_) writeSaveFile(romPath_); }
+    bool save() { return running_ && writeSaveFile(romPath_); }
     // Path to the last-launched ROM (or empty string if none). Used by
     // MonsterMeshModule to derive the matching .sav path for the terminal.
     const char *romPath() const { return romPath_; }
@@ -87,8 +87,8 @@ public:
     void            *scanlineCtx_ = nullptr;
     MonsterMeshAudio *audio_      = nullptr;
 
-    static void romPathToSavePath(const char *romPath, char *out, size_t outLen);
+    static bool romPathToSavePath(const char *romPath, char *out, size_t outLen);
     bool loadROM(const char *path);
     void loadSaveFile(const char *romPath);
-    void writeSaveFile(const char *romPath);
+    bool writeSaveFile(const char *romPath);
 };
