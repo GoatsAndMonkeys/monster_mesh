@@ -454,20 +454,14 @@ void MonsterMeshTextBattle::sendAction(uint8_t actionType, uint8_t index)
 void MonsterMeshTextBattle::sendForfeit()
 {
     uint8_t buf[BATTLELINK_HDR_SIZE];
-    BattlePacket *pkt = (BattlePacket *)buf;
-    pkt->type = (uint8_t)PktType::TEXT_BATTLE_FORFEIT;
-    pkt->setSessionId(session_);
-    pkt->seq = 0;
+    writeBattlePacketHeader(buf, PktType::TEXT_BATTLE_FORFEIT, session_);
     transport_.queueSend(buf, sizeof(buf));
 }
 
 void MonsterMeshTextBattle::sendReady()
 {
     uint8_t buf[BATTLELINK_HDR_SIZE];
-    BattlePacket *pkt = (BattlePacket *)buf;
-    pkt->type = (uint8_t)PktType::TEXT_BATTLE_READY;
-    pkt->setSessionId(session_);
-    pkt->seq = 0;
+    writeBattlePacketHeader(buf, PktType::TEXT_BATTLE_READY, session_);
     transport_.queueSend(buf, sizeof(buf));
 }
 
@@ -2104,6 +2098,18 @@ void MonsterMeshTextBattle::serverAuthOnActionV2Pkt(uint32_t fromId,
                       (unsigned)fromId, (unsigned)remoteId_);
         return;
     }
+    // Only accept actions while the battle is actually live. Before ACCEPT
+    // (awaitingAccept_, engine is a stub with party(1).count==0) a forged
+    // ACTION would spin a bogus stub turn and prematurely leave the awaiting-
+    // accept posture; after FINISHED a replayed flee would re-forfeit and
+    // re-ship a (possibly result-flipped) final UPDATE.
+    if (awaitingAccept_ || phase_ == Phase::FINISHED ||
+        engine_.result() != Gen1BattleEngine::Result::ONGOING) {
+        Serial.printf("[MMB] DROP ACTION_V2 from=0x%08X reason=not_live "
+                      "(awaitAccept=%u phase=%d)\n",
+                      (unsigned)fromId, (unsigned)awaitingAccept_, (int)phase_);
+        return;
+    }
     Serial.printf("[MMB] server ACTION_V2 rx from=0x%08X\n", (unsigned)fromId);
 
     uint8_t turn, actionType, index, lastAckedSeq;
@@ -2151,6 +2157,16 @@ void MonsterMeshTextBattle::serverAuthOnStateRequestPkt(uint32_t fromId,
     Serial.printf("[MMB] server-auth STATE_REQUEST from=0x%08X "
                   "client_lastApplied=%u our_updateSeq=%u\n",
                   (unsigned)fromId, lastAppliedSeq, (unsigned)updateSeq_);
+    // Rate-limit FULL_STATE replies: a hostile bound peer could otherwise spam
+    // STATE_REQUEST to make us flood the airwaves with full snapshots. The
+    // client retransmits its request, so a dropped reply is recovered next tick.
+    uint32_t now = millis();
+    if (lastFullStateMs_ && (now - lastFullStateMs_) < TB_FULLSTATE_MIN_MS) {
+        Serial.printf("[MMB] STATE_REQUEST throttled (%ums since last FULL_STATE)\n",
+                      (unsigned)(now - lastFullStateMs_));
+        return;
+    }
+    lastFullStateMs_ = now;
     serverAuthSendFullState();
 }
 
@@ -2226,16 +2242,20 @@ void MonsterMeshTextBattle::clientAuthOnChallengePkt(uint32_t fromId,
         return;
     }
 
-    // Duplicate CHALLENGE arriving after we've already ACCEPTed — server's
-    // CHALLENGE-retransmit ran longer than our ACCEPT made it back, or
-    // both arrived in the same cycle. Re-emit ACCEPT and don't reset
-    // state.
+    // Duplicate/stale/forged CHALLENGE for a session we're already engaged in.
+    // Once we're past the accept overlay, a same-session CHALLENGE must NOT
+    // reset an in-progress (or finished) battle: a single replayed or forged
+    // CHALLENGE would otherwise wipe log_/lastAppliedUpdateSeq_/participantMask_
+    // and throw the client back to the accept overlay while the server is mid-
+    // battle -> guaranteed desync + XP-bookkeeping reset. Re-emit ACCEPT only
+    // while the server may still be waiting for it (awaitingFirstUpdate_).
     if (mode_ != Mode::OFF && role_ == Role::CLIENT &&
-        awaitingFirstUpdate_ && pkt->sessionId() == session_) {
-        Serial.printf("[MMB] CHALLENGE re-rx for our active session "
-                      "(0x%04X) — re-emitting ACCEPT\n",
-                      (unsigned)session_);
-        clientAuthSendAccept(true);
+        pkt->sessionId() == session_ &&
+        phase_ != Phase::WAIT_CHALLENGE_OVERLAY) {
+        Serial.printf("[MMB] CHALLENGE re-rx for engaged session (0x%04X) "
+                      "phase=%d — not resetting\n",
+                      (unsigned)session_, (int)phase_);
+        if (awaitingFirstUpdate_) clientAuthSendAccept(true);
         return;
     }
 
@@ -2486,7 +2506,15 @@ void MonsterMeshTextBattle::clientAuthOnUpdatePkt(uint32_t fromId,
     // retransmit advanced the server's turn counter with garbage on the
     // client's side of the engine.
     uint8_t seq = pkt->seq;
-    if (seq == lastAppliedUpdateSeq_ && lastAppliedUpdateSeq_ != 0) {
+    // Monotonic guard: drop any UPDATE whose seq is not strictly NEWER than the
+    // last we applied (mod-256, half-window). The old equality-only check let a
+    // replayed or out-of-order EARLIER UPDATE (e.g. seq 5 after 20) roll engine
+    // state back — reviving a fainted enemy so the next real UPDATE re-credits
+    // its faint XP (unbounded XP farming). Server seq starts at 1 (++updateSeq_)
+    // so lastApplied==0 never false-drops the first UPDATE. Re-emit our action /
+    // a pure-ACK so the server can still clear unackedUpdate_.
+    if (seq == lastAppliedUpdateSeq_ ||
+        (uint8_t)(seq - lastAppliedUpdateSeq_) > 128) {
         if (clientActionType_ != 0xFF) {
             clientAuthSendActionV2(clientActionType_, clientActionIndex_);
         } else {
@@ -2893,11 +2921,8 @@ void MonsterMeshTextBattle::clientAuthSendStateRequest()
 {
     uint8_t buf[BATTLELINK_HDR_SIZE + TB_STATE_REQUEST_BYTES];
     memset(buf, 0, sizeof(buf));
-    BattlePacket *pkt = (BattlePacket *)buf;
-    pkt->type = (uint8_t)PktType::TEXT_BATTLE_STATE_REQUEST;
-    pkt->setSessionId(session_);
-    pkt->seq = 0;
-    tbPackStateRequest(pkt->payload, lastAppliedUpdateSeq_);
+    writeBattlePacketHeader(buf, PktType::TEXT_BATTLE_STATE_REQUEST, session_);
+    tbPackStateRequest(buf + BATTLELINK_HDR_SIZE, lastAppliedUpdateSeq_);
     transport_.queueSend(buf, sizeof(buf));
 }
 

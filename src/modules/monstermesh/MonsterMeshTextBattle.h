@@ -399,6 +399,11 @@ private:
     // SERVER: CHALLENGE retransmit until ACCEPT arrives.
     uint32_t lastChallengeMs_ = 0;
     uint8_t  challengeTries_  = 0;
+
+    // SERVER: rate-limit FULL_STATE replies to STATE_REQUEST so a hostile peer
+    // can't spam us into flooding full snapshots over the air.
+    uint32_t lastFullStateMs_ = 0;
+    static constexpr uint32_t TB_FULLSTATE_MIN_MS = 2000;
     bool     awaitingAccept_  = false;
 
     // SERVER: UPDATE retransmit until client's next ACTION_V2 acks the seq.
