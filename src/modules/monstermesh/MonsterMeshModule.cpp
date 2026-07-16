@@ -4070,11 +4070,18 @@ int32_t MonsterMeshModule::runOnce()
                 cpuParty.mons[i].exp[0] = (exp >> 16) & 0xFF;
                 cpuParty.mons[i].exp[1] = (exp >> 8)  & 0xFF;
                 cpuParty.mons[i].exp[2] =  exp        & 0xFF;
-                // Average DVs (8 across the board) — daycare beacons don't
-                // carry DVs, and a fair fight against an unknown party is
-                // best served by a vanilla baseline.
-                cpuParty.mons[i].dvs[0] = 0x88;
-                cpuParty.mons[i].dvs[1] = 0x88;
+                // Match a save-loaded (trained) player: max DVs + full
+                // stat-exp. Beacons don't carry DVs/EVs, so a "vanilla" CPU
+                // (DV8, zero stat-exp) was ~60% frailer than the player's
+                // real party — a trained L50 would beat an untrained L60 in
+                // 1-3 hits. Give the CPU parity. Tunable if too tough.
+                cpuParty.mons[i].dvs[0] = 0xFF;
+                cpuParty.mons[i].dvs[1] = 0xFF;
+                cpuParty.mons[i].hpExp[0]  = cpuParty.mons[i].hpExp[1]  = 0xFF;
+                cpuParty.mons[i].atkExp[0] = cpuParty.mons[i].atkExp[1] = 0xFF;
+                cpuParty.mons[i].defExp[0] = cpuParty.mons[i].defExp[1] = 0xFF;
+                cpuParty.mons[i].spdExp[0] = cpuParty.mons[i].spdExp[1] = 0xFF;
+                cpuParty.mons[i].spcExp[0] = cpuParty.mons[i].spcExp[1] = 0xFF;
                 // Copy nickname (already ASCII in the beacon).
                 for (uint8_t j = 0; j < 10 && n.party[i].nickname[j]; ++j) {
                     cpuParty.nicknames[i][j] = (uint8_t)n.party[i].nickname[j];
@@ -4128,8 +4135,14 @@ int32_t MonsterMeshModule::runOnce()
                 cpuParty.mons[i].exp[0] = (exp >> 16) & 0xFF;
                 cpuParty.mons[i].exp[1] = (exp >> 8)  & 0xFF;
                 cpuParty.mons[i].exp[2] =  exp        & 0xFF;
-                cpuParty.mons[i].dvs[0] = 0x88;
-                cpuParty.mons[i].dvs[1] = 0x88;
+                // Parity with a trained player (see daycare-peer branch).
+                cpuParty.mons[i].dvs[0] = 0xFF;
+                cpuParty.mons[i].dvs[1] = 0xFF;
+                cpuParty.mons[i].hpExp[0]  = cpuParty.mons[i].hpExp[1]  = 0xFF;
+                cpuParty.mons[i].atkExp[0] = cpuParty.mons[i].atkExp[1] = 0xFF;
+                cpuParty.mons[i].defExp[0] = cpuParty.mons[i].defExp[1] = 0xFF;
+                cpuParty.mons[i].spdExp[0] = cpuParty.mons[i].spdExp[1] = 0xFF;
+                cpuParty.mons[i].spcExp[0] = cpuParty.mons[i].spcExp[1] = 0xFF;
             }
             snprintf(rivalTag, sizeof(rivalTag), "CPU");
             LOG_INFO("[MonsterMesh] fight 0: PvPC foe scaled to you (%u mons, ~L%d)\n",

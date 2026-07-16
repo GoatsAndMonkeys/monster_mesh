@@ -1,5 +1,6 @@
 // ── Pokemon Daycare — Main Orchestrator ─────────────────────────────────────
-// NOT wired into build yet — standalone for validation.
+// Wired into MonsterMeshModule (check-in, hourly event cycle, beacons, SAV
+// writeback). See MonsterMeshModule.cpp forceEvent/forceBeacon callbacks.
 
 #include "PokemonDaycare.h"
 #include "AtomicSdFile.h"
@@ -17,9 +18,6 @@ static constexpr uint32_t NEIGHBOR_TIMEOUT_MS   = 7200000;   // 2 hours = neighb
 static constexpr uint32_t DECAY_INTERVAL_MS     = 86400000;  // 1 day
 static constexpr uint32_t SAVE_INTERVAL_MS      = 300000;    // 5 min autosave
 static constexpr uint32_t MOOD_UPDATE_MS        = 60000;     // 1 min mood check
-
-static constexpr uint16_t DAILY_XP_CAP          = 500;
-static constexpr uint8_t  XP_PER_LEVEL          = 100;       // simplified level calc
 
 // ── Init ────────────────────────────────────────────────────────────────────
 

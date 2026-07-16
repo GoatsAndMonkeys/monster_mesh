@@ -14,7 +14,7 @@
 
 static inline uint32_t rotl32(uint32_t x, int k) { return (x << k) | (x >> (32 - k)); }
 
-const Gen1MoveData *Gen1BattleEngine::mdata(uint8_t id) const {
+const Gen1MoveData *Gen1BattleEngine::mdata(uint16_t id) const {
     return isGen3() ? gen3Move(id) : gen1Move(id);
 }
 
@@ -39,7 +39,10 @@ bool    Gen1BattleEngine::percent(uint8_t p) { return (rand32() % 100) < p; }
 // IVs: 4 bits each (HP IV is parity bits of Atk/Def/Spd/Spc IVs).
 
 static uint16_t isqrt16(uint32_t v) {
-    uint32_t r = 0, b = 1u << 15;
+    // b must start as the largest power of FOUR (even exponent) >= v; 2^15 is
+    // an odd power of two, which misaligns the bit-search and inflates every
+    // result by ~sqrt(2). 2^30 covers any 32-bit input.
+    uint32_t r = 0, b = 1u << 30;
     while (b > v) b >>= 2;
     while (b) {
         if (v >= r + b) { v -= r + b; r = (r >> 1) + b; }
@@ -400,6 +403,7 @@ uint16_t Gen1BattleEngine::calcDamage(uint8_t side, uint8_t targetSide,
 
     // Gen 1 crit = double level; Gen 2/3 crit = x2 final damage.
     int32_t L = (outCrit && !g3) ? atk.level * 2 : atk.level;
+    if (D < 1) D = 1;   // never divide by a 0 defense stat (hostile wire or corrupt save)
     int32_t dmg = (((2 * L / 5 + 2) * mv.power * A) / D) / 50 + 2;
     if (outCrit && g3) dmg *= 2;
 
@@ -562,7 +566,8 @@ void Gen1BattleEngine::useMove(uint8_t side, uint8_t moveSlot, LogSink log, void
         if (percent(50)) {
             emit(log, ctx, "[POKEMON] hurt itself in confusion!", user.nickname);
             // Self-hit: 40-power typeless physical attack.
-            uint16_t self = ((2 * user.level / 5 + 2) * 40 * user.atk / user.def) / 50 + 2;
+            uint16_t denom = user.def ? user.def : 1;   // guard 0-def divide
+            uint16_t self = ((2 * user.level / 5 + 2) * 40 * user.atk / denom) / 50 + 2;
             if (self > user.hp) user.hp = 0; else user.hp -= self;
             return;
         }

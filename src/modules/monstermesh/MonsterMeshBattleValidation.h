@@ -35,6 +35,7 @@ enum class TbPartyValidationError : uint8_t {
     INVALID_SPECIES,
     INVALID_LEVEL,
     INVALID_MOVE,
+    INVALID_STAT,
 };
 
 // ── V1 Gen-1 internal-species party (legacy PARTY_MIN / MMB chunk path) ────────
@@ -172,6 +173,11 @@ static inline bool tbValidateWireParty(const Gen1BattleEngine::WireParty &party,
             return fail(TbPartyValidationError::INVALID_SPECIES);
         if (m.level == 0 || m.level > 100)
             return fail(TbPartyValidationError::INVALID_LEVEL);
+        // 0 stat -> divide-by-zero in calcDamage; >999 unreachable in Gen 1-3.
+        const uint16_t st[6] = { m.maxHp, m.atk, m.def, m.spe, m.spa, m.spd };
+        for (uint8_t s = 0; s < 6; ++s)
+            if (st[s] == 0 || st[s] > 999)
+                return fail(TbPartyValidationError::INVALID_STAT);
         for (uint8_t k = 0; k < 4; ++k) {
             if (!tbIsValidWireMove(m.moves[k], gen))
                 return fail(TbPartyValidationError::INVALID_MOVE);
@@ -213,6 +219,14 @@ static inline bool tbUnpackAndValidateWireParty(const uint8_t *in, size_t len,
         const uint8_t level = p[2];
         if (level == 0 || level > 100)
             return fail(TbPartyValidationError::INVALID_LEVEL);
+        // Stats are used verbatim by the engine. A 0 defense/special stat is a
+        // divide-by-zero in calcDamage; >999 is unreachable in Gen 1-3 (Blissey
+        // L100 HP=714). Reject both to close the remote-crash + cheating vector.
+        for (uint8_t s = 0; s < 6; ++s) {
+            const uint16_t st = wireRd16(p + 3 + s * 2);
+            if (st == 0 || st > 999)
+                return fail(TbPartyValidationError::INVALID_STAT);
+        }
         for (uint8_t k = 0; k < 4; ++k) {
             if (!tbIsValidWireMove(wireRd16(p + 15 + k * 2), gen))
                 return fail(TbPartyValidationError::INVALID_MOVE);

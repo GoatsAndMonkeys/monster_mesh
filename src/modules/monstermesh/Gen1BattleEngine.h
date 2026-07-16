@@ -199,7 +199,7 @@ private:
     bool     isGen3() const { return gen_ >= 3; }
     // Move data for the active mechanics generation (gen3 re-types the
     // same 165 ids; effects+PP identical, so safe everywhere).
-    const Gen1MoveData *mdata(uint8_t id) const;
+    const Gen1MoveData *mdata(uint16_t id) const;
     uint16_t calcDamage(uint8_t side, uint8_t targetSide,
                         const Gen1MoveData &mv, bool &outCrit);
     uint8_t  effectiveness(uint8_t atkType, uint8_t defType) const;
